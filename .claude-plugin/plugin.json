@@ -1,0 +1,21 @@
+{
+  "name": "zc-ctx",
+  "version": "0.1.0",
+  "description": "Secure context optimization for Claude Code — sandbox execution, FTS5 knowledge base, session continuity. No credential leakage, no self-modifying hooks, no cloud sync.",
+  "marketplace": "zeroclaw",
+  "type": "mcp",
+  "mcp": {
+    "command": "node",
+    "args": ["dist/server.js"],
+    "cwd": "."
+  },
+  "hooks": {
+    "PreToolUse": ["hooks/pretooluse.mjs"],
+    "PostToolUse": ["hooks/posttooluse.mjs"]
+  },
+  "permissions": {
+    "filesystem": ["~/.claude/zc-ctx/"],
+    "network": true,
+    "shell": true
+  }
+}
