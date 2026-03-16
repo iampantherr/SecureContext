@@ -2,6 +2,8 @@
 // SECURITY: We block SSRF — requests to loopback, private IPs, and cloud metadata
 //           endpoints are rejected both by hostname AND by DNS resolution.
 //           DNS-based SSRF check closes the DNS rebinding gap in pure hostname checks.
+// SECURITY: We follow redirects manually (redirect:"manual") and re-validate each hop
+//           against SSRF rules. Without this, 302 → internal-ip bypasses hostname checks.
 
 import { resolve4, resolve6 } from "node:dns/promises";
 
@@ -19,6 +21,7 @@ const BLOCKED_HEADERS = new Set([
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MB
+const MAX_REDIRECTS = 5; // per-hop SSRF re-validation
 
 export interface FetchResult {
   url: string;
@@ -221,30 +224,70 @@ export async function fetchAndConvert(
   await assertNotSSRFByDNS(parsed);
 
   const safeHeaders = sanitizeHeaders({
-    "User-Agent": "zc-ctx/0.1.0 (Claude Code context plugin)",
+    "User-Agent": "zc-ctx/0.4.0 (Claude Code context plugin)",
     "Accept": "text/html,text/plain,application/json",
     ...extraHeaders,
   });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  // SECURITY: Manual redirect following — each redirect target is re-validated against
+  // SSRF rules (hostname blocklist + DNS resolution). Without this, a server returning
+  // "302 → http://169.254.169.254/" would bypass the initial SSRF check on the original URL.
+  let currentUrl = url;
+  let response!: Response;
 
-  let response: Response;
-  try {
-    // SECURITY: redirect:"follow" is default but each redirect target is NOT re-validated.
-    // We use redirect:"follow" for usability, but note DNS rebinding remains a theoretical
-    // risk. A full fix would require manual redirect handling with re-validation on each hop.
-    response = await fetch(url, {
-      headers: safeHeaders,
-      signal: controller.signal,
-      redirect: "follow",
-    });
-  } finally {
-    clearTimeout(timer);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    try {
+      response = await fetch(currentUrl, {
+        headers: safeHeaders,
+        signal: controller.signal,
+        redirect: "manual", // Never auto-follow — we validate each hop manually
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // Handle HTTP redirects manually
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      if (!location) break; // No Location header — treat as final response
+
+      if (hop === MAX_REDIRECTS) {
+        throw new Error(
+          `SSRF protection: too many redirects (>${MAX_REDIRECTS}) — possible redirect loop or evasion attempt`
+        );
+      }
+
+      // Resolve relative URLs (e.g., "/path" relative to current origin)
+      let redirectParsed: URL;
+      try {
+        redirectParsed = new URL(location, currentUrl);
+      } catch {
+        throw new Error(`Invalid redirect URL from server: ${location}`);
+      }
+
+      if (!["http:", "https:"].includes(redirectParsed.protocol)) {
+        throw new Error(
+          `SSRF blocked: redirect to non-HTTP protocol '${redirectParsed.protocol}'`
+        );
+      }
+
+      // SECURITY: Re-validate redirect target — same rules as the original URL
+      assertNotSSRFByHostname(redirectParsed);
+      await assertNotSSRFByDNS(redirectParsed);
+
+      currentUrl = redirectParsed.href;
+      continue;
+    }
+
+    // Not a redirect — break and process response
+    break;
   }
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText} for ${url}`);
+    throw new Error(`HTTP ${response.status} ${response.statusText} for ${currentUrl}`);
   }
 
   const contentType = response.headers.get("content-type") ?? "";

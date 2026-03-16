@@ -11,7 +11,8 @@
   },
   "hooks": {
     "PreToolUse": ["hooks/pretooluse.mjs"],
-    "PostToolUse": ["hooks/posttooluse.mjs"]
+    "PostToolUse": ["hooks/posttooluse.mjs"],
+    "Stop": ["hooks/stop.mjs"]
   },
   "permissions": {
     "filesystem": ["~/.claude/zc-ctx/"],

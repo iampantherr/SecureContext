@@ -1,20 +1,26 @@
 // Uses Node.js 22+ built-in sqlite — no native compilation, no npm package required
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const DB_DIR = join(homedir(), ".claude", "zc-ctx", "sessions");
 
-export type EventType = "file_write" | "file_edit" | "task_complete" | "error" | "fetch";
+export type EventType = "file_write" | "file_edit" | "task_complete" | "error" | "fetch" | "session_ended";
 
 export interface SessionEvent {
   event_type: EventType;
   file_path?: string;
   task_name?: string;
   error_type?: string;
+  created_at?: string; // present in JSONL events from hooks
   // SECURITY: No content/output fields — we never store file contents or command output
+}
+
+function getEventLogPath(projectPath: string): string {
+  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return join(DB_DIR, `${hash}.events.jsonl`);
 }
 
 function dbPath(projectPath: string): string {
@@ -94,15 +100,24 @@ export function recordEvent(projectPath: string, event: SessionEvent): void {
 }
 
 export function getRecentEvents(projectPath: string, limit = 50): SessionEvent[] {
-  const db = openDb(projectPath);
-  const sessionId = getOrCreateSession(projectPath);
+  // Read from the JSONL event log written by hooks (posttooluse.mjs, stop.mjs).
+  // The hooks write minimal metadata events there; this is the source of truth for
+  // zc_recall_context(). Falls back to empty if the log doesn't exist yet.
+  const logPath = getEventLogPath(projectPath);
+  if (!existsSync(logPath)) return [];
 
-  const rows = db.prepare(
-    `SELECT event_type, file_path, task_name, error_type
-     FROM events WHERE session_id = ?
-     ORDER BY created_at DESC LIMIT ?`
-  ).all(sessionId, limit) as unknown as SessionEvent[];
-
-  db.close();
-  return rows;
+  try {
+    const lines = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+    // Return the last `limit` events, newest first
+    return lines
+      .slice(-limit)
+      .reverse()
+      .map((line) => {
+        try { return JSON.parse(line) as SessionEvent; }
+        catch { return null; }
+      })
+      .filter((e): e is SessionEvent => e !== null);
+  } catch {
+    return [];
+  }
 }

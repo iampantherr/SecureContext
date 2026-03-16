@@ -13,7 +13,7 @@ import { getRecentEvents } from "./session.js";
 import { rememberFact, recallWorkingMemory, archiveSessionSummary, formatWorkingMemoryForContext } from "./memory.js";
 import { checkIntegrity } from "./integrity.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const PROJECT_PATH = cwd();
 
 // ─── Startup integrity check ─────────────────────────────────────────────────
@@ -243,7 +243,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         checkFetchLimit(PROJECT_PATH);
         const fetched = await fetchAndConvert(url);
         const label = source ?? fetched.title ?? url;
-        indexContent(PROJECT_PATH, fetched.markdown, label);
+        // SECURITY: tag web-fetched content as 'external' — search results will show
+        // [UNTRUSTED EXTERNAL CONTENT] prefix so the agent doesn't blindly trust it.
+        indexContent(PROJECT_PATH, fetched.markdown, label, "external");
         const remaining = FETCH_LIMIT - (fetchCounts.get(PROJECT_PATH) ?? 0);
         return {
           content: [{
@@ -275,7 +277,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const vecInfo = r.vectorScore !== undefined
             ? ` | cosine: ${r.vectorScore.toFixed(3)}`
             : " | BM25 only";
-          return `### Result ${i + 1}: ${r.source}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
+          const trustBadge = r.sourceType === "external" ? " [EXTERNAL]" : "";
+          const nonAsciiBadge = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
+          return `### Result ${i + 1}: ${r.source}${trustBadge}${nonAsciiBadge}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
         }).join("\n\n---\n\n");
         return { content: [{ type: "text", text: formatted }] };
       }
@@ -301,7 +305,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sections.push("## Knowledge Base Results");
           for (const r of searchResults) {
             const vecInfo = r.vectorScore !== undefined ? ` (cosine: ${r.vectorScore.toFixed(3)})` : "";
-            sections.push(`### ${r.source}${vecInfo}\n${r.snippet}`);
+            const trustBadge = r.sourceType === "external" ? " [EXTERNAL]" : "";
+            const nonAsciiBadge = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
+            sections.push(`### ${r.source}${trustBadge}${nonAsciiBadge}${vecInfo}\n${r.snippet}`);
           }
         }
         return { content: [{ type: "text", text: sections.join("\n\n") }] };
@@ -334,6 +340,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               parts.push(`- completed: ${e.task_name}`);
             else if (e.event_type === "error" && e.error_type)
               parts.push(`- error: ${e.error_type}`);
+            else if (e.event_type === "session_ended")
+              parts.push(`- [SESSION BOUNDARY] previous conversation ended at ${e.created_at}`);
           }
         } else {
           parts.push("\n## Recent Session Events\nNo events recorded yet.");
