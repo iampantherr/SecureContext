@@ -10,27 +10,58 @@ import { runInSandbox, runFileInSandbox } from "./sandbox.js";
 import { indexContent, searchKnowledge } from "./knowledge.js";
 import { fetchAndConvert } from "./fetcher.js";
 import { getRecentEvents } from "./session.js";
+import { rememberFact, recallWorkingMemory, archiveSessionSummary, formatWorkingMemoryForContext } from "./memory.js";
+import { checkIntegrity } from "./integrity.js";
 
+const VERSION = "0.3.0";
 const PROJECT_PATH = cwd();
 
+// ─── Startup integrity check ─────────────────────────────────────────────────
+const integrity = checkIntegrity(VERSION);
+if (integrity.firstRun) {
+  process.stderr.write("[zc-ctx] Integrity baseline established for v" + VERSION + "\n");
+} else if (!integrity.ok) {
+  // Log to stderr — visible in Claude Code's MCP log, doesn't crash the plugin
+  for (const w of integrity.warnings) {
+    process.stderr.write(`[zc-ctx] ⚠️  INTEGRITY WARNING: ${w}\n`);
+  }
+}
+
+// ─── Fetch rate limiting ──────────────────────────────────────────────────────
+// Per-session in-memory counter. Prevents zc_fetch being used as a web crawler
+// or network scanner. Resets when the MCP server process restarts (per session).
+// SECURITY: rate limiting by project path (each project has its own limit)
+const fetchCounts = new Map<string, number>();
+const FETCH_LIMIT = 50;
+
+function checkFetchLimit(projectPath: string): void {
+  const count = fetchCounts.get(projectPath) ?? 0;
+  if (count >= FETCH_LIMIT) {
+    throw new Error(
+      `Fetch rate limit reached: ${FETCH_LIMIT} fetches per session. ` +
+      `Use zc_index to manually add content instead.`
+    );
+  }
+  fetchCounts.set(projectPath, count + 1);
+}
+
+// ─── Tool definitions ─────────────────────────────────────────────────────────
 const TOOLS: Tool[] = [
   {
     name: "zc_execute",
     description:
-      "Run code in a secure isolated sandbox. No credentials are available inside the sandbox. " +
-      "Supports: python, javascript, bash. Hard limits: 30s timeout, 512KB stdout.",
+      "Run code in a secure isolated sandbox. Code is delivered via stdin (not visible in process list). " +
+      "No credentials in the sandbox environment — only PATH. " +
+      "Hard limits: 30s timeout, 512KB stdout cap, 64KB stderr cap. " +
+      "Supported languages: python, javascript, bash.",
     inputSchema: {
       type: "object",
       properties: {
         language: {
           type: "string",
           enum: ["python", "python3", "javascript", "js", "bash", "sh"],
-          description: "Programming language to execute",
         },
-        code: {
-          type: "string",
-          description: "Code to execute",
-        },
+        code: { type: "string", description: "Code to execute" },
       },
       required: ["language", "code"],
     },
@@ -38,24 +69,14 @@ const TOOLS: Tool[] = [
   {
     name: "zc_execute_file",
     description:
-      "Run analysis code against a specific file path in the sandbox. " +
-      "The file path is injected as TARGET_FILE variable in the analysis code.",
+      "Run analysis code against a specific file in the sandbox. " +
+      "TARGET_FILE variable is injected with the absolute path.",
     inputSchema: {
       type: "object",
       properties: {
-        path: {
-          type: "string",
-          description: "Absolute path to the file to analyze",
-        },
-        language: {
-          type: "string",
-          enum: ["python", "python3"],
-          description: "Language of the analysis code (python only)",
-        },
-        code: {
-          type: "string",
-          description: "Analysis code. Use TARGET_FILE variable for the file path.",
-        },
+        path:     { type: "string" },
+        language: { type: "string", enum: ["python", "python3"] },
+        code:     { type: "string", description: "Analysis code using TARGET_FILE" },
       },
       required: ["path", "language", "code"],
     },
@@ -63,38 +84,28 @@ const TOOLS: Tool[] = [
   {
     name: "zc_fetch",
     description:
-      "Fetch a URL, convert to markdown, and index into the session knowledge base. " +
-      "Credential headers (Authorization, Cookie, X-Api-Key) are stripped automatically.",
+      "Fetch a public URL, convert to markdown, and index into the knowledge base. " +
+      "Private IPs, localhost, and cloud metadata endpoints (AWS/GCP/Azure) are blocked. " +
+      "DNS resolution is checked to prevent rebinding attacks. " +
+      "Credential headers are stripped automatically. " +
+      "Rate limited to 50 fetches per session.",
     inputSchema: {
       type: "object",
       properties: {
-        url: {
-          type: "string",
-          description: "URL to fetch (http/https only)",
-        },
-        source: {
-          type: "string",
-          description: "Optional label for this knowledge entry (defaults to URL)",
-        },
+        url:    { type: "string", description: "Public URL to fetch (http/https only)" },
+        source: { type: "string", description: "Optional label for this KB entry" },
       },
       required: ["url"],
     },
   },
   {
     name: "zc_index",
-    description:
-      "Manually index text content into the session knowledge base for later search.",
+    description: "Manually index text into the session knowledge base for later hybrid search.",
     inputSchema: {
       type: "object",
       properties: {
-        content: {
-          type: "string",
-          description: "Text content to index",
-        },
-        source: {
-          type: "string",
-          description: "Label/identifier for this content entry",
-        },
+        content: { type: "string" },
+        source:  { type: "string", description: "Label for this content entry" },
       },
       required: ["content", "source"],
     },
@@ -102,15 +113,16 @@ const TOOLS: Tool[] = [
   {
     name: "zc_search",
     description:
-      "Full-text BM25 search across the session knowledge base. " +
-      "Pass multiple queries to search for several topics at once.",
+      "Hybrid BM25 + semantic vector search across the knowledge base. " +
+      "If Ollama (nomic-embed-text) is running locally, cosine similarity reranking is applied. " +
+      "Falls back to pure BM25 if Ollama is unavailable. " +
+      "Pass multiple queries to search several topics at once.",
     inputSchema: {
       type: "object",
       properties: {
         queries: {
           type: "array",
           items: { type: "string" },
-          description: "One or more search queries",
           minItems: 1,
         },
       },
@@ -120,8 +132,8 @@ const TOOLS: Tool[] = [
   {
     name: "zc_batch",
     description:
-      "Execute shell commands in sandbox AND search the knowledge base in a single call. " +
-      "Ideal for research tasks: run commands to gather data while searching existing knowledge.",
+      "Execute shell commands in sandbox AND search the knowledge base in one parallel call. " +
+      "Ideal for research: run commands while retrieving existing knowledge simultaneously.",
     inputSchema: {
       type: "object",
       properties: {
@@ -130,26 +142,78 @@ const TOOLS: Tool[] = [
           items: {
             type: "object",
             properties: {
-              label: { type: "string", description: "Human-readable label for this command" },
-              command: { type: "string", description: "Shell command to run" },
+              label:   { type: "string" },
+              command: { type: "string" },
             },
             required: ["label", "command"],
           },
-          description: "List of labeled bash commands to run in sandbox",
         },
         queries: {
           type: "array",
           items: { type: "string" },
-          description: "Knowledge base search queries",
         },
       },
       required: ["commands", "queries"],
     },
   },
+  {
+    name: "zc_remember",
+    description:
+      "Store a key-value fact in working memory (MemGPT-style). " +
+      "Working memory is bounded (50 facts max) — lowest-importance facts are auto-evicted to " +
+      "archival memory (the KB) when full. Use importance 5 for critical facts (API decisions, " +
+      "architecture choices), 1 for ephemeral notes. " +
+      "Facts survive MCP server restarts within a project.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key:        { type: "string", description: "Short identifier for this fact (max 100 chars)" },
+        value:      { type: "string", description: "The fact to remember (max 500 chars)" },
+        importance: {
+          type: "integer",
+          minimum: 1,
+          maximum: 5,
+          description: "1=ephemeral, 3=normal, 5=critical — drives eviction priority",
+        },
+      },
+      required: ["key", "value"],
+    },
+  },
+  {
+    name: "zc_recall_context",
+    description:
+      "Recall current working memory and recent session events. " +
+      "Call this at the start of a session to restore project context without reading files. " +
+      "Returns: working memory facts (importance-ranked) + last 20 session events.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "zc_summarize_session",
+    description:
+      "Archive a session summary to long-term memory (MemGPT session eviction). " +
+      "Call this when a significant task is complete. The summary is stored in the knowledge " +
+      "base (searchable via zc_search) and promoted to high-importance working memory. " +
+      "Future sessions can recall this context via zc_recall_context or zc_search.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        summary: {
+          type: "string",
+          description: "2–5 sentence summary of what was accomplished, key decisions made, and current state",
+        },
+      },
+      required: ["summary"],
+    },
+  },
 ];
 
+// ─── Server setup ─────────────────────────────────────────────────────────────
 const server = new Server(
-  { name: "zc-ctx", version: "0.1.0" },
+  { name: "zc-ctx", version: VERSION },
   { capabilities: { tools: {} } }
 );
 
@@ -160,75 +224,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+
       case "zc_execute": {
         const { language, code } = args as { language: string; code: string };
         const result = await runInSandbox(language, code);
-        return {
-          content: [
-            {
-              type: "text",
-              text: formatSandboxResult(result),
-            },
-          ],
-        };
+        return { content: [{ type: "text", text: formatSandboxResult(result) }] };
       }
 
       case "zc_execute_file": {
-        const { path, language, code } = args as {
-          path: string;
-          language: string;
-          code: string;
-        };
+        const { path, language, code } = args as { path: string; language: string; code: string };
         const result = await runFileInSandbox(path, language, code);
-        return {
-          content: [{ type: "text", text: formatSandboxResult(result) }],
-        };
+        return { content: [{ type: "text", text: formatSandboxResult(result) }] };
       }
 
       case "zc_fetch": {
         const { url, source } = args as { url: string; source?: string };
+        // SECURITY: rate limit check BEFORE making any network call
+        checkFetchLimit(PROJECT_PATH);
         const fetched = await fetchAndConvert(url);
         const label = source ?? fetched.title ?? url;
         indexContent(PROJECT_PATH, fetched.markdown, label);
+        const remaining = FETCH_LIMIT - (fetchCounts.get(PROJECT_PATH) ?? 0);
         return {
-          content: [
-            {
-              type: "text",
-              text:
-                `## Fetched: ${fetched.title}\n` +
-                `Source: ${fetched.url}\n` +
-                `Size: ${(fetched.byteSize / 1024).toFixed(1)} KB\n` +
-                `Indexed as: "${label}"\n\n` +
-                fetched.markdown.slice(0, 8_000),
-            },
-          ],
+          content: [{
+            type: "text",
+            text:
+              `## Fetched: ${fetched.title}\n` +
+              `Source: ${fetched.url}\n` +
+              `Size: ${(fetched.byteSize / 1024).toFixed(1)} KB | ` +
+              `Fetches remaining this session: ${remaining}\n` +
+              `Indexed as: "${label}"\n\n` +
+              fetched.markdown.slice(0, 8_000),
+          }],
         };
       }
 
       case "zc_index": {
         const { content, source } = args as { content: string; source: string };
         indexContent(PROJECT_PATH, content, source);
-        return {
-          content: [{ type: "text", text: `Indexed "${source}" (${content.length} chars)` }],
-        };
+        return { content: [{ type: "text", text: `Indexed "${source}" (${content.length} chars). Embedding computing in background.` }] };
       }
 
       case "zc_search": {
         const { queries } = args as { queries: string[] };
-        const results = searchKnowledge(PROJECT_PATH, queries);
+        const results = await searchKnowledge(PROJECT_PATH, queries);
         if (results.length === 0) {
-          return {
-            content: [{ type: "text", text: "No results found in knowledge base." }],
-          };
+          return { content: [{ type: "text", text: "No results found in knowledge base." }] };
         }
-        const formatted = results
-          .map(
-            (r, i) =>
-              `### Result ${i + 1}: ${r.source}\n` +
-              `Rank: ${r.rank.toFixed(4)}\n\n` +
-              r.snippet
-          )
-          .join("\n\n---\n\n");
+        const formatted = results.map((r, i) => {
+          const vecInfo = r.vectorScore !== undefined
+            ? ` | cosine: ${r.vectorScore.toFixed(3)}`
+            : " | BM25 only";
+          return `### Result ${i + 1}: ${r.source}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
+        }).join("\n\n---\n\n");
         return { content: [{ type: "text", text: formatted }] };
       }
 
@@ -237,35 +285,82 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           commands: Array<{ label: string; command: string }>;
           queries: string[];
         };
-
-        // Run all commands in parallel (each in isolated sandbox)
         const [commandResults, searchResults] = await Promise.all([
-          Promise.all(
-            commands.map(async ({ label, command }) => {
-              const result = await runInSandbox("bash", command);
-              return { label, result };
-            })
-          ),
-          Promise.resolve(searchKnowledge(PROJECT_PATH, queries)),
+          Promise.all(commands.map(async ({ label, command }) => ({
+            label,
+            result: await runInSandbox("bash", command),
+          }))),
+          searchKnowledge(PROJECT_PATH, queries),
         ]);
 
         const sections: string[] = [];
-
         for (const { label, result } of commandResults) {
-          sections.push(
-            `## ${label}\n\n` +
-            "```\n" + formatSandboxResult(result) + "\n```"
-          );
+          sections.push(`## ${label}\n\`\`\`\n${formatSandboxResult(result)}\n\`\`\``);
         }
-
         if (searchResults.length > 0) {
           sections.push("## Knowledge Base Results");
           for (const r of searchResults) {
-            sections.push(`### ${r.source}\n${r.snippet}`);
+            const vecInfo = r.vectorScore !== undefined ? ` (cosine: ${r.vectorScore.toFixed(3)})` : "";
+            sections.push(`### ${r.source}${vecInfo}\n${r.snippet}`);
           }
         }
-
         return { content: [{ type: "text", text: sections.join("\n\n") }] };
+      }
+
+      case "zc_remember": {
+        const { key, value, importance } = args as { key: string; value: string; importance?: number };
+        rememberFact(PROJECT_PATH, key, value, importance);
+        const wm = recallWorkingMemory(PROJECT_PATH);
+        return {
+          content: [{
+            type: "text",
+            text: `Remembered: [★${importance ?? 3}] ${key}\nWorking memory: ${wm.length}/50 facts`,
+          }],
+        };
+      }
+
+      case "zc_recall_context": {
+        const wm = recallWorkingMemory(PROJECT_PATH);
+        const events = getRecentEvents(PROJECT_PATH, 20);
+
+        const parts: string[] = [formatWorkingMemoryForContext(wm)];
+
+        if (events.length > 0) {
+          parts.push("\n## Recent Session Events");
+          for (const e of events) {
+            if (e.event_type === "file_write" && e.file_path)
+              parts.push(`- wrote: ${e.file_path}`);
+            else if (e.event_type === "task_complete" && e.task_name)
+              parts.push(`- completed: ${e.task_name}`);
+            else if (e.event_type === "error" && e.error_type)
+              parts.push(`- error: ${e.error_type}`);
+          }
+        } else {
+          parts.push("\n## Recent Session Events\nNo events recorded yet.");
+        }
+
+        // Integrity status
+        if (!integrity.ok) {
+          parts.push("\n## ⚠️ Integrity Warning");
+          parts.push(integrity.warnings.join("\n"));
+        }
+
+        return { content: [{ type: "text", text: parts.join("\n") }] };
+      }
+
+      case "zc_summarize_session": {
+        const { summary } = args as { summary: string };
+        archiveSessionSummary(PROJECT_PATH, summary);
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Session summary archived to long-term memory.\n` +
+              `Searchable via: zc_search(["session summary"])\n` +
+              `Recallable via: zc_recall_context()\n\n` +
+              `Summary stored:\n${summary}`,
+          }],
+        };
       }
 
       default:
@@ -291,10 +386,10 @@ function formatSandboxResult(result: {
   truncated: boolean;
 }): string {
   const parts: string[] = [];
-  if (result.timedOut) parts.push("[TIMED OUT after 30s]");
-  if (result.truncated) parts.push("[OUTPUT TRUNCATED]");
-  if (result.stdout) parts.push(`STDOUT:\n${result.stdout}`);
-  if (result.stderr) parts.push(`STDERR:\n${result.stderr}`);
+  if (result.timedOut)  parts.push("[TIMED OUT after 30s]");
+  if (result.truncated) parts.push("[OUTPUT TRUNCATED at 512KB]");
+  if (result.stdout)    parts.push(`STDOUT:\n${result.stdout}`);
+  if (result.stderr)    parts.push(`STDERR:\n${result.stderr}`);
   parts.push(`Exit code: ${result.exitCode ?? "killed"}`);
   return parts.join("\n\n");
 }

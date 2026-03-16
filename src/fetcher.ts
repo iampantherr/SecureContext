@@ -1,6 +1,9 @@
 // SECURITY: We strip all credential headers before making any fetch request.
 // SECURITY: We block SSRF — requests to loopback, private IPs, and cloud metadata
-//           endpoints are rejected before the network call is made.
+//           endpoints are rejected both by hostname AND by DNS resolution.
+//           DNS-based SSRF check closes the DNS rebinding gap in pure hostname checks.
+
+import { resolve4, resolve6 } from "node:dns/promises";
 
 const BLOCKED_HEADERS = new Set([
   "authorization",
@@ -93,13 +96,57 @@ function isBlockedHost(hostname: string): boolean {
   return false;
 }
 
-function assertNotSSRF(parsed: URL): void {
+function assertNotSSRFByHostname(parsed: URL): void {
   if (isBlockedHost(parsed.hostname)) {
     throw new Error(
       `SSRF blocked: '${parsed.hostname}' is a reserved/internal/loopback address. ` +
       `Only public internet URLs are allowed.`
     );
   }
+}
+
+/**
+ * DNS-resolution SSRF check — closes the DNS rebinding attack vector.
+ *
+ * DNS rebinding attack: attacker.com initially resolves to public IP (passes hostname check),
+ * then resolves to 127.0.0.1 at fetch time (bypasses hostname SSRF guard).
+ * Mitigation: resolve the hostname HERE and check all returned IPs.
+ *
+ * Limitation: TOCTOU race between our DNS check and fetch's DNS lookup.
+ * Full mitigation requires intercepting the TCP socket — impractical without a proxy.
+ * This eliminates the primary rebinding vector while keeping code auditable.
+ *
+ * SECURITY: Skip resolution for literal IP addresses — isBlockedHost already handles those.
+ */
+function isLiteralIP(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(h) || /^[0-9a-f:]+$/i.test(h);
+}
+
+async function assertNotSSRFByDNS(parsed: URL): Promise<void> {
+  const hostname = parsed.hostname;
+  if (isLiteralIP(hostname)) return; // already checked by assertNotSSRFByHostname
+
+  const checkAddresses = (addresses: string[], family: string) => {
+    for (const addr of addresses) {
+      if (isBlockedHost(addr)) {
+        throw new Error(
+          `SSRF blocked: '${hostname}' resolves to ${family} address '${addr}' ` +
+          `which is a reserved/internal/loopback range.`
+        );
+      }
+    }
+  };
+
+  // Check IPv4 and IPv6 in parallel — either can expose an internal address
+  const [v4Result, v6Result] = await Promise.allSettled([
+    resolve4(hostname),
+    resolve6(hostname),
+  ]);
+
+  if (v4Result.status === "fulfilled") checkAddresses(v4Result.value, "IPv4");
+  if (v6Result.status === "fulfilled") checkAddresses(v6Result.value, "IPv6");
+  // If both DNS lookups fail → hostname doesn't resolve → fetch will fail naturally
 }
 
 // ─── Header sanitization ─────────────────────────────────────────────────────
@@ -167,8 +214,11 @@ export async function fetchAndConvert(
     throw new Error(`Blocked protocol: ${parsed.protocol}. Only http/https allowed.`);
   }
 
-  // SECURITY: Block SSRF before making any network call
-  assertNotSSRF(parsed);
+  // SECURITY: Two-layer SSRF protection:
+  // Layer 1 — hostname/IP blocklist (synchronous, covers literal IPs and known hostnames)
+  assertNotSSRFByHostname(parsed);
+  // Layer 2 — DNS resolution check (async, closes DNS rebinding attack vector)
+  await assertNotSSRFByDNS(parsed);
 
   const safeHeaders = sanitizeHeaders({
     "User-Agent": "zc-ctx/0.1.0 (Claude Code context plugin)",
