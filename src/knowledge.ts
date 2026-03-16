@@ -66,14 +66,22 @@ export function searchKnowledge(
   for (const query of queries) {
     if (!query.trim()) continue;
 
-    type Row = { source: string; content: string; rank: number };
-    const rows = db.prepare(
-      `SELECT source, content, rank
-       FROM knowledge
-       WHERE knowledge MATCH ?
-       ORDER BY rank
-       LIMIT ?`
-    ).all(query, MAX_RESULTS) as Row[];
+    // SECURITY: FTS5 MATCH throws on malformed syntax (unclosed quotes, bare *, etc.).
+    // Wrap per-query to return empty results on bad input rather than crashing.
+    let rows: Array<{ source: string; content: string; rank: number }>;
+    try {
+      type Row = { source: string; content: string; rank: number };
+      rows = db.prepare(
+        `SELECT source, content, rank
+         FROM knowledge
+         WHERE knowledge MATCH ?
+         ORDER BY rank
+         LIMIT ?`
+      ).all(query, MAX_RESULTS) as Row[];
+    } catch {
+      // Malformed FTS5 query — skip silently
+      continue;
+    }
 
     for (const row of rows) {
       if (seen.has(row.source)) continue;

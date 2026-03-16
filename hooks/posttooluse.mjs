@@ -26,6 +26,14 @@ function getSessionLogPath(projectPath) {
   return join(ZC_DIR, `${hash}.events.jsonl`);
 }
 
+// SECURITY: Strip all newlines, carriage returns, and null bytes from strings
+// stored in JSONL. Without this, a file_path containing \n would inject a
+// fake JSONL record into the event log (log injection / JSONL poisoning).
+function sanitizeForJsonl(value) {
+  if (typeof value !== "string") return "";
+  return value.replace(/[\r\n\x00]/g, " ").slice(0, 500);
+}
+
 /**
  * Extract only safe, non-content metadata from a tool response.
  * NEVER returns the actual file content or command output.
@@ -34,35 +42,34 @@ function extractSafeEvent(toolName, toolInput, toolResponse) {
   const now = new Date().toISOString();
 
   if (toolName === "Write" || toolName === "Edit" || toolName === "NotebookEdit") {
-    // Only capture: that a file was touched, which path
     const filePath = toolInput?.file_path ?? toolInput?.path ?? null;
     if (!filePath) return null;
-    return { event_type: "file_write", file_path: filePath, created_at: now };
+    // SECURITY: sanitize file_path to prevent JSONL injection
+    return { event_type: "file_write", file_path: sanitizeForJsonl(filePath), created_at: now };
   }
 
   if (toolName === "Bash") {
-    // Only capture errors — and only the error type, not the output
     const exitCode = toolResponse?.exit_code ?? toolResponse?.exitCode;
     if (exitCode !== 0 && exitCode !== null && exitCode !== undefined) {
-      // Extract just the error class from stderr (first line, truncated to 120 chars)
       const stderr = toolResponse?.stderr ?? toolResponse?.error ?? "";
-      const errorType = String(stderr).split("\n")[0].slice(0, 120);
+      // SECURITY: sanitize errorType to prevent JSONL injection
+      const errorType = sanitizeForJsonl(String(stderr).split("\n")[0]);
       return { event_type: "error", error_type: errorType, created_at: now };
     }
-    return null; // Successful bash commands: capture nothing
+    return null;
   }
 
   if (toolName === "TodoWrite") {
-    // Only capture task completion events — not task content
     const todos = toolInput?.todos ?? [];
     const completedTasks = todos
       .filter((t) => t.status === "completed")
-      .map((t) => String(t.content ?? "").slice(0, 80));
+      // SECURITY: sanitize task names to prevent JSONL injection
+      .map((t) => sanitizeForJsonl(String(t.content ?? "")).slice(0, 80));
     if (completedTasks.length === 0) return null;
     return { event_type: "task_complete", task_name: completedTasks.join(", "), created_at: now };
   }
 
-  return null; // All other tools: capture nothing
+  return null;
 }
 
 async function main() {
