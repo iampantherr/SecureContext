@@ -229,7 +229,7 @@ export async function fetchAndConvert(
   await assertNotSSRFByDNS(parsed);
 
   const safeHeaders = sanitizeHeaders({
-    "User-Agent": "zc-ctx/0.4.0 (Claude Code context plugin)",
+    "User-Agent": "zc-ctx/0.5.0 (Claude Code context plugin)",
     "Accept": "text/html,text/plain,application/json",
     ...extraHeaders,
   });
