@@ -213,6 +213,11 @@ export async function fetchAndConvert(
     throw new Error(`Invalid URL: ${url}`);
   }
 
+  // SECURITY: Explicit javascript: block first — some URL parsers treat javascript: as valid.
+  // Defense-in-depth before the general protocol allowlist check.
+  if (parsed.protocol === "javascript:") {
+    throw new Error(`Blocked protocol: javascript: URIs are never allowed (XSS/code injection risk).`);
+  }
   if (!["http:", "https:"].includes(parsed.protocol)) {
     throw new Error(`Blocked protocol: ${parsed.protocol}. Only http/https allowed.`);
   }

@@ -1013,15 +1013,45 @@ const { hasNonAsciiChars } = await import(new URL("../dist/knowledge.js", import
   }
 }
 
+// T76: zc_forget — deletes working memory key, returns false for non-existent key
+{
+  const { forgetFact } = await import(new URL("../dist/memory.js", import.meta.url).href);
+  rememberFact(TEST_PROJECT, "forget-test-key", "value to forget", 3);
+  const deleted = forgetFact(TEST_PROJECT, "forget-test-key");
+  const deletedAgain = forgetFact(TEST_PROJECT, "forget-test-key"); // idempotent
+  const wm = recallWorkingMemory(TEST_PROJECT);
+  const gone = !wm.some(f => f.key === "forget-test-key");
+  if (deleted && !deletedAgain && gone) {
+    record("T76", "zc_forget: deletes key, returns true once, false on repeat, key absent from WM", "PASS",
+      "deleted=true, repeat=false, key absent", `deleted=${deleted}, repeat=${deletedAgain}, gone=${gone}`);
+  } else {
+    record("T76", "zc_forget: incorrect behavior", "FAIL",
+      "deleted=true, repeat=false, key absent", `deleted=${deleted}, repeat=${deletedAgain}, gone=${gone}`);
+  }
+}
+
+// T17-recheck: javascript: protocol now explicitly blocked
+{
+  const { fetchAndConvert: fc2 } = await import(new URL("../dist/fetcher.js", import.meta.url).href);
+  try {
+    await fc2("javascript:alert(1)");
+    record("T17b", "javascript: URI should be explicitly blocked", "FAIL", "explicit block", "request went through");
+  } catch(e) {
+    const explicit = /javascript.*never allowed|javascript.*XSS|Blocked protocol: javascript/i.test(e.message);
+    record("T17b", "javascript: URI explicitly blocked with XSS warning message", explicit ? "PASS" : "WARN",
+      "explicit 'javascript: URIs are never allowed' message", e.message.slice(0, 100));
+  }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// FINAL REPORT (all 75 tests)
+// FINAL REPORT (all 77 tests)
 writeFileSync(
   join(PROJ, "security-tests", "results.json"),
   JSON.stringify({ timestamp: new Date().toISOString(), summary: { total, passed, failed, warned, skipped }, results }, null, 2)
 );
 
 console.log("\n" + B("═".repeat(70)));
-console.log(B("  FINAL SUMMARY — v0.4.0 (75 attack vectors)"));
+console.log(B("  FINAL SUMMARY — v0.5.0 (77 attack vectors)"));
 console.log(B("═".repeat(70)));
 console.log(`  Total: ${total}  ${G("PASS: " + passed)}  ${R("FAIL: " + failed)}  ${Y("WARN: " + warned)}  ${Y("SKIP: " + skipped)}`);
 

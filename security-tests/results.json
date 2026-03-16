@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-03-16T08:07:05.045Z",
+  "timestamp": "2026-03-16T13:13:16.268Z",
   "summary": {
-    "total": 75,
-    "passed": 70,
+    "total": 77,
+    "passed": 72,
     "failed": 0,
     "warned": 5,
     "skipped": 0
@@ -77,7 +77,7 @@
       "name": "Background subprocess spawned from sandbox",
       "status": "WARN",
       "expected": "background processes contained",
-      "actual": "child PID 24124 may survive parent kill",
+      "actual": "child PID 84724 may survive parent kill",
       "notes": "KNOWN LIMITATION: spawned detached children not in process group. Fix: use process group kill in sandbox."
     },
     {
@@ -85,7 +85,7 @@
       "name": "Controlled subprocess spawning (50 background children) — parent exits cleanly",
       "status": "PASS",
       "expected": "parent returns quickly after spawning children",
-      "actual": "elapsed=97ms, exitCode=0",
+      "actual": "elapsed=98ms, exitCode=0",
       "notes": "Process tree kill (taskkill /T) handles remaining children on Windows"
     },
     {
@@ -141,7 +141,7 @@
       "name": "javascript: URI blocked",
       "status": "WARN",
       "expected": "explicit 'Invalid URL' guard",
-      "actual": "threw: Blocked protocol: javascript:. Only http/https allowed.",
+      "actual": "threw: Blocked protocol: javascript: URIs are never allowed (XSS/code injection risk).",
       "notes": "Threw but without explicit block — add guard for defense-in-depth"
     },
     {
@@ -421,7 +421,7 @@
       "name": "posttooluse hook does not modify itself when its own path is used",
       "status": "PASS",
       "expected": "file unchanged",
-      "actual": "4100 bytes unchanged",
+      "actual": "5101 bytes unchanged",
       "notes": ""
     },
     {
@@ -549,7 +549,7 @@
       "name": "Integrity check runs without crash",
       "status": "PASS",
       "expected": "returns {ok, firstRun, warnings}",
-      "actual": "ok=false, firstRun=false, warnings=4",
+      "actual": "ok=false, firstRun=false, warnings=5",
       "notes": ""
     },
     {
@@ -557,7 +557,7 @@
       "name": "Integrity check: same version compares against baseline",
       "status": "PASS",
       "expected": "comparison runs",
-      "actual": "ok=false, warnings=4",
+      "actual": "ok=false, warnings=5",
       "notes": ""
     },
     {
@@ -606,6 +606,22 @@
       "status": "PASS",
       "expected": "exit 0",
       "actual": "exitCode=0",
+      "notes": ""
+    },
+    {
+      "id": "T76",
+      "name": "zc_forget: deletes key, returns true once, false on repeat, key absent from WM",
+      "status": "PASS",
+      "expected": "deleted=true, repeat=false, key absent",
+      "actual": "deleted=true, repeat=false, gone=true",
+      "notes": ""
+    },
+    {
+      "id": "T17b",
+      "name": "javascript: URI explicitly blocked with XSS warning message",
+      "status": "PASS",
+      "expected": "explicit 'javascript: URIs are never allowed' message",
+      "actual": "Blocked protocol: javascript: URIs are never allowed (XSS/code injection risk).",
       "notes": ""
     }
   ]

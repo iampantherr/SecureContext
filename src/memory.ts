@@ -156,6 +156,19 @@ export function archiveSessionSummary(projectPath: string, summary: string): voi
 }
 
 /**
+ * MemGPT operation: DELETE from working memory.
+ * Removes a specific key. Returns true if the key existed and was deleted.
+ * Silently succeeds (returns false) if the key doesn't exist.
+ */
+export function forgetFact(projectPath: string, key: string): boolean {
+  const safeKey = sanitize(key, 100);
+  const db = openDb(projectPath);
+  const result = db.prepare("DELETE FROM working_memory WHERE key = ?").run(safeKey) as { changes: number };
+  db.close();
+  return result.changes > 0;
+}
+
+/**
  * Format working memory for context injection.
  * Returns a compact, token-efficient representation.
  */

@@ -13,16 +13,33 @@
  */
 
 import { createInterface } from "node:readline";
-import { mkdirSync, appendFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, statSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 const ZC_DIR = join(homedir(), ".claude", "zc-ctx", "sessions");
+const EVENT_LOG_MAX_BYTES = 512 * 1024;
+const EVENT_LOG_KEEP_BYTES = 384 * 1024;
 
 function getSessionLogPath(projectPath) {
   const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
   return join(ZC_DIR, `${hash}.events.jsonl`);
+}
+
+function appendEventLine(logPath, line) {
+  try {
+    if (existsSync(logPath) && statSync(logPath).size > EVENT_LOG_MAX_BYTES) {
+      const content = readFileSync(logPath, "utf8");
+      const trimmed = content.slice(-EVENT_LOG_KEEP_BYTES);
+      const firstNewline = trimmed.indexOf("\n");
+      const aligned = firstNewline !== -1 ? trimmed.slice(firstNewline + 1) : trimmed;
+      writeFileSync(logPath, aligned, "utf8");
+    }
+    appendFileSync(logPath, line, "utf8");
+  } catch {
+    // Never crash Claude Code due to a hook error
+  }
 }
 
 async function main() {
@@ -45,11 +62,7 @@ async function main() {
   try {
     mkdirSync(ZC_DIR, { recursive: true });
     const logPath = getSessionLogPath(projectPath);
-    const record = JSON.stringify({
-      event_type: "session_ended",
-      created_at: now,
-    }) + "\n";
-    appendFileSync(logPath, record, "utf8");
+    appendEventLine(logPath, JSON.stringify({ event_type: "session_ended", created_at: now }) + "\n");
   } catch {
     // Never crash Claude Code due to a hook error
   }

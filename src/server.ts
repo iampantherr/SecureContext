@@ -10,10 +10,10 @@ import { runInSandbox, runFileInSandbox } from "./sandbox.js";
 import { indexContent, searchKnowledge } from "./knowledge.js";
 import { fetchAndConvert } from "./fetcher.js";
 import { getRecentEvents } from "./session.js";
-import { rememberFact, recallWorkingMemory, archiveSessionSummary, formatWorkingMemoryForContext } from "./memory.js";
+import { rememberFact, forgetFact, recallWorkingMemory, archiveSessionSummary, formatWorkingMemoryForContext } from "./memory.js";
 import { checkIntegrity } from "./integrity.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const PROJECT_PATH = cwd();
 
 // ─── Startup integrity check ─────────────────────────────────────────────────
@@ -180,6 +180,20 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_forget",
+    description:
+      "Delete a specific key from working memory (MemGPT-style). " +
+      "Use this to remove stale, incorrect, or sensitive facts that should no longer be remembered. " +
+      "Returns whether the key existed. Safe to call even if the key doesn't exist.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "The working memory key to delete (max 100 chars)" },
+      },
+      required: ["key"],
+    },
+  },
+  {
     name: "zc_recall_context",
     description:
       "Recall current working memory and recent session events. " +
@@ -321,6 +335,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: "text",
             text: `Remembered: [★${importance ?? 3}] ${key}\nWorking memory: ${wm.length}/50 facts`,
+          }],
+        };
+      }
+
+      case "zc_forget": {
+        const { key } = args as { key: string };
+        const deleted = forgetFact(PROJECT_PATH, key);
+        const wm = recallWorkingMemory(PROJECT_PATH);
+        return {
+          content: [{
+            type: "text",
+            text: deleted
+              ? `Forgotten: '${key}' removed from working memory.\nWorking memory: ${wm.length}/50 facts`
+              : `Key '${key}' was not in working memory (already absent).\nWorking memory: ${wm.length}/50 facts`,
           }],
         };
       }

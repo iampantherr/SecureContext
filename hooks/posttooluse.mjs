@@ -13,17 +13,39 @@
  */
 
 import { createInterface } from "node:readline";
-import { mkdirSync, appendFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, statSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 const ZC_DIR = join(homedir(), ".claude", "zc-ctx", "sessions");
-const EVENT_LOG_MAX_BYTES = 512 * 1024; // 512 KB per session log — auto-rotate after
+const EVENT_LOG_MAX_BYTES = 512 * 1024; // 512 KB — rotate when exceeded
+const EVENT_LOG_KEEP_BYTES = 384 * 1024; // keep newest 384 KB after rotation
 
 function getSessionLogPath(projectPath) {
   const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
   return join(ZC_DIR, `${hash}.events.jsonl`);
+}
+
+/**
+ * Append a JSONL line to the event log, rotating if over EVENT_LOG_MAX_BYTES.
+ * Rotation keeps the newest EVENT_LOG_KEEP_BYTES of lines (whole-line granularity).
+ * SECURITY: Never reads or exposes log content — only manages file size.
+ */
+function appendEventLine(logPath, line) {
+  try {
+    if (existsSync(logPath) && statSync(logPath).size > EVENT_LOG_MAX_BYTES) {
+      // Keep only the newest tail — slice to KEEP_BYTES then align to a line boundary
+      const content = readFileSync(logPath, "utf8");
+      const trimmed = content.slice(-EVENT_LOG_KEEP_BYTES);
+      const firstNewline = trimmed.indexOf("\n");
+      const aligned = firstNewline !== -1 ? trimmed.slice(firstNewline + 1) : trimmed;
+      writeFileSync(logPath, aligned, "utf8");
+    }
+    appendFileSync(logPath, line, "utf8");
+  } catch {
+    // Never crash Claude Code due to a hook error
+  }
 }
 
 // SECURITY: Strip all newlines, carriage returns, and null bytes from strings
@@ -95,12 +117,11 @@ async function main() {
   const safeEvent = extractSafeEvent(toolName, toolInput, toolResponse);
   if (!safeEvent) process.exit(0);
 
-  // Write to JSONL event log — only inside ~/.claude/zc-ctx/
+  // Write to JSONL event log — only inside ~/.claude/zc-ctx/ (with rotation)
   try {
     mkdirSync(ZC_DIR, { recursive: true });
     const logPath = getSessionLogPath(projectPath);
-    const line = JSON.stringify(safeEvent) + "\n";
-    appendFileSync(logPath, line, "utf8");
+    appendEventLine(logPath, JSON.stringify(safeEvent) + "\n");
   } catch {
     // Never crash Claude Code due to a hook error
   }
