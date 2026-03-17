@@ -1,0 +1,94 @@
+# SecureContext
+
+> Secure memory and context optimization MCP plugin for Claude Code. The drop-in replacement for context-mode and similar plugins — with credential isolation, SSRF protection, MemGPT-style persistent memory, and hybrid BM25+vector search. Zero cloud sync. 77 automated security tests.
+
+## What It Is
+
+SecureContext (`zc-ctx`) is a Model Context Protocol (MCP) plugin for Claude Code that solves two problems simultaneously:
+
+1. **Context efficiency**: Claude Code's context window fills up and loses track of previous work. SecureContext offloads knowledge to a local SQLite KB and retrieves only relevant chunks on demand — reducing context overhead by ~87% vs native Claude context management.
+
+2. **Security**: Popular context plugins (especially `context-mode`, 4,800+ stars) pass your full shell environment to every code execution subprocess — meaning your `ANTHROPIC_API_KEY`, `GH_TOKEN`, `AWS_ACCESS_KEY_ID`, and database passwords are exposed to every command Claude runs. SecureContext strips credentials from the sandbox (PATH only) and protects the fetch tool with 3-layer SSRF defense.
+
+## Who Should Use It
+
+- Developers using Claude Code for complex, multi-session software projects
+- Anyone who has hit Claude Code's context window limits
+- Anyone using `context-mode` who wants cross-session persistence and real security guarantees
+- Teams running Claude Code in environments where credential exposure is a concern
+- Developers building multi-agent pipelines where context efficiency compounds across agent calls
+
+## Key Features
+
+- **10 MCP tools**: `zc_execute`, `zc_execute_file`, `zc_fetch`, `zc_index`, `zc_search`, `zc_batch`, `zc_remember`, `zc_forget`, `zc_recall_context`, `zc_summarize_session`
+- **MemGPT-style hierarchical memory**: 50-fact bounded working memory with importance-scored eviction to archival KB
+- **Hybrid search**: BM25 FTS5 primary + Ollama `nomic-embed-text` cosine reranking (optional, falls back gracefully)
+- **3-layer SSRF protection**: hostname blocklist + DNS resolution (resolve4/resolve6) + per-hop redirect re-validation up to 5 hops
+- **Credential-isolated sandbox**: subprocess receives PATH only — no API keys, no tokens, no database passwords
+- **SHA256 tamper detection**: integrity baseline established on first install; checked on every startup
+- **Prompt injection defense**: all web-fetched KB results tagged `[UNTRUSTED EXTERNAL CONTENT]`; non-ASCII source labels flagged for homoglyph detection
+- **Per-project isolation**: each project gets its own SQLite DB at `~/.claude/zc-ctx/sessions/{sha256_of_path}.db`
+- **Zero cloud sync**: all data stays on your machine
+
+## How It Compares
+
+### vs context-mode (most popular alternative)
+- context-mode has no cross-session memory, no SSRF protection, no credential isolation, and is ELv2 licensed (not truly open source)
+- SecureContext has all of the above plus 77 automated security tests verifying each guarantee
+
+### vs native Claude Code context management
+- Native Claude: starts fresh every session, context fills and compacts (lossy), no persistent KB
+- SecureContext: `zc_recall_context()` restores working memory in <1ms; 87% fewer context tokens; no data loss on long sessions
+
+### vs Mem0 / OpenMemory
+- Mem0 cloud sends conversation data off-machine; OpenMemory has no auth by default and requires Docker + OpenAI API key
+- SecureContext is fully local, zero-dependency (Node.js 22 built-in SQLite), no Docker, no external API keys for core functionality
+
+## Token Efficiency
+
+| Operation | Native Claude | SecureContext | Savings |
+|---|---|---|---|
+| Session startup | 20,000–50,000 tokens | ~1,500 tokens | ~95% |
+| Web research per URL | 5,000–15,000 tokens | ~1,500 tokens | ~85–93% |
+| Codebase search | ~25,000 tokens | ~2,000 tokens | ~92% |
+| Cross-session memory | 0 (lost on restart) | 50 facts + summaries | ∞ |
+
+Across 10 sessions: 510,000 tokens (native) → 65,000 tokens (SecureContext) — **87% reduction**.
+
+## Security Test Coverage
+
+77 automated attack vectors across 8 categories:
+- Sandbox credential exfiltration (T01–T14)
+- SSRF and fetcher attacks including AWS/GCP/Azure metadata endpoints (T19–T28, T74)
+- SQLite injection and KB attacks (T37–T47)
+- Hook self-modification and injection (T48–T54)
+- Prompt injection via fetched content (T55–T57)
+- MCP protocol attacks (T58)
+- MemGPT boundary attacks (T59–T68)
+- Integrity and supply chain (T69–T77)
+
+Run all tests: `node security-tests/run-all.mjs`
+
+## Installation
+
+```bash
+git clone https://github.com/iampantherr/SecureContext
+cd SecureContext
+npm install && npm run build
+```
+
+Then register in `~/.claude/plugins/installed_plugins.json` and `~/.claude/settings.json`. Full instructions in README.
+
+## Works With
+
+- Claude Code (CLI) — via plugin system
+- Claude Desktop app — via `mcpServers` in `claude_desktop_config.json`
+- Any MCP-compatible AI client
+
+## Repository
+
+- GitHub: https://github.com/iampantherr/SecureContext
+- License: MIT
+- Version: 0.5.0
+- Node.js 22+ required (uses built-in `node:sqlite`)
+- Optional: Ollama with `nomic-embed-text` for vector search (falls back to BM25 without it)
