@@ -131,6 +131,19 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 7,
+    description: "Add project_meta table for cross-project search labels",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_meta (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
+    },
+  },
+
 ];
 
 /**

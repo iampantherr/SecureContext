@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 
 import { Config } from "./config.js";
 import { runInSandbox, runFileInSandbox } from "./sandbox.js";
-import { indexContent, searchKnowledge, getKbStats } from "./knowledge.js";
+import { indexContent, searchKnowledge, searchAllProjects, getKbStats } from "./knowledge.js";
 import { fetchAndConvert } from "./fetcher.js";
 import { getRecentEvents } from "./session.js";
 import {
@@ -169,6 +169,21 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         queries: { type: "array", items: { type: "string" }, minItems: 1 },
+      },
+      required: ["queries"],
+    },
+  },
+  {
+    name: "zc_search_global",
+    description:
+      "Search across ALL projects in your SecureContext knowledge base (cross-project federated search). " +
+      "Use when looking for patterns, decisions, or notes you remember from a different project. " +
+      "Searches the N most recently active projects. External content trust warnings still apply.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        queries:      { type: "array", items: { type: "string" }, minItems: 1, description: "Search terms (up to 5)" },
+        max_projects: { type: "integer", minimum: 1, maximum: 10, default: 5, description: "Max projects to search (most recently active first)" },
       },
       required: ["queries"],
     },
@@ -340,6 +355,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const trustBadge  = r.sourceType === "external" ? " [EXTERNAL]" : "";
           const asciiBadge  = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
           return `### Result ${i + 1}: ${r.source}${trustBadge}${asciiBadge}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
+        }).join("\n\n---\n\n");
+        return { content: [{ type: "text", text: formatted }] };
+      }
+
+      case "zc_search_global": {
+        const { queries, max_projects } = args as { queries: string[]; max_projects?: number };
+        const results = await searchAllProjects(queries, max_projects ?? 5);
+        if (results.length === 0) {
+          return { content: [{ type: "text", text: "No results found across any projects." }] };
+        }
+        const formatted = results.map((r, i) => {
+          const vecInfo    = r.vectorScore !== undefined ? ` | cosine: ${r.vectorScore.toFixed(3)}` : " | BM25 only";
+          const trustBadge = r.sourceType === "external" ? " [EXTERNAL]" : "";
+          const asciiBadge = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
+          return (
+            `### Result ${i + 1}: ${r.source}${trustBadge}${asciiBadge}\n` +
+            `Project: **${r.projectLabel}** (${r.projectHash})\n` +
+            `Score: ${r.rank.toFixed(4)}${vecInfo}\n\n` +
+            r.snippet
+          );
         }).join("\n\n---\n\n");
         return { content: [{ type: "text", text: formatted }] };
       }

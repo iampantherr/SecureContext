@@ -37,8 +37,8 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readdirSync, statSync } from "node:fs";
+import { join, basename } from "node:path";
 import { Config } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { getEmbedding, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
@@ -53,6 +53,11 @@ export interface KnowledgeEntry {
   vectorScore?: number;
   sourceType: string;
   nonAsciiSource: boolean;
+}
+
+export interface CrossProjectEntry extends KnowledgeEntry {
+  projectHash:  string;
+  projectLabel: string;
 }
 
 /** Detect non-ASCII characters in a string (homoglyph/unicode spoofing risk). */
@@ -85,6 +90,12 @@ export function openDb(projectPath: string): DatabaseSync {
 
   // Run all pending migrations
   runMigrations(db);
+
+  // Populate project label for cross-project search (INSERT OR IGNORE — set once, never overwritten)
+  try {
+    db.prepare(`INSERT OR IGNORE INTO project_meta(key, value) VALUES ('project_label', ?)`)
+      .run(basename(projectPath));
+  } catch {}
 
   // Tiered retention purge (run on every open — cheap O(index) deletes)
   _purgeStaleContent(db, projectPath);
@@ -199,27 +210,25 @@ export function indexContent(
 }
 
 /**
- * Hybrid BM25 + vector search.
- * Returns results ranked by combined score (BM25 + cosine similarity).
- * Falls back to pure BM25 if Ollama is unavailable or model changed.
+ * Core BM25 + hybrid scoring on an already-open DB with a pre-computed query vector.
+ * Caller is responsible for opening and closing the DB.
+ * queryVector = null → pure BM25 fallback.
  */
-export async function searchKnowledge(
-  projectPath: string,
-  queries: string[]
-): Promise<KnowledgeEntry[]> {
-  const db = openDb(projectPath);
+function _searchDb(
+  db: DatabaseSync,
+  queries: string[],
+  queryVector: Float32Array | null
+): KnowledgeEntry[] {
   const seen = new Set<string>();
 
   type BM25Row  = { source: string; content: string; rank: number };
   type EmbedRow = { source: string; vector: Buffer; model_name: string };
   type MetaRow  = { source: string; source_type: string };
 
-  // Collect all unique BM25 candidates across all queries
   const candidateMap = new Map<string, BM25Row>();
 
   for (const query of queries) {
     if (!query.trim()) continue;
-
     let rows: BM25Row[];
     try {
       rows = db.prepare(
@@ -233,53 +242,40 @@ export async function searchKnowledge(
       // SECURITY: malformed FTS5 query — skip gracefully, don't expose error
       continue;
     }
-
     for (const row of rows) {
-      if (!candidateMap.has(row.source)) {
-        candidateMap.set(row.source, row);
-      }
+      if (!candidateMap.has(row.source)) candidateMap.set(row.source, row);
     }
   }
 
-  if (candidateMap.size === 0) {
-    db.close();
-    return [];
-  }
+  if (candidateMap.size === 0) return [];
 
-  const sources = Array.from(candidateMap.keys());
+  const sources      = Array.from(candidateMap.keys());
   const placeholders = sources.map(() => "?").join(",");
 
-  // Only load embeddings that match the currently active model
-  // (skip stale vectors from a different model — they'd produce garbage cosine scores)
-  const embedRows = db.prepare(
-    `SELECT source, vector, model_name FROM embeddings
-     WHERE source IN (${placeholders})
-     AND (model_name = ? OR model_name = 'unknown')`
-  ).all(...sources, ACTIVE_MODEL) as EmbedRow[];
-
-  const metaRows = db.prepare(
-    `SELECT source, source_type FROM source_meta WHERE source IN (${placeholders})`
-  ).all(...sources) as MetaRow[];
-
-  db.close();
+  let embedRows: EmbedRow[] = [];
+  let metaRows:  MetaRow[]  = [];
+  try {
+    // Only load embeddings that match the currently active model
+    // (skip stale vectors from a different model — they'd produce garbage cosine scores)
+    embedRows = db.prepare(
+      `SELECT source, vector, model_name FROM embeddings
+       WHERE source IN (${placeholders})
+       AND (model_name = ? OR model_name = 'unknown')`
+    ).all(...sources, ACTIVE_MODEL) as EmbedRow[];
+    metaRows = db.prepare(
+      `SELECT source, source_type FROM source_meta WHERE source IN (${placeholders})`
+    ).all(...sources) as MetaRow[];
+  } catch {}
 
   const sourceTypeMap = new Map<string, string>();
   for (const row of metaRows) sourceTypeMap.set(row.source, row.source_type);
 
   const embeddingMap = new Map<string, Float32Array>();
-  for (const row of embedRows) {
-    embeddingMap.set(row.source, deserializeVector(row.vector));
-  }
+  for (const row of embedRows) embeddingMap.set(row.source, deserializeVector(row.vector));
 
-  // Compute query embedding
-  const queryText   = queries.filter((q) => q.trim()).join(" ");
-  const embedResult = await getEmbedding(queryText);
-  const queryVector = embedResult?.vector ?? null;
-
-  // Normalize BM25 ranks (FTS5 rank is negative; more negative = better)
-  const ranks    = Array.from(candidateMap.values()).map((r) => r.rank);
-  const minRank  = Math.min(...ranks);
-  const maxRank  = Math.max(...ranks);
+  const ranks     = Array.from(candidateMap.values()).map((r) => r.rank);
+  const minRank   = Math.min(...ranks);
+  const maxRank   = Math.max(...ranks);
   const rankRange = maxRank - minRank || 1;
 
   const scored: Array<KnowledgeEntry & { _hybrid: number }> = [];
@@ -288,22 +284,18 @@ export async function searchKnowledge(
     if (seen.has(source)) continue;
     seen.add(source);
 
-    const bm25Norm = 1 - (row.rank - minRank) / rankRange;
-
-    let cosine = 0;
+    const bm25Norm  = 1 - (row.rank - minRank) / rankRange;
+    let   cosine    = 0;
     const storedVec = embeddingMap.get(source);
-    if (queryVector && storedVec) {
-      cosine = cosineSimilarity(queryVector, storedVec);
-    }
+    if (queryVector && storedVec) cosine = cosineSimilarity(queryVector, storedVec);
 
     const hybridScore = queryVector && storedVec
       ? Config.W_BM25 * bm25Norm + Config.W_COSINE * cosine
       : bm25Norm;
 
-    // Extract snippet around first query term
-    const firstTerm = queries[0]?.toLowerCase().split(" ")[0] ?? "";
-    const idx       = row.content.toLowerCase().indexOf(firstTerm);
-    const start     = Math.max(0, idx - 100);
+    const firstTerm  = queries[0]?.toLowerCase().split(" ")[0] ?? "";
+    const idx        = row.content.toLowerCase().indexOf(firstTerm);
+    const start      = Math.max(0, idx - 100);
     const rawSnippet = row.content.slice(start, start + 400).trim()
       || row.content.slice(0, 400);
 
@@ -333,6 +325,95 @@ export async function searchKnowledge(
 
   scored.sort((a, b) => b._hybrid - a._hybrid);
   return scored.slice(0, Config.MAX_RESULTS).map(({ _hybrid: _, ...rest }) => rest);
+}
+
+/**
+ * Hybrid BM25 + vector search for the current project.
+ * Returns results ranked by combined score. Falls back to pure BM25 if Ollama unavailable.
+ */
+export async function searchKnowledge(
+  projectPath: string,
+  queries: string[]
+): Promise<KnowledgeEntry[]> {
+  const db          = openDb(projectPath);
+  const queryText   = queries.filter((q) => q.trim()).join(" ");
+  const embedResult = await getEmbedding(queryText);
+  const queryVector = embedResult?.vector ?? null;
+  const results     = _searchDb(db, queries, queryVector);
+  db.close();
+  return results;
+}
+
+/**
+ * Cross-project federated search.
+ * Searches the N most recently active project databases under ~/.claude/zc-ctx/sessions/.
+ * Query embedding is computed ONCE and reused across all projects.
+ *
+ * SECURITY: Only reads from Config.DB_DIR. Filenames are validated as 16-char hex hashes —
+ * path traversal via crafted filenames is impossible by construction.
+ */
+export async function searchAllProjects(
+  queries: string[],
+  maxProjects: number
+): Promise<CrossProjectEntry[]> {
+  // Compute query embedding once — reused across all project DBs for performance
+  const queryText   = queries.filter((q) => q.trim()).join(" ");
+  const embedResult = await getEmbedding(queryText);
+  const queryVector = embedResult?.vector ?? null;
+
+  // Enumerate project DBs sorted by most recently modified first
+  let dbFiles: Array<{ file: string; mtime: Date }>;
+  try {
+    dbFiles = readdirSync(Config.DB_DIR)
+      // SECURITY: only valid 16-char hex hash filenames — rejects any path traversal attempts
+      .filter((f) => /^[0-9a-f]{16}\.db$/i.test(f))
+      .map((f) => ({ file: f, mtime: statSync(join(Config.DB_DIR, f)).mtime }))
+      .sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+      .slice(0, maxProjects);
+  } catch {
+    return []; // sessions dir doesn't exist yet
+  }
+
+  const allResults: CrossProjectEntry[] = [];
+  const seenContent  = new Set<string>(); // content-level dedup across projects
+
+  for (const { file } of dbFiles) {
+    const projectHash = file.replace(".db", "");
+    const filePath    = join(Config.DB_DIR, file);
+
+    let db: DatabaseSync;
+    try {
+      db = new DatabaseSync(filePath);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA busy_timeout = 5000");
+      runMigrations(db); // ensure schema is up to date in case this DB is from an older session
+    } catch {
+      continue; // corrupt or locked DB — skip
+    }
+
+    // Read human-readable project label (populated by openDb on each project's first use)
+    let projectLabel = projectHash.slice(0, 8);
+    try {
+      const labelRow = db.prepare(
+        "SELECT value FROM project_meta WHERE key = 'project_label'"
+      ).get() as { value: string } | undefined;
+      if (labelRow) projectLabel = labelRow.value;
+    } catch {}
+
+    const results = _searchDb(db, queries, queryVector);
+    db.close();
+
+    for (const r of results) {
+      // Content-level deduplication: same content appearing in multiple projects → keep once
+      const contentKey = r.content.slice(0, 200);
+      if (seenContent.has(contentKey)) continue;
+      seenContent.add(contentKey);
+      allResults.push({ ...r, projectHash, projectLabel });
+    }
+  }
+
+  allResults.sort((a, b) => b.rank - a.rank);
+  return allResults.slice(0, Config.MAX_RESULTS * 2); // broader result set for cross-project
 }
 
 /** Returns KB stats for the zc_status tool */
