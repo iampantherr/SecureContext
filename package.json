@@ -1,6 +1,6 @@
 {
   "name": "zc-ctx",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Secure memory & context optimization MCP plugin for Claude Code — drop-in replacement for context-mode with credential isolation, SSRF protection, and MemGPT-style persistent memory",
   "keywords": [
     "claude-code",

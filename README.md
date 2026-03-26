@@ -4,7 +4,9 @@
 > Hardened memory + search. Zero credential leakage. Built to be the context manager you'd actually trust in production.
 
 [![Tests](https://img.shields.io/badge/security%20tests-72%20PASS%20%7C%200%20FAIL%20%7C%205%20WARN-brightgreen)](security-tests/results.json)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue)](.claude-plugin/plugin.json)
+[![Unit Tests](https://img.shields.io/badge/unit%20tests-138%20passed-brightgreen)](src)
+[![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
@@ -182,32 +184,52 @@ For the complete technical architecture with all security properties documented,
 
 ---
 
-## 10 MCP Tools
+## 11 MCP Tools
 
 | Tool | What it does |
 |------|-------------|
 | `zc_execute` | Run Python, JavaScript, or Bash in credential-isolated sandbox |
-| `zc_execute_file` | Analyse a specific file in sandbox (TARGET_FILE injected) |
+| `zc_execute_file` | Analyse a specific file in sandbox (TARGET_FILE via stdin — not in process list) |
 | `zc_fetch` | Fetch a public URL, convert to Markdown, index into KB |
 | `zc_index` | Manually index text into the knowledge base |
 | `zc_search` | Hybrid BM25 + vector search across project knowledge |
 | `zc_batch` | Run shell commands AND search KB in one parallel call |
-| `zc_remember` | Store a key-value fact with importance score (1–5) |
+| `zc_remember` | Store a key-value fact with importance score (1–5) and optional agent namespace |
 | `zc_forget` | Remove a fact from working memory |
-| `zc_recall_context` | Restore full project context at session start |
-| `zc_summarize_session` | Archive session summary to long-term searchable memory |
+| `zc_recall_context` | Restore full project context at session start (structured: Critical / Normal / Ephemeral) |
+| `zc_summarize_session` | Archive session summary to long-term searchable memory (kept 365 days) |
+| `zc_status` | Show DB health, KB entry counts, working memory fill, schema version, fetch budget |
 
 ---
 
 ## Installation
 
-### Prerequisites
+### One-command install (recommended)
+
+```bash
+git clone https://github.com/iampantherr/SecureContext
+cd SecureContext
+node install.mjs
+```
+
+The installer: builds the project, registers the MCP server in Claude Code CLI (`~/.claude/settings.json`), and registers it in the Claude Desktop app config. Restart both after running.
+
+To uninstall:
+```bash
+node install.mjs --uninstall
+```
+
+---
+
+### Manual install
+
+#### Prerequisites
 
 - **Node.js 22+** — uses the built-in `node:sqlite` module. No native compilation. No `node-gyp`. No binary downloads.
-- **Claude Code**
+- **Claude Code** and/or **Claude Desktop App**
 - **Ollama** _(optional)_ — enables vector search. Falls back to pure BM25 without it.
 
-### Step 1 — Clone and Build
+#### Step 1 — Clone and Build
 
 ```bash
 git clone https://github.com/iampantherr/SecureContext
@@ -216,54 +238,44 @@ npm install
 npm run build
 ```
 
-The build produces `dist/*.js`. This is what Claude Code loads.
+#### Step 2 — Add to Claude Code CLI
 
-### Step 2 — Register the Plugin
-
-**`~/.claude/plugins/installed_plugins.json`** — add the entry:
+**`~/.claude/settings.json`**:
 
 ```json
 {
-  "version": 2,
-  "plugins": {
-    "zc-ctx@zeroclaw": [
-      {
-        "scope": "user",
-        "installPath": "C:\\Users\\YourName\\AI_projects\\SecureContext",
-        "version": "0.5.0",
-        "installedAt": "2026-01-01T00:00:00.000Z",
-        "lastUpdated": "2026-01-01T00:00:00.000Z"
-      }
-    ]
+  "mcpServers": {
+    "zc-ctx": {
+      "command": "node",
+      "args": ["/absolute/path/to/SecureContext/dist/server.js"]
+    }
   }
 }
 ```
 
-> macOS/Linux: use forward slashes — `"/home/yourname/SecureContext"`
+#### Step 3 — Add to Claude Desktop App (optional)
 
-**`~/.claude/settings.json`** — enable it:
+**`~/AppData/Roaming/Claude/claude_desktop_config.json`** (Windows)
+**`~/Library/Application Support/Claude/claude_desktop_config.json`** (macOS):
 
 ```json
 {
-  "enabledPlugins": {
-    "zc-ctx@zeroclaw": true
+  "mcpServers": {
+    "zc-ctx": {
+      "command": "node",
+      "args": ["/absolute/path/to/SecureContext/dist/server.js"]
+    }
   }
 }
 ```
 
-### Step 3 — Restart Claude Code
+Restart Claude Desktop after editing.
 
-On next startup you'll see in the MCP log:
-```
-[zc-ctx] Integrity baseline established for v0.5.0
-```
+#### Step 4 — Verify
 
-On every subsequent start:
-```
-[zc-ctx] Integrity check: OK
-```
+In a new session, call `zc_status()` — you should see DB health, KB entry counts, and fetch budget. Call `zc_recall_context()` to start using the memory system.
 
-### Step 4 (Optional) — Enable Vector Search
+#### Step 5 (Optional) — Enable Vector Search
 
 ```bash
 # Install Ollama from https://ollama.com
@@ -271,7 +283,7 @@ ollama pull nomic-embed-text
 ollama serve
 ```
 
-SecureContext auto-detects Ollama at `http://127.0.0.1:11434`. No config needed.
+SecureContext auto-detects Ollama at `http://127.0.0.1:11434`. No config needed. Falls back to pure BM25 if Ollama is not running.
 
 ---
 
@@ -328,6 +340,32 @@ node security-tests/run-all.mjs
 Results written to `security-tests/results.json`.
 
 ---
+
+## Changelog
+
+### v0.6.0 — Production Hardening Release
+- **`install.mjs`** — one-command installer for CLI + Desktop App (`node install.mjs`)
+- **`src/config.ts`** — all constants in one place, overridable via env vars (`ZC_OLLAMA_MODEL`, `ZC_STRICT_INTEGRITY`, `ZC_FETCH_LIMIT`, etc.)
+- **`src/migrations.ts`** — versioned schema migration system with transaction safety (each migration atomic; crash between apply and record rolls back cleanly)
+- **Tiered retention** — external KB: 14 days · internal: 30 days · session summaries: 365 days (previously all entries expired at flat 14 days, destroying long-term memory)
+- **Persistent rate limiting** — fetch budget stored in `~/.claude/zc-ctx/global.db`, resets at UTC midnight (was per-session in-memory, bypassed by restarting)
+- **Embedding model version tracking** — `model_name` + `dimensions` stored per vector; stale vectors from a different model excluded from cosine scoring automatically
+- **WAL mode + busy_timeout** — `PRAGMA busy_timeout = 5000` on all DB opens for concurrent multi-agent safety (ZeroClaw parallel agents no longer contend on writes)
+- **Agent namespacing for working memory** — `agent_id` parameter on `zc_remember` / `zc_forget` / `zc_recall_context` prevents key collisions between parallel agents
+- **`zc_status` tool** — DB size, KB entry counts, working memory fill, schema version, embedding model, fetch budget, integrity status — in one call
+- **Structured `zc_recall_context`** — output now has Critical / Normal / Ephemeral priority sections + inline System Status; eliminates a separate `zc_status` call at session start
+- **`zc_execute_file` via stdin** — `TARGET_FILE` now delivered as Python variable in the code string, not via env injection (file path no longer visible in process list)
+- **Strict integrity mode** — `ZC_STRICT_INTEGRITY=1` causes the server to refuse to start if dist/ files were tampered with (default: warn only)
+- **138 unit tests** — migrations, memory, knowledge, sandbox, fetcher (previously: 0 unit tests)
+- **GitHub Actions CI** — TypeScript build + unit tests + security tests run on every push and PR
+- **`zc_recall_context` structured output** — three-tier grouping (Critical/Normal/Ephemeral) + System Status section baked in
+
+### v0.5.0
+- Hybrid BM25 + Ollama vector search (cosine reranking)
+- MemGPT hierarchical memory (50-fact bounded working memory + archival KB)
+- SHA256 integrity baseline on startup
+- `zc_forget` tool
+- 77 security attack vectors, 72 pass
 
 ## Contributing
 

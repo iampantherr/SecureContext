@@ -6,33 +6,43 @@
  * - Only sends text content to Ollama — no credentials, no code, no env vars
  * - Completely optional: gracefully returns null if Ollama is not running
  * - Vectors are float arrays — cannot contain injection payloads
- * - Inspired by: LlamaIndex semantic chunking + reranking approach
  *
- * Model: nomic-embed-text (768-dim, MIT license, runs fully offline via Ollama)
- * Install: ollama pull nomic-embed-text
+ * MODEL VERSION TRACKING:
+ * - Returns model name and dimensions alongside the vector
+ * - knowledge.ts stores model_name in embeddings table
+ * - On model change, stale embeddings are excluded from cosine reranking
+ * - Switch models with: ZC_OLLAMA_MODEL=mxbai-embed-large
+ *
+ * Supported models (via Ollama):
+ *   nomic-embed-text    (768d, MIT license, default)
+ *   mxbai-embed-large   (1024d, Apache 2.0)
+ *   all-minilm          (384d, Apache 2.0, fastest)
  */
 
-const OLLAMA_URL = "http://127.0.0.1:11434/api/embeddings";
-const OLLAMA_MODEL = "nomic-embed-text";
-const EMBED_TIMEOUT_MS = 5_000;
-const MAX_EMBED_CHARS = 4_000; // truncate long text before embedding
+import { Config } from "./config.js";
+
+/** The currently active model name — exported so knowledge.ts can filter stale vectors */
+export const ACTIVE_MODEL = Config.OLLAMA_MODEL;
+
+export interface EmbeddingResult {
+  vector:    Float32Array;
+  modelName: string;
+  dimensions: number;
+}
 
 // Module-level availability cache — avoid hammering Ollama on every call
 let ollamaAvailable: boolean | null = null;
 let lastAvailabilityCheck = 0;
-const AVAILABILITY_TTL_MS = 60_000; // re-check every 60s
 
 async function isOllamaAvailable(): Promise<boolean> {
   const now = Date.now();
-  if (ollamaAvailable !== null && now - lastAvailabilityCheck < AVAILABILITY_TTL_MS) {
+  if (ollamaAvailable !== null && now - lastAvailabilityCheck < Config.EMBED_AVAIL_TTL) {
     return ollamaAvailable;
   }
   try {
-    const ctrl = new AbortController();
+    const ctrl  = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 2_000);
-    const resp = await fetch("http://127.0.0.1:11434/api/tags", {
-      signal: ctrl.signal,
-    });
+    const resp  = await fetch(Config.OLLAMA_TAGS_URL, { signal: ctrl.signal });
     clearTimeout(timer);
     ollamaAvailable = resp.ok;
   } catch {
@@ -45,32 +55,38 @@ async function isOllamaAvailable(): Promise<boolean> {
 /**
  * Compute an embedding vector for the given text.
  * Returns null if Ollama is not available — caller falls back to BM25-only.
+ * Returns EmbeddingResult with model metadata for version-tracking.
  */
-export async function getEmbedding(text: string): Promise<Float32Array | null> {
+export async function getEmbedding(text: string): Promise<EmbeddingResult | null> {
   if (!(await isOllamaAvailable())) return null;
 
-  const truncated = text.slice(0, MAX_EMBED_CHARS);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
+  const truncated   = text.slice(0, Config.EMBED_MAX_CHARS);
+  const controller  = new AbortController();
+  const timer       = setTimeout(() => controller.abort(), Config.EMBED_TIMEOUT_MS);
 
   try {
-    const resp = await fetch(OLLAMA_URL, {
-      method: "POST",
+    const resp = await fetch(Config.OLLAMA_URL, {
+      method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: OLLAMA_MODEL, prompt: truncated }),
-      signal: controller.signal,
+      body:    JSON.stringify({ model: Config.OLLAMA_MODEL, prompt: truncated }),
+      signal:  controller.signal,
     });
     clearTimeout(timer);
 
     if (!resp.ok) {
-      ollamaAvailable = false; // mark unavailable on error
+      ollamaAvailable = false;
       return null;
     }
 
     const data = (await resp.json()) as { embedding?: number[] };
     if (!Array.isArray(data.embedding) || data.embedding.length === 0) return null;
 
-    return new Float32Array(data.embedding);
+    const vector = new Float32Array(data.embedding);
+    return {
+      vector,
+      modelName:  Config.OLLAMA_MODEL,
+      dimensions: vector.length,
+    };
   } catch {
     ollamaAvailable = false;
     return null;
@@ -79,13 +95,13 @@ export async function getEmbedding(text: string): Promise<Float32Array | null> {
 
 /**
  * Cosine similarity between two float vectors.
- * Returns 0 if either vector has zero magnitude (prevents division by zero).
+ * Returns 0 if lengths differ or either vector has zero magnitude.
  */
 export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   if (a.length !== b.length || a.length === 0) return 0;
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < a.length; i++) {
-    dot += a[i]! * b[i]!;
+    dot   += a[i]! * b[i]!;
     normA += a[i]! * a[i]!;
     normB += b[i]! * b[i]!;
   }

@@ -6,43 +6,95 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { cwd } from "node:process";
+import { DatabaseSync } from "node:sqlite";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+
+import { Config } from "./config.js";
 import { runInSandbox, runFileInSandbox } from "./sandbox.js";
-import { indexContent, searchKnowledge } from "./knowledge.js";
+import { indexContent, searchKnowledge, getKbStats } from "./knowledge.js";
 import { fetchAndConvert } from "./fetcher.js";
 import { getRecentEvents } from "./session.js";
-import { rememberFact, forgetFact, recallWorkingMemory, archiveSessionSummary, formatWorkingMemoryForContext } from "./memory.js";
-import { checkIntegrity } from "./integrity.js";
+import {
+  rememberFact,
+  forgetFact,
+  recallWorkingMemory,
+  archiveSessionSummary,
+  formatWorkingMemoryForContext,
+  getMemoryStats,
+} from "./memory.js";
+import { checkIntegrity, type IntegrityResult } from "./integrity.js";
+import { getCurrentSchemaVersion } from "./migrations.js";
+import { ACTIVE_MODEL } from "./embedder.js";
 
-const VERSION = "0.5.0";
 const PROJECT_PATH = cwd();
 
 // ─── Startup integrity check ─────────────────────────────────────────────────
-const integrity = checkIntegrity(VERSION);
+const integrity: IntegrityResult = checkIntegrity(Config.VERSION);
+
 if (integrity.firstRun) {
-  process.stderr.write("[zc-ctx] Integrity baseline established for v" + VERSION + "\n");
+  process.stderr.write(`[zc-ctx] Integrity baseline established for v${Config.VERSION}\n`);
 } else if (!integrity.ok) {
-  // Log to stderr — visible in Claude Code's MCP log, doesn't crash the plugin
   for (const w of integrity.warnings) {
     process.stderr.write(`[zc-ctx] ⚠️  INTEGRITY WARNING: ${w}\n`);
   }
+  // STRICT MODE: refuse to start if tampered (ZC_STRICT_INTEGRITY=1)
+  if (integrity.strictMode) {
+    process.stderr.write(
+      `[zc-ctx] STRICT MODE: integrity failure is fatal. ` +
+      `Run: rm ~/.claude/zc-ctx/integrity.json to re-baseline after a legitimate update.\n`
+    );
+    process.exit(1);
+  }
 }
 
-// ─── Fetch rate limiting ──────────────────────────────────────────────────────
-// Per-session in-memory counter. Prevents zc_fetch being used as a web crawler
-// or network scanner. Resets when the MCP server process restarts (per session).
-// SECURITY: rate limiting by project path (each project has its own limit)
-const fetchCounts = new Map<string, number>();
-const FETCH_LIMIT = 50;
+// ─── Persistent fetch rate limiting ──────────────────────────────────────────
+// Per-project, per-day counter stored in SQLite global.db.
+// Resets at UTC midnight each day. More meaningful than per-session limits.
+function openGlobalDb(): DatabaseSync {
+  mkdirSync(Config.GLOBAL_DIR, { recursive: true });
+  const db = new DatabaseSync(join(Config.GLOBAL_DIR, "global.db"));
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      project_hash TEXT    NOT NULL,
+      date         TEXT    NOT NULL,
+      fetch_count  INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (project_hash, date)
+    );
+  `);
+  return db;
+}
 
-function checkFetchLimit(projectPath: string): void {
-  const count = fetchCounts.get(projectPath) ?? 0;
-  if (count >= FETCH_LIMIT) {
+function checkAndIncrementFetchLimit(projectPath: string): { remaining: number } {
+  const db          = openGlobalDb();
+  const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const today       = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  type Row = { fetch_count: number };
+  const row = db.prepare(
+    "SELECT fetch_count FROM rate_limits WHERE project_hash = ? AND date = ?"
+  ).get(projectHash, today) as Row | undefined;
+
+  const currentCount = row?.fetch_count ?? 0;
+
+  if (currentCount >= Config.FETCH_LIMIT) {
+    db.close();
     throw new Error(
-      `Fetch rate limit reached: ${FETCH_LIMIT} fetches per session. ` +
-      `Use zc_index to manually add content instead.`
+      `Daily fetch limit reached: ${Config.FETCH_LIMIT} fetches/day per project. ` +
+      `Resets at UTC midnight. Use zc_index to manually add content instead.`
     );
   }
-  fetchCounts.set(projectPath, count + 1);
+
+  db.prepare(`
+    INSERT INTO rate_limits(project_hash, date, fetch_count) VALUES (?, ?, 1)
+    ON CONFLICT(project_hash, date) DO UPDATE SET fetch_count = fetch_count + 1
+  `).run(projectHash, today);
+
+  db.close();
+  return { remaining: Config.FETCH_LIMIT - currentCount - 1 };
 }
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
@@ -57,11 +109,8 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        language: {
-          type: "string",
-          enum: ["python", "python3", "javascript", "js", "bash", "sh"],
-        },
-        code: { type: "string", description: "Code to execute" },
+        language: { type: "string", enum: ["python", "python3", "javascript", "js", "bash", "sh"] },
+        code:     { type: "string", description: "Code to execute" },
       },
       required: ["language", "code"],
     },
@@ -70,13 +119,13 @@ const TOOLS: Tool[] = [
     name: "zc_execute_file",
     description:
       "Run analysis code against a specific file in the sandbox. " +
-      "TARGET_FILE variable is injected with the absolute path.",
+      "TARGET_FILE variable is injected via stdin (not visible in process list — Gap 8 fix).",
     inputSchema: {
       type: "object",
       properties: {
         path:     { type: "string" },
         language: { type: "string", enum: ["python", "python3"] },
-        code:     { type: "string", description: "Analysis code using TARGET_FILE" },
+        code:     { type: "string", description: "Analysis code using TARGET_FILE variable" },
       },
       required: ["path", "language", "code"],
     },
@@ -85,10 +134,9 @@ const TOOLS: Tool[] = [
     name: "zc_fetch",
     description:
       "Fetch a public URL, convert to markdown, and index into the knowledge base. " +
-      "Private IPs, localhost, and cloud metadata endpoints (AWS/GCP/Azure) are blocked. " +
-      "DNS resolution is checked to prevent rebinding attacks. " +
-      "Credential headers are stripped automatically. " +
-      "Rate limited to 50 fetches per session.",
+      "Private IPs, localhost, and cloud metadata endpoints are blocked. " +
+      "DNS resolution checked to prevent rebinding attacks. " +
+      "Rate limited to 50 fetches/day per project (persistent, resets at UTC midnight).",
     inputSchema: {
       type: "object",
       properties: {
@@ -120,11 +168,7 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        queries: {
-          type: "array",
-          items: { type: "string" },
-          minItems: 1,
-        },
+        queries: { type: "array", items: { type: "string" }, minItems: 1 },
       },
       required: ["queries"],
     },
@@ -148,10 +192,7 @@ const TOOLS: Tool[] = [
             required: ["label", "command"],
           },
         },
-        queries: {
-          type: "array",
-          items: { type: "string" },
-        },
+        queries: { type: "array", items: { type: "string" } },
       },
       required: ["commands", "queries"],
     },
@@ -160,21 +201,16 @@ const TOOLS: Tool[] = [
     name: "zc_remember",
     description:
       "Store a key-value fact in working memory (MemGPT-style). " +
-      "Working memory is bounded (50 facts max) — lowest-importance facts are auto-evicted to " +
-      "archival memory (the KB) when full. Use importance 5 for critical facts (API decisions, " +
-      "architecture choices), 1 for ephemeral notes. " +
-      "Facts survive MCP server restarts within a project.",
+      "Working memory is bounded (50 facts max) — lowest-importance facts auto-evict to archival KB. " +
+      "Use importance 5 for critical facts, 1 for ephemeral notes. " +
+      "Use agent_id to namespace facts for parallel agent use.",
     inputSchema: {
       type: "object",
       properties: {
-        key:        { type: "string", description: "Short identifier for this fact (max 100 chars)" },
+        key:        { type: "string", description: "Short identifier (max 100 chars)" },
         value:      { type: "string", description: "The fact to remember (max 500 chars)" },
-        importance: {
-          type: "integer",
-          minimum: 1,
-          maximum: 5,
-          description: "1=ephemeral, 3=normal, 5=critical — drives eviction priority",
-        },
+        importance: { type: "integer", minimum: 1, maximum: 5, description: "1=ephemeral, 3=normal, 5=critical" },
+        agent_id:   { type: "string", description: "Agent namespace for parallel use (default: 'default')" },
       },
       required: ["key", "value"],
     },
@@ -182,13 +218,13 @@ const TOOLS: Tool[] = [
   {
     name: "zc_forget",
     description:
-      "Delete a specific key from working memory (MemGPT-style). " +
-      "Use this to remove stale, incorrect, or sensitive facts that should no longer be remembered. " +
-      "Returns whether the key existed. Safe to call even if the key doesn't exist.",
+      "Delete a specific key from working memory. " +
+      "Use to remove stale, incorrect, or sensitive facts. Safe to call even if key doesn't exist.",
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "The working memory key to delete (max 100 chars)" },
+        key:      { type: "string", description: "Working memory key to delete (max 100 chars)" },
+        agent_id: { type: "string", description: "Agent namespace (default: 'default')" },
       },
       required: ["key"],
     },
@@ -196,12 +232,14 @@ const TOOLS: Tool[] = [
   {
     name: "zc_recall_context",
     description:
-      "Recall current working memory and recent session events. " +
-      "Call this at the start of a session to restore project context without reading files. " +
-      "Returns: working memory facts (importance-ranked) + last 20 session events.",
+      "Recall working memory and recent session events. " +
+      "Call this at the start of every session to restore project context. " +
+      "Returns structured sections: Working Memory · Session Events · System Status.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        agent_id: { type: "string", description: "Agent namespace (default: 'default')" },
+      },
       required: [],
     },
   },
@@ -209,9 +247,8 @@ const TOOLS: Tool[] = [
     name: "zc_summarize_session",
     description:
       "Archive a session summary to long-term memory (MemGPT session eviction). " +
-      "Call this when a significant task is complete. The summary is stored in the knowledge " +
-      "base (searchable via zc_search) and promoted to high-importance working memory. " +
-      "Future sessions can recall this context via zc_recall_context or zc_search.",
+      "Call when a significant task is complete. Summary is searchable via zc_search. " +
+      "Kept for 365 days (vs 30 days for regular KB content).",
     inputSchema: {
       type: "object",
       properties: {
@@ -223,11 +260,25 @@ const TOOLS: Tool[] = [
       required: ["summary"],
     },
   },
+  {
+    name: "zc_status",
+    description:
+      "Show SecureContext health: DB size, KB entry counts, working memory fill, " +
+      "schema version, embedding model, today's fetch budget, and integrity status. " +
+      "Call this to diagnose issues or verify the plugin is working correctly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_id: { type: "string", description: "Agent namespace for memory stats (default: 'default')" },
+      },
+      required: [],
+    },
+  },
 ];
 
-// ─── Server setup ─────────────────────────────────────────────────────────────
+// ─── Server setup ──────────────────────────────────────────────────────────────
 const server = new Server(
-  { name: "zc-ctx", version: VERSION },
+  { name: "zc-ctx", version: Config.VERSION },
   { capabilities: { tools: {} } }
 );
 
@@ -253,14 +304,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "zc_fetch": {
         const { url, source } = args as { url: string; source?: string };
-        // SECURITY: rate limit check BEFORE making any network call
-        checkFetchLimit(PROJECT_PATH);
-        const fetched = await fetchAndConvert(url);
-        const label = source ?? fetched.title ?? url;
-        // SECURITY: tag web-fetched content as 'external' — search results will show
-        // [UNTRUSTED EXTERNAL CONTENT] prefix so the agent doesn't blindly trust it.
-        indexContent(PROJECT_PATH, fetched.markdown, label, "external");
-        const remaining = FETCH_LIMIT - (fetchCounts.get(PROJECT_PATH) ?? 0);
+        // SECURITY: rate limit check BEFORE any network call
+        const { remaining } = checkAndIncrementFetchLimit(PROJECT_PATH);
+        const fetched  = await fetchAndConvert(url);
+        const label    = source ?? fetched.title ?? url;
+        indexContent(PROJECT_PATH, fetched.markdown, label, "external", "external");
         return {
           content: [{
             type: "text",
@@ -268,7 +316,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               `## Fetched: ${fetched.title}\n` +
               `Source: ${fetched.url}\n` +
               `Size: ${(fetched.byteSize / 1024).toFixed(1)} KB | ` +
-              `Fetches remaining this session: ${remaining}\n` +
+              `Fetches remaining today: ${remaining}\n` +
               `Indexed as: "${label}"\n\n` +
               fetched.markdown.slice(0, 8_000),
           }],
@@ -288,12 +336,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: "No results found in knowledge base." }] };
         }
         const formatted = results.map((r, i) => {
-          const vecInfo = r.vectorScore !== undefined
-            ? ` | cosine: ${r.vectorScore.toFixed(3)}`
-            : " | BM25 only";
-          const trustBadge = r.sourceType === "external" ? " [EXTERNAL]" : "";
-          const nonAsciiBadge = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
-          return `### Result ${i + 1}: ${r.source}${trustBadge}${nonAsciiBadge}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
+          const vecInfo     = r.vectorScore !== undefined ? ` | cosine: ${r.vectorScore.toFixed(3)}` : " | BM25 only";
+          const trustBadge  = r.sourceType === "external" ? " [EXTERNAL]" : "";
+          const asciiBadge  = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
+          return `### Result ${i + 1}: ${r.source}${trustBadge}${asciiBadge}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
         }).join("\n\n---\n\n");
         return { content: [{ type: "text", text: formatted }] };
       }
@@ -301,7 +347,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "zc_batch": {
         const { commands, queries } = args as {
           commands: Array<{ label: string; command: string }>;
-          queries: string[];
+          queries:  string[];
         };
         const [commandResults, searchResults] = await Promise.all([
           Promise.all(commands.map(async ({ label, command }) => ({
@@ -318,67 +364,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (searchResults.length > 0) {
           sections.push("## Knowledge Base Results");
           for (const r of searchResults) {
-            const vecInfo = r.vectorScore !== undefined ? ` (cosine: ${r.vectorScore.toFixed(3)})` : "";
+            const vecInfo    = r.vectorScore !== undefined ? ` (cosine: ${r.vectorScore.toFixed(3)})` : "";
             const trustBadge = r.sourceType === "external" ? " [EXTERNAL]" : "";
-            const nonAsciiBadge = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
-            sections.push(`### ${r.source}${trustBadge}${nonAsciiBadge}${vecInfo}\n${r.snippet}`);
+            const asciiBadge = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
+            sections.push(`### ${r.source}${trustBadge}${asciiBadge}${vecInfo}\n${r.snippet}`);
           }
         }
         return { content: [{ type: "text", text: sections.join("\n\n") }] };
       }
 
       case "zc_remember": {
-        const { key, value, importance } = args as { key: string; value: string; importance?: number };
-        rememberFact(PROJECT_PATH, key, value, importance);
-        const wm = recallWorkingMemory(PROJECT_PATH);
+        const { key, value, importance, agent_id } = args as {
+          key: string; value: string; importance?: number; agent_id?: string;
+        };
+        rememberFact(PROJECT_PATH, key, value, importance, agent_id);
+        const stats = getMemoryStats(PROJECT_PATH, agent_id);
         return {
           content: [{
             type: "text",
-            text: `Remembered: [★${importance ?? 3}] ${key}\nWorking memory: ${wm.length}/50 facts`,
+            text: `Remembered: [★${importance ?? 3}] ${key}\nWorking memory: ${stats.count}/${stats.max} facts`,
           }],
         };
       }
 
       case "zc_forget": {
-        const { key } = args as { key: string };
-        const deleted = forgetFact(PROJECT_PATH, key);
-        const wm = recallWorkingMemory(PROJECT_PATH);
+        const { key, agent_id } = args as { key: string; agent_id?: string };
+        const deleted = forgetFact(PROJECT_PATH, key, agent_id);
+        const stats   = getMemoryStats(PROJECT_PATH, agent_id);
         return {
           content: [{
             type: "text",
             text: deleted
-              ? `Forgotten: '${key}' removed from working memory.\nWorking memory: ${wm.length}/50 facts`
-              : `Key '${key}' was not in working memory (already absent).\nWorking memory: ${wm.length}/50 facts`,
+              ? `Forgotten: '${key}' removed.\nWorking memory: ${stats.count}/${stats.max} facts`
+              : `Key '${key}' was not in working memory.\nWorking memory: ${stats.count}/${stats.max} facts`,
           }],
         };
       }
 
       case "zc_recall_context": {
-        const wm = recallWorkingMemory(PROJECT_PATH);
+        const { agent_id } = args as { agent_id?: string };
+        const wm     = recallWorkingMemory(PROJECT_PATH, agent_id);
         const events = getRecentEvents(PROJECT_PATH, 20);
 
-        const parts: string[] = [formatWorkingMemoryForContext(wm)];
+        const parts: string[] = [];
 
+        // Section 1: Working Memory (structured by priority)
+        parts.push(formatWorkingMemoryForContext(wm, agent_id));
+
+        // Section 2: Recent Session Events
+        parts.push("\n## Recent Session Events");
         if (events.length > 0) {
-          parts.push("\n## Recent Session Events");
           for (const e of events) {
-            if (e.event_type === "file_write" && e.file_path)
-              parts.push(`- wrote: ${e.file_path}`);
-            else if (e.event_type === "task_complete" && e.task_name)
-              parts.push(`- completed: ${e.task_name}`);
-            else if (e.event_type === "error" && e.error_type)
-              parts.push(`- error: ${e.error_type}`);
-            else if (e.event_type === "session_ended")
-              parts.push(`- [SESSION BOUNDARY] previous conversation ended at ${e.created_at}`);
+            if      (e.event_type === "file_write"    && e.file_path)  parts.push(`  • wrote: ${e.file_path}`);
+            else if (e.event_type === "task_complete" && e.task_name)  parts.push(`  • completed: ${e.task_name}`);
+            else if (e.event_type === "error"         && e.error_type) parts.push(`  • error: ${e.error_type}`);
+            else if (e.event_type === "session_ended")                 parts.push(`  • [SESSION BOUNDARY] ended at ${e.created_at}`);
           }
         } else {
-          parts.push("\n## Recent Session Events\nNo events recorded yet.");
+          parts.push("  No events recorded yet.");
         }
 
-        // Integrity status
+        // Section 3: System Status (inline — no tool call needed)
+        parts.push("\n## System Status");
+        parts.push(`  Plugin: zc-ctx v${Config.VERSION}`);
+        parts.push(`  Embedding model: ${ACTIVE_MODEL}`);
         if (!integrity.ok) {
-          parts.push("\n## ⚠️ Integrity Warning");
-          parts.push(integrity.warnings.join("\n"));
+          parts.push(`  ⚠️  Integrity: ${integrity.warnings.join("; ")}`);
+        } else {
+          parts.push(`  Integrity: OK`);
         }
 
         return { content: [{ type: "text", text: parts.join("\n") }] };
@@ -391,12 +444,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: "text",
             text:
-              `Session summary archived to long-term memory.\n` +
-              `Searchable via: zc_search(["session summary"])\n` +
-              `Recallable via: zc_recall_context()\n\n` +
+              `Session summary archived.\n` +
+              `Retention: 365 days (searchable via zc_search(["session summary"]))\n` +
+              `Recalled via: zc_recall_context()\n\n` +
               `Summary stored:\n${summary}`,
           }],
         };
+      }
+
+      case "zc_status": {
+        const { agent_id } = args as { agent_id?: string };
+
+        const kbStats  = getKbStats(PROJECT_PATH);
+        const wmStats  = getMemoryStats(PROJECT_PATH, agent_id);
+
+        // Schema version
+        const { DatabaseSync } = await import("node:sqlite");
+        const { mkdirSync: mkd } = await import("node:fs");
+        const { join: pjoin }    = await import("node:path");
+        const { createHash: ch } = await import("node:crypto");
+        mkd(Config.DB_DIR, { recursive: true });
+        const dbFile   = pjoin(Config.DB_DIR, `${ch("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const statusDb = new DatabaseSync(dbFile);
+        const schemaV  = getCurrentSchemaVersion(statusDb);
+        statusDb.close();
+
+        // Today's fetch budget
+        const db          = openGlobalDb();
+        const projectHash = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const today       = new Date().toISOString().slice(0, 10);
+        type FetchRow     = { fetch_count: number };
+        const fetchRow    = db.prepare(
+          "SELECT fetch_count FROM rate_limits WHERE project_hash = ? AND date = ?"
+        ).get(projectHash, today) as FetchRow | undefined;
+        db.close();
+        const fetchUsed      = fetchRow?.fetch_count ?? 0;
+        const fetchRemaining = Config.FETCH_LIMIT - fetchUsed;
+
+        const lines = [
+          `## SecureContext Status — v${Config.VERSION}`,
+          ``,
+          `**Knowledge Base**`,
+          `  Total entries:    ${kbStats.totalEntries}`,
+          `  External entries: ${kbStats.externalEntries} (web-fetched, expire in ${Config.STALE_DAYS_EXTERNAL}d)`,
+          `  Session summaries: ${kbStats.summaryEntries} (expire in ${Config.STALE_DAYS_SUMMARY}d)`,
+          `  Embeddings cached: ${kbStats.embeddingsCached}`,
+          `  DB size:           ${(kbStats.dbSizeBytes / 1024).toFixed(1)} KB`,
+          ``,
+          `**Working Memory** (agent: ${agent_id ?? "default"})`,
+          `  Facts: ${wmStats.count}/${wmStats.max}`,
+          `  Critical facts (★4-5): ${wmStats.criticalCount}`,
+          ``,
+          `**Schema**`,
+          `  Migration version: ${schemaV}`,
+          `  Embedding model:   ${ACTIVE_MODEL}`,
+          ``,
+          `**Fetch Budget (today)**`,
+          `  Used:      ${fetchUsed}/${Config.FETCH_LIMIT}`,
+          `  Remaining: ${fetchRemaining}`,
+          `  Resets at: UTC midnight`,
+          ``,
+          `**Integrity**`,
+          integrity.ok
+            ? `  Status: OK`
+            : `  Status: ⚠️  WARNINGS\n  ${integrity.warnings.join("\n  ")}`,
+          integrity.strictMode ? `  Mode: STRICT (ZC_STRICT_INTEGRITY=1)` : `  Mode: warn-only`,
+        ];
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
       default:
@@ -415,10 +530,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 function formatSandboxResult(result: {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  timedOut: boolean;
+  stdout:    string;
+  stderr:    string;
+  exitCode:  number | null;
+  timedOut:  boolean;
   truncated: boolean;
 }): string {
   const parts: string[] = [];
