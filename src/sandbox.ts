@@ -94,6 +94,13 @@ export async function runInSandbox(
     let errLen    = 0;
     let truncated = false;
     let timedOut  = false;
+    let settled   = false; // guard: promise resolves exactly once
+
+    function settle(result: SandboxResult): void {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    }
 
     const child = spawn(cmd, fixedArgs, {
       env:      SAFE_ENV,
@@ -105,6 +112,22 @@ export async function runInSandbox(
     const timer = setTimeout(() => {
       timedOut = true;
       killProcessTree(child);
+
+      // Node 22 exits with code 13 ("unsettled top-level await") if the event loop
+      // drains while a top-level promise is still pending. After killing the child,
+      // the `close` event may fire async — but if killProcessTree fails (child already
+      // dead, PID not found, etc.) the close event might never come.
+      // Resolve immediately on timeout so the event loop is never left dangling.
+      // A second `settle` call from the close event is safely ignored.
+      const outBuf = Buffer.concat(chunks.out);
+      const errBuf = Buffer.concat(chunks.err);
+      settle({
+        stdout:    cap(outBuf, STDOUT_CAP).text,
+        stderr:    cap(errBuf, STDERR_CAP).text,
+        exitCode:  null,
+        timedOut:  true,
+        truncated: truncated || outBuf.length > STDOUT_CAP,
+      });
     }, TIMEOUT_MS);
 
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -128,6 +151,7 @@ export async function runInSandbox(
       child.stdin.end();
     }
 
+    // unref so the child doesn't keep the event loop alive after settle() resolves the promise
     child.unref();
 
     child.on("close", (code) => {
@@ -137,7 +161,7 @@ export async function runInSandbox(
       const out    = cap(outBuf, STDOUT_CAP);
       const err    = cap(errBuf, STDERR_CAP);
 
-      resolve({
+      settle({
         stdout:    out.text,
         stderr:    err.text,
         exitCode:  code,
