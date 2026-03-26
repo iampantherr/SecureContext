@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-16T13:13:16.268Z",
+  "timestamp": "2026-03-26T16:44:19.377Z",
   "summary": {
     "total": 77,
     "passed": 72,
@@ -29,7 +29,7 @@
       "name": "Infinite loop killed by 30s timeout",
       "status": "PASS",
       "expected": "timedOut=true",
-      "actual": "killed after 30.1s",
+      "actual": "killed after 30.2s",
       "notes": ""
     },
     {
@@ -77,7 +77,7 @@
       "name": "Background subprocess spawned from sandbox",
       "status": "WARN",
       "expected": "background processes contained",
-      "actual": "child PID 84724 may survive parent kill",
+      "actual": "child PID 170156 may survive parent kill",
       "notes": "KNOWN LIMITATION: spawned detached children not in process group. Fix: use process group kill in sandbox."
     },
     {
@@ -85,7 +85,7 @@
       "name": "Controlled subprocess spawning (50 background children) — parent exits cleanly",
       "status": "PASS",
       "expected": "parent returns quickly after spawning children",
-      "actual": "elapsed=98ms, exitCode=0",
+      "actual": "elapsed=101ms, exitCode=0",
       "notes": "Process tree kill (taskkill /T) handles remaining children on Windows"
     },
     {
@@ -437,7 +437,7 @@
       "name": "Hook completes in <2s for normal input",
       "status": "PASS",
       "expected": "<2s",
-      "actual": "31ms",
+      "actual": "35ms",
       "notes": ""
     },
     {
@@ -525,7 +525,7 @@
       "name": "Session summary archived and searchable via KB",
       "status": "PASS",
       "expected": "SESSION_SUMMARY in results",
-      "actual": "found: [SESSION_SUMMARY] 2026-03-16",
+      "actual": "found: [SESSION_SUMMARY] 2026-03-26",
       "notes": ""
     },
     {
@@ -549,7 +549,7 @@
       "name": "Integrity check runs without crash",
       "status": "PASS",
       "expected": "returns {ok, firstRun, warnings}",
-      "actual": "ok=false, firstRun=false, warnings=5",
+      "actual": "ok=true, firstRun=false, warnings=0",
       "notes": ""
     },
     {
@@ -557,7 +557,7 @@
       "name": "Integrity check: same version compares against baseline",
       "status": "PASS",
       "expected": "comparison runs",
-      "actual": "ok=false, warnings=5",
+      "actual": "ok=true, warnings=0",
       "notes": ""
     },
     {

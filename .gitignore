@@ -4,3 +4,8 @@ dist/
 *.d.ts.map
 .env
 .env.*
+
+# Internal agent working files — not for public consumption
+.claude/
+AGENT_IMPLEMENTATION_GUIDE.md
+SecureContext_ProductionReadiness_Report.md
