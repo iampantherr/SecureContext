@@ -807,10 +807,10 @@ if (warnings.length > 0) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// CATEGORY 7 — v0.3.0 NEW FEATURE SECURITY TESTS
+// CATEGORY 7 — MEMORY & INTEGRITY SECURITY TESTS
 // ════════════════════════════════════════════════════════════════════════════
 console.log("\n" + B("═".repeat(70)));
-console.log(B("  CATEGORY 7: v0.3.0 NEW FEATURES — SECURITY TESTS"));
+console.log(B("  CATEGORY 7: MEMORY & INTEGRITY — SECURITY TESTS"));
 console.log(B("═".repeat(70)));
 
 const { rememberFact, recallWorkingMemory, archiveSessionSummary } = await import(new URL("../dist/memory.js", import.meta.url).href);
@@ -928,10 +928,10 @@ const { checkIntegrity } = await import(new URL("../dist/integrity.js", import.m
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// CATEGORY 8 — v0.4.0 NEW FEATURES — SECURITY TESTS (T71–T75)
+// CATEGORY 8 — TRUST LABELING & SOURCE VALIDATION TESTS (T71–T75)
 // ════════════════════════════════════════════════════════════════════════════
 console.log("\n" + B("═".repeat(70)));
-console.log(B("  CATEGORY 8: v0.4.0 NEW FEATURES — SECURITY TESTS"));
+console.log(B("  CATEGORY 8: TRUST LABELING & SOURCE VALIDATION — SECURITY TESTS"));
 console.log(B("═".repeat(70)));
 
 const { hasNonAsciiChars } = await import(new URL("../dist/knowledge.js", import.meta.url).href);
@@ -1051,7 +1051,7 @@ writeFileSync(
 );
 
 console.log("\n" + B("═".repeat(70)));
-console.log(B("  FINAL SUMMARY — v0.5.0 (77 attack vectors)"));
+console.log(B("  FINAL SUMMARY — v0.6.0 (77 attack vectors)"));
 console.log(B("═".repeat(70)));
 console.log(`  Total: ${total}  ${G("PASS: " + passed)}  ${R("FAIL: " + failed)}  ${Y("WARN: " + warned)}  ${Y("SKIP: " + skipped)}`);
 

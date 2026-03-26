@@ -35,14 +35,14 @@ An audit of the most popular context plugin (`context-mode`, 1,000+ installs) fo
 ### Security You Can Verify (77 automated attack vectors, 72 pass)
 
 ```
-Category 1: Sandbox Security          — 12 PASS, 2 WARN (accepted design trade-offs)
-Category 2: SSRF & Fetcher Attacks    — 18 PASS, 2 WARN (low risk, documented)
-Category 3: SQLite / KB Attacks       — 11 PASS, 0 WARN
-Category 4: Hook Attacks              —  9 PASS, 0 WARN
-Category 5: Prompt Injection via KB   —  5 PASS, 0 WARN
-Category 6: MCP Protocol              —  0 PASS, 1 WARN (cosmetic)
-Category 7: v0.3.0 Feature Security   — 10 PASS, 0 WARN
-Category 8: v0.4.0/0.5.0 Features    —  7 PASS, 0 WARN
+Category 1: Sandbox Security                      — 12 PASS, 2 WARN (accepted design trade-offs)
+Category 2: SSRF & Fetcher Attacks                — 18 PASS, 2 WARN (low risk, documented)
+Category 3: SQLite / KB Attacks                   — 11 PASS, 0 WARN
+Category 4: Hook Attacks                          —  9 PASS, 0 WARN
+Category 5: Prompt Injection via KB               —  5 PASS, 0 WARN
+Category 6: MCP Protocol & Misc                   —  0 PASS, 1 WARN (cosmetic)
+Category 7: Memory & Integrity                    — 10 PASS, 0 WARN
+Category 8: Trust Labeling & Source Validation    —  7 PASS, 0 WARN
 ```
 
 Every test is public and runnable: `node security-tests/run-all.mjs`
