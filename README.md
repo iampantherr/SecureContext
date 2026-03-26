@@ -184,7 +184,7 @@ For the complete technical architecture with all security properties documented,
 
 ---
 
-## 11 MCP Tools
+## 12 MCP Tools
 
 | Tool | What it does |
 |------|-------------|
@@ -192,7 +192,8 @@ For the complete technical architecture with all security properties documented,
 | `zc_execute_file` | Analyse a specific file in sandbox (TARGET_FILE via stdin — not in process list) |
 | `zc_fetch` | Fetch a public URL, convert to Markdown, index into KB |
 | `zc_index` | Manually index text into the knowledge base |
-| `zc_search` | Hybrid BM25 + vector search across project knowledge |
+| `zc_search` | Hybrid BM25 + vector search across current project knowledge |
+| `zc_search_global` | Federated search across **all** local project KBs (cross-project, sorted by most recently active) |
 | `zc_batch` | Run shell commands AND search KB in one parallel call |
 | `zc_remember` | Store a key-value fact with importance score (1–5) and optional agent namespace |
 | `zc_forget` | Remove a fact from working memory |
@@ -344,6 +345,7 @@ Results written to `security-tests/results.json`.
 ## Changelog
 
 ### v0.6.0 — Production Hardening Release
+- **`zc_search_global` tool** — cross-project federated search across all local project KBs (12th tool); searches N most-recently-active projects with query embedding computed once for performance; results include project label + content-level deduplication
 - **`install.mjs`** — one-command installer for CLI + Desktop App (`node install.mjs`)
 - **`src/config.ts`** — all constants in one place, overridable via env vars (`ZC_OLLAMA_MODEL`, `ZC_STRICT_INTEGRITY`, `ZC_FETCH_LIMIT`, etc.)
 - **`src/migrations.ts`** — versioned schema migration system with transaction safety (each migration atomic; crash between apply and record rolls back cleanly)
