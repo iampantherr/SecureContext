@@ -1,7 +1,7 @@
-# SecureContext — Secure Context Optimization for Claude Code
+# SecureContext — Persistent Memory & Token Optimization MCP Plugin for Claude Code
 
-> **The open-source replacement for context-mode and similar Claude plugins.**
-> Hardened memory + search. Zero credential leakage. Built to be the context manager you'd actually trust in production.
+> **Never lose context between Claude Code sessions again.**
+> Drop-in replacement for context-mode. MemGPT-style persistent memory, hybrid BM25+vector search, credential-isolated sandbox, 87% fewer tokens. Zero cloud sync. MIT license.
 
 [![Tests](https://img.shields.io/badge/security%20tests-72%20PASS%20%7C%200%20FAIL%20%7C%205%20WARN-brightgreen)](security-tests/results.json)
 [![Unit Tests](https://img.shields.io/badge/unit%20tests-138%20passed-brightgreen)](src)
@@ -63,6 +63,21 @@ Typical real-world improvement: **Claude stops repeating questions it already an
 ---
 
 ## How It Compares to the Competition
+
+### vs. `claude-mem` (21,500+ stars)
+
+| Feature | claude-mem | SecureContext |
+|---------|-----------|--------------|
+| Memory approach | AI-compressed summaries (lossy) | MemGPT importance-scored facts (structured) |
+| Search | None | Hybrid BM25 + Ollama vector reranking |
+| Security audit | ❌ None | ✅ 77 automated attack vectors |
+| Credential isolation | ❌ Not specified | ✅ PATH-only sandbox, verified by test |
+| SSRF protection | ❌ | ✅ 4-layer protection incl. cloud metadata |
+| Cross-project search | ❌ | ✅ `zc_search_global` across all projects |
+| Tiered retention | ❌ | ✅ external 14d · internal 30d · summaries 365d |
+| Agent namespacing | ❌ | ✅ `agent_id` prevents parallel agent collisions |
+| Open source (auditable) | ❌ Pre-compiled bundle | ✅ TypeScript source, compiled locally |
+| External dependency | Claude Agent SDK (cloud) | Node.js 22 built-in SQLite only |
 
 ### vs. `context-mode` (most popular alternative)
 
@@ -386,4 +401,4 @@ MIT — free to use, modify, and distribute.
 
 ---
 
-*Keywords: claude code plugin, context optimization, context-mode alternative, secure claude plugin, claude memory, claude context management, anthropic claude context, MCP plugin security, MemGPT claude, hybrid search claude, claude code context window, zc-ctx, zeroclaw*
+*Keywords: claude code plugin, claude code memory, claude persistent memory, never lose context claude, claude code context management, context-mode alternative, claude-mem alternative, reduce claude token usage, claude token optimization, claude context window optimization, secure claude plugin, anthropic claude context, MCP server memory, MCP plugin security, MemGPT claude, hybrid search claude, claude code context window, claude code session memory, claude code persistent memory plugin, AI agent memory management, LLM memory management, claude desktop memory, zc-ctx, zeroclaw, SecureContext*
