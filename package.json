@@ -45,6 +45,19 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/server.js",
+  "files": [
+    "dist/",
+    "src/",
+    "hooks/",
+    "security-tests/",
+    "install.mjs",
+    "README.md",
+    "ARCHITECTURE.md",
+    "SECURITY_REPORT.md",
+    "CLAUDE.md",
+    "llms.txt",
+    "tsconfig.json"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
