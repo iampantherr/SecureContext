@@ -172,6 +172,28 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  // ── v0.7.1 migrations ────────────────────────────────────────────────────
+
+  {
+    id: 9,
+    description: "Purge legacy SHA256 channel key hashes — scrypt upgrade required (security fix)",
+    up: (db) => {
+      // v0.7.0 stored the channel key as plain SHA256(key) with no salt — not a KDF.
+      // This is vulnerable to offline brute force: ~10B guesses/sec on a GPU.
+      // v0.7.1 replaces SHA256 with scrypt (N=65536, r=8, p=1, 256-bit random salt).
+      // New format: "scrypt:v1:{N}:{r}:{p}:{salt_hex}:{hash_hex}"
+      //
+      // This migration deletes any stored key that is NOT in the new scrypt format.
+      // Effect: users who had a channel key configured must re-run set_key once.
+      // This is a deliberate, secure breaking change — SHA256 hashes must not be trusted.
+      db.exec(`
+        DELETE FROM project_meta
+        WHERE key = 'zc_channel_key_hash'
+          AND value NOT LIKE 'scrypt:v1:%'
+      `);
+    },
+  },
+
 ];
 
 /**

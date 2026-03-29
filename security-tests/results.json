@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-03-26T16:44:19.377Z",
+  "timestamp": "2026-03-29T18:22:04.260Z",
   "summary": {
-    "total": 77,
-    "passed": 72,
+    "total": 84,
+    "passed": 78,
     "failed": 0,
-    "warned": 5,
+    "warned": 6,
     "skipped": 0
   },
   "results": [
@@ -77,7 +77,7 @@
       "name": "Background subprocess spawned from sandbox",
       "status": "WARN",
       "expected": "background processes contained",
-      "actual": "child PID 170156 may survive parent kill",
+      "actual": "child PID 266640 may survive parent kill",
       "notes": "KNOWN LIMITATION: spawned detached children not in process group. Fix: use process group kill in sandbox."
     },
     {
@@ -85,7 +85,7 @@
       "name": "Controlled subprocess spawning (50 background children) — parent exits cleanly",
       "status": "PASS",
       "expected": "parent returns quickly after spawning children",
-      "actual": "elapsed=101ms, exitCode=0",
+      "actual": "elapsed=90ms, exitCode=0",
       "notes": "Process tree kill (taskkill /T) handles remaining children on Windows"
     },
     {
@@ -421,7 +421,7 @@
       "name": "posttooluse hook does not modify itself when its own path is used",
       "status": "PASS",
       "expected": "file unchanged",
-      "actual": "5101 bytes unchanged",
+      "actual": "6271 bytes unchanged",
       "notes": ""
     },
     {
@@ -437,7 +437,7 @@
       "name": "Hook completes in <2s for normal input",
       "status": "PASS",
       "expected": "<2s",
-      "actual": "35ms",
+      "actual": "34ms",
       "notes": ""
     },
     {
@@ -525,7 +525,7 @@
       "name": "Session summary archived and searchable via KB",
       "status": "PASS",
       "expected": "SESSION_SUMMARY in results",
-      "actual": "found: [SESSION_SUMMARY] 2026-03-26",
+      "actual": "found: [SESSION_SUMMARY] 2026-03-29",
       "notes": ""
     },
     {
@@ -622,6 +622,62 @@
       "status": "PASS",
       "expected": "explicit 'javascript: URIs are never allowed' message",
       "actual": "Blocked protocol: javascript: URIs are never allowed (XSS/code injection risk).",
+      "notes": ""
+    },
+    {
+      "id": "T_B01",
+      "name": "Broadcast spam: exactly 10 accepted, (10+1)th rejected",
+      "status": "PASS",
+      "expected": "accepted=10, then rejected",
+      "actual": "accepted=10, rejected=true",
+      "notes": ""
+    },
+    {
+      "id": "T_B02",
+      "name": "Open mode: agent_id spoofing documented — MERGE written by worker appears in channel",
+      "status": "WARN",
+      "expected": "entry appears with rogue-worker agent_id (open mode limitation)",
+      "actual": "hasEntry=true. Use key-protected mode to prevent this.",
+      "notes": "KNOWN LIMITATION: In open mode, agent_id is self-reported. Use set_key for pipelines requiring identity."
+    },
+    {
+      "id": "T_B03",
+      "name": "Prompt injection defense: STATUS summary labeled UNVERIFIED, ASSIGN not labeled",
+      "status": "PASS",
+      "expected": "STATUS→UNVERIFIED, ASSIGN→trusted",
+      "actual": "statusHasLabel=true, assignNoLabel=true",
+      "notes": ""
+    },
+    {
+      "id": "T_B04",
+      "name": "KDF: channel key stored as scrypt:v1: format (not SHA256)",
+      "status": "PASS",
+      "expected": "scrypt:v1:{N}:{r}:{p}:{salt}:{hash}",
+      "actual": "stored=scrypt:v1:32768:8:1:b8cff5a5f79d8da721f4...",
+      "notes": ""
+    },
+    {
+      "id": "T_B05",
+      "name": "channel_key not in JSONL: events file not created for zc_broadcast",
+      "status": "PASS",
+      "expected": "no events file or no key in it",
+      "actual": "events file does not exist for this project",
+      "notes": ""
+    },
+    {
+      "id": "T_B06",
+      "name": "Project isolation: broadcasts do not leak across project DBs",
+      "status": "PASS",
+      "expected": "no cross-project leakage",
+      "actual": "p1msgs=1, p2msgs=1",
+      "notes": ""
+    },
+    {
+      "id": "T_B07",
+      "name": "Path traversal: ../.. paths stripped from files[], safe paths preserved",
+      "status": "PASS",
+      "expected": "traversal stripped, safe paths kept",
+      "actual": "returnFiles=[\"src/legit.ts\",\"valid/path/file.ts\"]",
       "notes": ""
     }
   ]

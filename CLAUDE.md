@@ -8,7 +8,7 @@ MemGPT-style persistent memory, session continuity, SSRF-protected web fetch) wi
 maximum security — no pre-compiled bundles, no credential leakage, no cloud sync.
 
 **Plugin ID:** `zc-ctx@zeroclaw`
-**Version:** `0.7.0`
+**Version:** `0.7.1`
 **License:** MIT
 **Language:** TypeScript (Node.js ≥ 22)
 
@@ -21,7 +21,7 @@ SecureContext/
 ├── src/
 │   ├── server.ts           MCP server entrypoint — 12 tools
 │   ├── config.ts           All constants + env var overrides
-│   ├── migrations.ts       Versioned schema migrations (7 migrations)
+│   ├── migrations.ts       Versioned schema migrations (9 migrations)
 │   ├── sandbox.ts          Isolated code executor (python/js/bash)
 │   ├── knowledge.ts        Hybrid BM25+vector KB + cross-project search
 │   ├── embedder.ts         Ollama nomic-embed-text client
@@ -29,13 +29,13 @@ SecureContext/
 │   ├── fetcher.ts          4-layer SSRF-protected URL fetcher
 │   ├── integrity.ts        SHA256 tamper detection
 │   ├── session.ts          JSONL event log reader
-│   └── *.test.ts           Vitest unit tests (138 tests)
+│   └── *.test.ts           Vitest unit tests (248 tests)
 ├── hooks/
 │   ├── pretooluse.mjs      Blocks risky tool calls
 │   ├── posttooluse.mjs     Logs session metadata (read-only)
 │   └── stop.mjs            Session boundary marker
 ├── security-tests/
-│   └── run-all.mjs         77 automated attack vectors
+│   └── run-all.mjs         84 automated attack vectors
 ├── .github/workflows/ci.yml  Build + unit tests + security tests on every push
 ├── .claude-plugin/
 │   └── plugin.json         Claude plugin manifest
@@ -55,8 +55,8 @@ SecureContext/
 ```bash
 npm ci                           # Install deps from lockfile
 npm run build                    # tsc compile → dist/
-npm test                         # Vitest unit tests (200 tests)
-node security-tests/run-all.mjs  # 77 security attack vectors
+npm test                         # Vitest unit tests (248 tests)
+node security-tests/run-all.mjs  # 84 security attack vectors
 node install.mjs                 # Install for Claude Code CLI + Desktop App
 node install.mjs --uninstall     # Remove from all configs
 ```
@@ -79,7 +79,7 @@ node install.mjs --uninstall     # Remove from all configs
 | `zc_recall_context(agent_id?)` | Restore full context (memory + shared channel + events + status) |
 | `zc_summarize_session(summary)` | Archive session summary (kept 365 days) |
 | `zc_status(agent_id?)` | DB health, KB counts, memory fill, fetch budget |
-| `zc_broadcast(type, agent_id, ...)` | [v0.7.0] Post to shared A2A channel (ASSIGN/STATUS/PROPOSED/DEPENDENCY/MERGE/REJECT/REVISE/set_key) |
+| `zc_broadcast(type, agent_id, ...)` | [v0.7.1] Post to shared A2A channel (ASSIGN/STATUS/PROPOSED/DEPENDENCY/MERGE/REJECT/REVISE/set_key) |
 
 ---
 
@@ -98,7 +98,7 @@ node install.mjs --uninstall     # Remove from all configs
 
 ---
 
-## Schema (v0.7.0 — 8 migrations)
+## Schema (v0.7.1 — 9 migrations)
 
 | Table | Purpose |
 |-------|---------|
@@ -121,6 +121,24 @@ Retention tiers: `external`=14d · `internal`=30d · `summary`=365d
 2. Check `git log --oneline` for recent changes
 3. Run `npm run build && npm test` after any `.ts` change
 4. Run `node security-tests/run-all.mjs` after security-related changes
-5. All 200 unit tests + 77 security vectors must pass before pushing
+5. All 248 unit tests + 84 security vectors must pass before pushing
 6. Never break the 10 security rules above
 7. Commit after every stable milestone with a descriptive message
+
+---
+
+## Broadcast Channel — Known Design Limitations (Gap 4)
+
+The `agent_id` parameter in `zc_broadcast` is **unauthenticated in open mode** (no `set_key`).
+Any agent can post with any `agent_id` string — there is no cryptographic binding between
+the parameter value and the actual calling agent. This is an accepted architectural trade-off:
+
+- **In key-protected mode**: `agent_id` on gated types (ASSIGN/MERGE/REJECT/REVISE) is
+  protected indirectly — only the key-holder can write those types, so the agent_id on
+  those messages is trustworthy as long as the key is kept secret.
+- **In open mode**: `agent_id` is a human-readable label only. Treat it as a self-declared
+  identifier, not a verified identity. Malicious workers could spoof another agent's ID.
+- **Practical implication**: In automated, fully-trusted pipelines (all agents are your code),
+  open mode is fine. For untrusted code pipelines, always use key-protected mode.
+- **Not planned for fix**: Full agent identity binding would require PKI (per-agent keypairs),
+  which is out of scope for a local coordination tool. Document the limitation; use key mode.

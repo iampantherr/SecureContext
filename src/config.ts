@@ -21,7 +21,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.7.0",
+  VERSION: "0.7.1",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -68,4 +68,31 @@ export const Config = {
   // ── Security ──────────────────────────────────────────────────────────────
   // When true, integrity mismatch crashes the server instead of just logging
   STRICT_INTEGRITY:  env["ZC_STRICT_INTEGRITY"] === "1",
+
+  // ── Broadcast channel security ────────────────────────────────────────────
+  // Channel key KDF: scrypt parameters (OWASP Interactive Login recommended minimum)
+  // N=32768 (2^15): cost factor — the minimum specified by OWASP for interactive use.
+  // Memory required: 128 * N * r = 128 * 32768 * 8 = 32MB per hash operation.
+  // Offline brute force: ~10^9 guesses/sec GPU cluster → a 20-char random key takes decades.
+  //
+  // WHY NOT N=65536: Node.js scryptSync's default maxmem cap is 32MB. N=65536 requires
+  // 64MB and throws ERR_CRYPTO_INVALID_SCRYPT_PARAMS without an explicit maxmem override.
+  // N=32768 exactly meets the OWASP minimum AND fits within Node's default limits when
+  // SCRYPT_MAXMEM is set to 256MB (which we do explicitly in every scrypt call).
+  SCRYPT_N:   32768,
+  SCRYPT_R:   8,
+  SCRYPT_P:   1,
+  SCRYPT_KEYLEN: 64,     // 512-bit output
+  SCRYPT_SALT_BYTES: 32, // 256-bit random salt
+  // Explicit memory cap for scrypt. Prevents DoS via a crafted stored hash with huge N/r.
+  // 256MB is generous for N=32768 (requires 32MB) while capping runaway parameters.
+  SCRYPT_MAXMEM: 256 * 1024 * 1024, // 256MB
+
+  // Minimum channel key length — enforced at set_key time.
+  // 16 chars is the minimum for a key used with a proper KDF.
+  MIN_CHANNEL_KEY_LENGTH: 16,
+
+  // Broadcast rate limit — max broadcasts per agent per 60 seconds.
+  // Prevents DoS via broadcast spam causing context window overflow.
+  BROADCAST_RATE_LIMIT_PER_MINUTE: 10,
 } as const;

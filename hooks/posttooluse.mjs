@@ -57,10 +57,36 @@ function sanitizeForJsonl(value) {
 }
 
 /**
+ * SECURITY: Redact known credential-adjacent parameter names from any tool_input
+ * object before it touches the event log. This is a defence-in-depth measure —
+ * the current extractSafeEvent() does not log zc_broadcast inputs, but future
+ * additions must not accidentally expose channel keys or other secrets.
+ *
+ * Case-insensitive match on parameter names. Values are replaced with "[REDACTED]".
+ */
+const REDACTED_PARAM_NAMES = new Set([
+  "channel_key", "key", "password", "secret", "token",
+  "api_key", "apikey", "auth", "credential", "passphrase",
+]);
+
+function redactSensitiveParams(toolInput) {
+  if (typeof toolInput !== "object" || toolInput === null) return toolInput;
+  const out = {};
+  for (const [k, v] of Object.entries(toolInput)) {
+    out[k] = REDACTED_PARAM_NAMES.has(k.toLowerCase()) ? "[REDACTED]" : v;
+  }
+  return out;
+}
+
+/**
  * Extract only safe, non-content metadata from a tool response.
  * NEVER returns the actual file content or command output.
  */
 function extractSafeEvent(toolName, toolInput, toolResponse) {
+  // SECURITY: Redact sensitive parameters before any field is accessed.
+  // Even though current cases (Write/Edit/Bash/TodoWrite) don't have sensitive params,
+  // this ensures any future case addition cannot accidentally log credentials.
+  toolInput = redactSensitiveParams(toolInput);
   const now = new Date().toISOString();
 
   if (toolName === "Write" || toolName === "Edit" || toolName === "NotebookEdit") {
