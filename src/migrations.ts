@@ -144,6 +144,34 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  // ── v0.7.0 migrations ────────────────────────────────────────────────────
+
+  {
+    id: 8,
+    description: "Add broadcasts table for A2A shared coordination channel",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS broadcasts (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          type       TEXT    NOT NULL
+                             CHECK(type IN ('ASSIGN','STATUS','PROPOSED','DEPENDENCY','MERGE','REJECT','REVISE')),
+          agent_id   TEXT    NOT NULL DEFAULT 'default',
+          task       TEXT    NOT NULL DEFAULT '',
+          files      TEXT    NOT NULL DEFAULT '[]',
+          state      TEXT    NOT NULL DEFAULT '',
+          summary    TEXT    NOT NULL DEFAULT '',
+          depends_on TEXT    NOT NULL DEFAULT '[]',
+          reason     TEXT    NOT NULL DEFAULT '',
+          importance INTEGER NOT NULL DEFAULT 3,
+          created_at TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_bc_type       ON broadcasts(type);
+        CREATE INDEX IF NOT EXISTS idx_bc_agent      ON broadcasts(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_bc_created_at ON broadcasts(created_at DESC);
+      `);
+    },
+  },
+
 ];
 
 /**

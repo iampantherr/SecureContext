@@ -23,6 +23,12 @@ import {
   archiveSessionSummary,
   formatWorkingMemoryForContext,
   getMemoryStats,
+  broadcastFact,
+  recallSharedChannel,
+  setChannelKey,
+  isChannelKeyConfigured,
+  formatSharedChannelForContext,
+  type BroadcastType,
 } from "./memory.js";
 import { checkIntegrity, type IntegrityResult } from "./integrity.js";
 import { getCurrentSchemaVersion } from "./migrations.js";
@@ -289,6 +295,72 @@ const TOOLS: Tool[] = [
       required: [],
     },
   },
+  {
+    name: "zc_broadcast",
+    description:
+      "Broadcast a coordination message to the shared A2A channel (Agent-to-Agent). " +
+      "Use for multi-agent orchestration: assign tasks, report status, propose changes, " +
+      "declare file dependencies, approve/reject/revise proposals. " +
+      "Shared channel is readable by all agents via zc_recall_context(). " +
+      "If a channel key is configured (via set_key action), all WRITE operations require it. " +
+      "READ and STATUS actions never require a key. " +
+      "Actions: ASSIGN · STATUS · PROPOSED · DEPENDENCY · MERGE · REJECT · REVISE · set_key",
+    inputSchema: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          enum: ["ASSIGN", "STATUS", "PROPOSED", "DEPENDENCY", "MERGE", "REJECT", "REVISE", "set_key"],
+          description:
+            "ASSIGN=orchestrator assigns task | STATUS=report progress | " +
+            "PROPOSED=propose file changes | DEPENDENCY=declare file deps | " +
+            "MERGE=approve changes | REJECT=reject changes | REVISE=request revision | " +
+            "set_key=configure channel key (orchestrator only)",
+        },
+        agent_id: {
+          type: "string",
+          description: "Sending agent identifier (e.g. 'orchestrator', 'agent-auth', 'agent-db')",
+        },
+        task: {
+          type: "string",
+          description: "Task name or description (max 500 chars)",
+        },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "File paths affected by this broadcast (max 50 entries)",
+        },
+        state: {
+          type: "string",
+          description: "Current state: e.g. 'in-progress', 'blocked', 'done'",
+        },
+        summary: {
+          type: "string",
+          description: "Human-readable summary of work done or decision made (max 1000 chars)",
+        },
+        depends_on: {
+          type: "array",
+          items: { type: "string" },
+          description: "agent_ids whose outputs this broadcast depends on",
+        },
+        reason: {
+          type: "string",
+          description: "Reason for a REJECT or REVISE decision (max 500 chars)",
+        },
+        importance: {
+          type: "integer",
+          minimum: 1,
+          maximum: 5,
+          description: "Priority: 1=low, 3=normal, 5=critical",
+        },
+        channel_key: {
+          type: "string",
+          description: "Channel capability key — required if key is configured. For set_key action, this IS the new key to set.",
+        },
+      },
+      required: ["type", "agent_id"],
+    },
+  },
 ];
 
 // ─── Server setup ──────────────────────────────────────────────────────────────
@@ -438,15 +510,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "zc_recall_context": {
         const { agent_id } = args as { agent_id?: string };
-        const wm     = recallWorkingMemory(PROJECT_PATH, agent_id);
-        const events = getRecentEvents(PROJECT_PATH, 20);
+        const wm         = recallWorkingMemory(PROJECT_PATH, agent_id);
+        const events     = getRecentEvents(PROJECT_PATH, 20);
+        const broadcasts = recallSharedChannel(PROJECT_PATH, { limit: 30 });
 
         const parts: string[] = [];
 
         // Section 1: Working Memory (structured by priority)
         parts.push(formatWorkingMemoryForContext(wm, agent_id));
 
-        // Section 2: Recent Session Events
+        // Section 2: Shared Broadcast Channel (A2A coordination)
+        parts.push("\n" + formatSharedChannelForContext(broadcasts));
+
+        // Section 3: Recent Session Events
         parts.push("\n## Recent Session Events");
         if (events.length > 0) {
           for (const e of events) {
@@ -459,10 +535,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           parts.push("  No events recorded yet.");
         }
 
-        // Section 3: System Status (inline — no tool call needed)
+        // Section 4: System Status (inline — no tool call needed)
         parts.push("\n## System Status");
         parts.push(`  Plugin: zc-ctx v${Config.VERSION}`);
         parts.push(`  Embedding model: ${ACTIVE_MODEL}`);
+        const channelKeySet = isChannelKeyConfigured(PROJECT_PATH);
+        parts.push(`  Broadcast channel: ${channelKeySet ? "key-protected" : "open"}`);
         if (!integrity.ok) {
           parts.push(`  ⚠️  Integrity: ${integrity.warnings.join("; ")}`);
         } else {
@@ -470,6 +548,81 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         return { content: [{ type: "text", text: parts.join("\n") }] };
+      }
+
+      case "zc_broadcast": {
+        const {
+          type, agent_id, task, files, state, summary,
+          depends_on, reason, importance, channel_key,
+        } = args as {
+          type:        string;
+          agent_id:    string;
+          task?:       string;
+          files?:      string[];
+          state?:      string;
+          summary?:    string;
+          depends_on?: string[];
+          reason?:     string;
+          importance?: number;
+          channel_key?: string;
+        };
+
+        // Special action: configure the channel key
+        if (type === "set_key") {
+          if (!channel_key || channel_key.trim().length < 8) {
+            return {
+              content: [{ type: "text", text: "Error: channel_key must be at least 8 characters for set_key action." }],
+              isError: true,
+            };
+          }
+          setChannelKey(PROJECT_PATH, channel_key);
+          return {
+            content: [{
+              type: "text",
+              text:
+                `Channel key configured.\n` +
+                `All future broadcasts to this project require the correct key.\n` +
+                `Workers must supply channel_key= to use zc_broadcast.`,
+            }],
+          };
+        }
+
+        // Validate broadcast type
+        const VALID_TYPES: BroadcastType[] = [
+          "ASSIGN", "STATUS", "PROPOSED", "DEPENDENCY", "MERGE", "REJECT", "REVISE",
+        ];
+        if (!VALID_TYPES.includes(type as BroadcastType)) {
+          return {
+            content: [{ type: "text", text: `Error: unknown type "${type}". Valid: ${VALID_TYPES.join(", ")}, set_key` }],
+            isError: true,
+          };
+        }
+
+        const msg = broadcastFact(
+          PROJECT_PATH,
+          type as BroadcastType,
+          agent_id,
+          { task, files, state, summary, depends_on, reason, importance, channel_key }
+        );
+
+        const fileStr  = msg.files.length   > 0 ? `\nFiles:      ${msg.files.join(", ")}` : "";
+        const depStr   = msg.depends_on.length > 0 ? `\nDepends on: ${msg.depends_on.join(", ")}` : "";
+        const reasonStr = msg.reason ? `\nReason:     ${msg.reason}` : "";
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Broadcast #${msg.id} posted to shared channel.\n` +
+              `Type:       ${msg.type}\n` +
+              `Agent:      ${msg.agent_id}` +
+              (msg.task ? `\nTask:       ${msg.task}` : "") +
+              fileStr + depStr + reasonStr +
+              (msg.summary ? `\nSummary:    ${msg.summary}` : "") +
+              `\nImportance: ★${msg.importance}` +
+              `\nAt:         ${msg.created_at.slice(0, 19)}Z`,
+          }],
+        };
       }
 
       case "zc_summarize_session": {

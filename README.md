@@ -1,12 +1,12 @@
 # SecureContext — Persistent Memory & Token Optimization MCP Plugin for Claude Code
 
 > **Never lose context between Claude Code sessions again.**
-> Drop-in replacement for context-mode. MemGPT-style persistent memory, hybrid BM25+vector search, credential-isolated sandbox, 87% fewer tokens. Zero cloud sync. MIT license.
+> Drop-in replacement for context-mode. MemGPT-style persistent memory, hybrid BM25+vector search, credential-isolated sandbox, A2A multi-agent broadcast channel, 87% fewer tokens. Zero cloud sync. MIT license.
 
 [![Tests](https://img.shields.io/badge/security%20tests-72%20PASS%20%7C%200%20FAIL%20%7C%205%20WARN-brightgreen)](security-tests/results.json)
-[![Unit Tests](https://img.shields.io/badge/unit%20tests-138%20passed-brightgreen)](src)
+[![Unit Tests](https://img.shields.io/badge/unit%20tests-200%20passed-brightgreen)](src)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
-[![Version](https://img.shields.io/badge/version-0.6.0-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.7.0-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
@@ -180,17 +180,20 @@ SecureContext adds a secured layer between Claude and the outside world:
 ```
 Claude AI
     │
-    ├─► zc_execute   →  Subprocess (PATH-only env, 30s timeout, 512KB cap)
+    ├─► zc_execute      →  Subprocess (PATH-only env, 30s timeout, 512KB cap)
     │
-    ├─► zc_fetch     →  Protocol check → SSRF check → DNS check → redirect check
-    │                   → HTML to Markdown → indexed as [EXTERNAL] in KB
+    ├─► zc_fetch        →  Protocol check → SSRF check → DNS check → redirect check
+    │                      → HTML to Markdown → indexed as [EXTERNAL] in KB
     │
-    ├─► zc_search    →  FTS5 BM25 → Ollama cosine reranking → top 10
-    │                   External results labeled [UNTRUSTED EXTERNAL CONTENT]
+    ├─► zc_search       →  FTS5 BM25 → Ollama cosine reranking → top 10
+    │                      External results labeled [UNTRUSTED EXTERNAL CONTENT]
     │
-    ├─► zc_remember  →  Working memory (50 facts, importance-scored, evict to KB)
+    ├─► zc_remember     →  Working memory (50 facts, importance-scored, evict to KB)
     │
-    └─► zc_recall_context → Restore working memory + session boundary markers
+    ├─► zc_broadcast    →  Shared A2A channel (append-only, key-authenticated)
+    │                      ASSIGN · STATUS · PROPOSED · DEPENDENCY · MERGE · REJECT · REVISE
+    │
+    └─► zc_recall_context → Restore working memory + shared channel + session events
 
 All data stored in: ~/.claude/zc-ctx/sessions/{sha256_of_project_path}.db
 ```
@@ -199,7 +202,7 @@ For the complete technical architecture with all security properties documented,
 
 ---
 
-## 12 MCP Tools
+## 13 MCP Tools
 
 | Tool | What it does |
 |------|-------------|
@@ -212,9 +215,10 @@ For the complete technical architecture with all security properties documented,
 | `zc_batch` | Run shell commands AND search KB in one parallel call |
 | `zc_remember` | Store a key-value fact with importance score (1–5) and optional agent namespace |
 | `zc_forget` | Remove a fact from working memory |
-| `zc_recall_context` | Restore full project context at session start (structured: Critical / Normal / Ephemeral) |
+| `zc_recall_context` | Restore full project context: working memory + shared channel + session events |
 | `zc_summarize_session` | Archive session summary to long-term searchable memory (kept 365 days) |
 | `zc_status` | Show DB health, KB entry counts, working memory fill, schema version, fetch budget |
+| `zc_broadcast` | **[Phase 2]** Post to the shared A2A coordination channel (ASSIGN/STATUS/PROPOSED/DEPENDENCY/MERGE/REJECT/REVISE). Optionally key-protected via capability token. |
 
 ---
 
@@ -357,7 +361,87 @@ Results written to `security-tests/results.json`.
 
 ---
 
+---
+
+## Phase 2 — A2A Multi-Agent Coordination (v0.7.0)
+
+SecureContext v0.7.0 adds a **shared broadcast channel** for multi-agent (A2A) orchestration. Multiple Claude Code agents working on the same project can coordinate task assignment, status, file ownership, and merge decisions — without any external message broker, cloud dependency, or shared file hacks.
+
+### How It Works
+
+The broadcast channel is an **append-only, SQLite-backed shared ledger**. Every agent can read all broadcasts via `zc_recall_context()`. Writes require the channel key if one is configured (capability-based access).
+
+```
+# Orchestrator assigns work
+zc_broadcast(type="ASSIGN", agent_id="orchestrator",
+  task="Implement auth module", files=["src/auth.ts"], channel_key="KEY")
+
+# Worker reports progress
+zc_broadcast(type="STATUS", agent_id="agent-auth",
+  state="in-progress", summary="JWT middleware 60% done")
+
+# Worker proposes file changes for review
+zc_broadcast(type="PROPOSED", agent_id="agent-auth",
+  files=["src/auth.ts", "src/middleware.ts"],
+  summary="Auth module complete — ready for merge")
+
+# Orchestrator approves
+zc_broadcast(type="MERGE", agent_id="orchestrator",
+  task="auth-module", summary="Approved — merge to main", channel_key="KEY")
+
+# Any agent recalls the full channel at session start:
+zc_recall_context()
+# → shows Working Memory + Shared Channel (grouped by type) + Session Events
+```
+
+### Security Design (Chin & Older 2011)
+
+| Property | Implementation |
+|----------|---------------|
+| **Biba Integrity** (no-write-up) | Workers without channel key cannot write to shared channel |
+| **Bell-La Padula** (no-read-up) | Private `working_memory` facts invisible to other agents |
+| **Reference Monitor** | `broadcastFact()` is the single enforcement point for all channel writes |
+| **Least Privilege** | Default = open mode (no key needed). Key mode restricts writes to key-holders only |
+| **Non-Transitive Delegation** | Workers can READ broadcasts but cannot re-broadcast as orchestrator (key never returned) |
+| **Capability Token** | Channel key stored as SHA256 hash — raw key never persisted, timing-safe comparison |
+
+### Broadcast Types
+
+| Type | Direction | Use |
+|------|-----------|-----|
+| `ASSIGN` | Orchestrator → Worker | Assign a task, specify target files |
+| `STATUS` | Worker → Channel | Report progress state |
+| `PROPOSED` | Worker → Channel | Propose file changes for review |
+| `DEPENDENCY` | Worker → Channel | Declare dependency on another agent's output |
+| `MERGE` | Orchestrator → Worker | Approve proposed changes |
+| `REJECT` | Orchestrator → Worker | Reject proposal with reason |
+| `REVISE` | Orchestrator → Worker | Request revision with reason |
+
+### Channel Key Setup (optional)
+
+```
+# Orchestrator sets the channel key once (stored as SHA256 hash)
+zc_broadcast(type="set_key", agent_id="orchestrator", channel_key="my-secret-key-min8chars")
+
+# After key is set, all ASSIGN/MERGE/REJECT/REVISE require channel_key=
+zc_broadcast(type="ASSIGN", agent_id="orchestrator",
+  task="...", channel_key="my-secret-key-min8chars")
+
+# Workers (no key) can only write STATUS/PROPOSED/DEPENDENCY — if key IS configured, they need it too
+# Workers without key in open-mode (no key set) can write any type freely
+```
+
+---
+
 ## Changelog
+
+### v0.7.0 — A2A Multi-Agent Coordination
+- **`zc_broadcast` tool** (13th tool) — shared append-only coordination channel for multi-agent pipelines; 7 broadcast types: ASSIGN, STATUS, PROPOSED, DEPENDENCY, MERGE, REJECT, REVISE; capability-based channel key (SHA256 + timing-safe compare)
+- **Migration 8** — `broadcasts` table with CHECK constraint on type, indexes on type/agent/created_at
+- **`zc_recall_context` extended** — now includes Shared Channel section (grouped by type) between Working Memory and Session Events
+- **Security model** — Biba integrity (no-write-up without key), Bell-La Padula (private WM invisible to others), Reference Monitor pattern (single enforcement point), non-transitive delegation
+- **62 new tests** — broadcast.test.ts covers: open mode, key enforcement, wrong key rejection, missing key rejection, sanitization, truncation, project isolation, Bell-La Padula isolation, append-only audit trail, format grouping
+- **Total: 200 unit tests** (138 from v0.6.0 + 62 new broadcast tests)
 
 ### v0.6.0 — Production Hardening Release
 - **`zc_search_global` tool** — cross-project federated search across all local project KBs (12th tool); searches N most-recently-active projects with query embedding computed once for performance; results include project label + content-level deduplication

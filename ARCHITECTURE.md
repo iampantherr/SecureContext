@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.6.0)
+# SecureContext — Architecture Reference (v0.7.0)
 
 ## Overview
 
@@ -30,6 +30,7 @@ SecureContext is a Claude Code MCP (Model Context Protocol) plugin that extends 
          │   ├── embeddings                  └── zc-ctx/           (plugin data root)
          │   ├── source_meta
          │   ├── working_memory
+         │   ├── broadcasts          ← NEW v0.7.0 (A2A shared channel)
          │   ├── project_meta
          │   ├── db_meta
          │   └── schema_migrations
@@ -47,7 +48,7 @@ Project databases are scoped by SHA256 hash of the project path — no path trav
 All constants and tunables are centralized in a single `Config` object. Key settings are overridable via environment variables for power users — no source changes required.
 
 ```
-Config.VERSION              "0.6.0"
+Config.VERSION              "0.7.0"
 Config.DB_DIR               ~/.claude/zc-ctx/sessions/
 Config.GLOBAL_DIR           ~/.claude/zc-ctx/
 Config.WORKING_MEMORY_MAX   50 facts
@@ -76,7 +77,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 ```
 
-**Applied migrations (v0.6.0):**
+**Applied migrations (v0.7.0):**
 | ID | Description |
 |----|-------------|
 | 1  | Add `source_meta` table (source_type for trust labeling) |
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 | 5  | Add `rate_limits` table (persistent fetch budget — lives in `global.db`) |
 | 6  | Add `db_meta` table (schema version metadata for `zc_status`) |
 | 7  | Add `project_meta` table (human-readable project labels for cross-project search) |
+| 8  | **[v0.7.0]** Add `broadcasts` table — A2A shared coordination channel with CHECK constraint on type, indexes on type/agent/created_at |
 
 **Idempotency:** Each migration is recorded in `schema_migrations`. `runMigrations()` skips already-applied IDs. Re-running is always safe.
 
@@ -95,12 +97,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 ### 3. MCP Server (`src/server.ts`)
 
-The entry point. Implements the MCP protocol over stdin/stdout using `@modelcontextprotocol/sdk`. Registers **12 tools** and handles all routing.
+The entry point. Implements the MCP protocol over stdin/stdout using `@modelcontextprotocol/sdk`. Registers **13 tools** and handles all routing.
 
 **Startup sequence:**
 1. Run integrity check — SHA256 all `dist/*.js` files against stored baseline
 2. If `ZC_STRICT_INTEGRITY=1` and tamper detected → exit immediately
-3. Register 12 tool handlers
+3. Register 13 tool handlers
 4. Connect `StdioServerTransport`
 
 **Tools:**
@@ -115,13 +117,14 @@ The entry point. Implements the MCP protocol over stdin/stdout using `@modelcont
 | `zc_batch` | Parallel: shell commands + KB search in one call |
 | `zc_remember` | Store a fact in working memory |
 | `zc_forget` | Delete a fact from working memory |
-| `zc_recall_context` | Restore full project context (working memory + events + status) |
+| `zc_recall_context` | Restore full project context (working memory + shared channel + events + status) |
 | `zc_summarize_session` | Archive a session summary (retained 365 days) |
 | `zc_status` | Show DB health, KB counts, memory fill, schema version, fetch budget, integrity |
+| `zc_broadcast` | **[v0.7.0]** Post to the shared A2A coordination channel (ASSIGN/STATUS/PROPOSED/DEPENDENCY/MERGE/REJECT/REVISE/set_key); optionally key-protected |
 
-**Persistent rate limiting:** Per-project daily fetch counter stored in `~/.claude/zc-ctx/global.db`. Resets at UTC midnight. Cannot be bypassed by restarting the MCP server. Was previously an in-memory `Map` (reset on every restart).
+**Persistent rate limiting:** Per-project daily fetch counter stored in `~/.claude/zc-ctx/global.db`. Resets at UTC midnight. Cannot be bypassed by restarting the MCP server.
 
-**Version:** `0.6.0` — bumped on each release to trigger integrity re-baseline.
+**Version:** `0.7.0` — bumped on each release to trigger integrity re-baseline.
 
 ---
 
@@ -219,6 +222,21 @@ CREATE TABLE db_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- A2A shared broadcast channel (v0.7.0)
+CREATE TABLE broadcasts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  type       TEXT    NOT NULL CHECK(type IN ('ASSIGN','STATUS','PROPOSED','DEPENDENCY','MERGE','REJECT','REVISE')),
+  agent_id   TEXT    NOT NULL DEFAULT 'default',
+  task       TEXT    NOT NULL DEFAULT '',
+  files      TEXT    NOT NULL DEFAULT '[]',
+  state      TEXT    NOT NULL DEFAULT '',
+  summary    TEXT    NOT NULL DEFAULT '',
+  depends_on TEXT    NOT NULL DEFAULT '[]',
+  reason     TEXT    NOT NULL DEFAULT '',
+  importance INTEGER NOT NULL DEFAULT 3,
+  created_at TEXT    NOT NULL
+);
 ```
 
 **Search pipeline:**
@@ -303,9 +321,9 @@ Zero-magnitude guard prevents division by zero.
 
 ### 7. Memory (`src/memory.ts`)
 
-MemGPT-inspired hierarchical memory. Deterministic — no LLM calls in the memory management path.
+MemGPT-inspired hierarchical memory plus the A2A shared broadcast channel. Deterministic — no LLM calls in the memory management path.
 
-**Agent namespacing (v0.6.0 addition):** All memory functions accept an `agent_id` parameter (default: `"default"`). The `UNIQUE(key, agent_id)` constraint prevents parallel agents from clobbering each other's working memory. ZeroClaw's parallel sprint agents each get their own keyspace.
+**Agent namespacing (v0.6.0 addition):** All memory functions accept an `agent_id` parameter (default: `"default"`). The `UNIQUE(key, agent_id)` constraint prevents parallel agents from clobbering each other's working memory.
 
 **Working memory lifecycle:**
 ```
@@ -324,7 +342,7 @@ rememberFact(projectPath, key, value, importance=3, agent_id="default")
 - `3` — Normal (★★★): working notes
 - `1–2` — Ephemeral (★-★★): temporary observations, evicted first
 
-**Structured `zc_recall_context` output:**
+**Structured `zc_recall_context` output (v0.7.0):**
 ```
 ## Working Memory — [agent_id]
   ### Critical (★4-5)
@@ -335,13 +353,22 @@ rememberFact(projectPath, key, value, importance=3, agent_id="default")
   ### Ephemeral (★1-2)
   ...
 
+## Shared Channel (N broadcasts)       ← NEW v0.7.0
+  **ASSIGN** (2)
+    [#1] orchestrator task="Implement auth" files=[src/auth.ts]
+      → JWT middleware assigned (2026-03-29T12:00)
+  **STATUS** (1)
+    [#2] agent-auth task="auth module" state="in-progress"
+      → JWT middleware 60% done (2026-03-29T12:05)
+
 ## Recent Session Events
   • wrote: path/to/file.ts
   • [SESSION BOUNDARY] ended at 2026-03-16T14:32:00Z
 
 ## System Status
-  Plugin: zc-ctx v0.6.0
+  Plugin: zc-ctx v0.7.0
   Embedding model: nomic-embed-text
+  Broadcast channel: open            ← or "key-protected" if key configured
   Integrity: OK
 ```
 
@@ -357,6 +384,93 @@ sanitize(s, maxLen) = String(s)
   .slice(0, maxLen)
 ```
 Strips all control characters. Max 500 chars for values, 100 for keys.
+
+---
+
+### 7b. A2A Shared Broadcast Channel (`src/memory.ts` — Phase 2, v0.7.0)
+
+The broadcast channel is a **separate, append-only SQLite table** (`broadcasts`) that acts as a shared coordination ledger for multi-agent pipelines.
+
+**Schema:**
+```sql
+CREATE TABLE broadcasts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  type       TEXT    NOT NULL CHECK(type IN ('ASSIGN','STATUS','PROPOSED','DEPENDENCY','MERGE','REJECT','REVISE')),
+  agent_id   TEXT    NOT NULL DEFAULT 'default',
+  task       TEXT    NOT NULL DEFAULT '',
+  files      TEXT    NOT NULL DEFAULT '[]',   -- JSON array
+  state      TEXT    NOT NULL DEFAULT '',
+  summary    TEXT    NOT NULL DEFAULT '',
+  depends_on TEXT    NOT NULL DEFAULT '[]',   -- JSON array
+  reason     TEXT    NOT NULL DEFAULT '',
+  importance INTEGER NOT NULL DEFAULT 3,
+  created_at TEXT    NOT NULL
+);
+CREATE INDEX idx_bc_type       ON broadcasts(type);
+CREATE INDEX idx_bc_agent      ON broadcasts(agent_id);
+CREATE INDEX idx_bc_created_at ON broadcasts(created_at DESC);
+```
+
+**Broadcast types:**
+| Type | From → To | Purpose |
+|------|-----------|---------|
+| `ASSIGN` | Orchestrator → Worker | Delegate a task + target files |
+| `STATUS` | Worker → Channel | Report in-progress state |
+| `PROPOSED` | Worker → Channel | Propose changes pending review |
+| `DEPENDENCY` | Worker → Channel | Declare dependency on another agent |
+| `MERGE` | Orchestrator → Worker | Approve and merge proposed changes |
+| `REJECT` | Orchestrator → Worker | Reject changes with reason |
+| `REVISE` | Orchestrator → Worker | Request revision with reason |
+
+**Security model (Chin & Older 2011):**
+
+```
+BIBA INTEGRITY (no-write-up):
+  verifyChannelKey(db, plainKey)
+      ├─ if no key configured → OPEN MODE (allow all writes)
+      └─ if key configured → hashChannelKey(plainKey) == storedHash?
+              YES → write allowed
+              NO  → throw "Broadcast rejected: invalid or missing channel key"
+
+BELL-LA PADULA (no-read-up):
+  working_memory is namespace-scoped (agent_id)
+  broadcasts table is append-only, world-readable
+  → private WM facts cannot leak into shared channel
+
+REFERENCE MONITOR:
+  Every broadcast write passes through broadcastFact()
+  No bypass path exists — only one enforcement point
+
+CAPABILITY TOKEN (channel key):
+  setChannelKey(projectPath, plainKey)
+      → hashChannelKey(plainKey)  = SHA256(plainKey)
+      → stored in project_meta['zc_channel_key_hash']
+      → raw plaintext NEVER persisted
+
+TIMING ORACLE PREVENTION:
+  secureCompare(a, b) → Buffer.from(a) / Buffer.from(b)
+                       → timingSafeEqual(bufA, bufB)
+  Length mismatch returns false without early exit
+```
+
+**set_key action (special case in server.ts):**
+- Bypasses the `broadcastFact()` path
+- Calls `setChannelKey(PROJECT_PATH, channel_key)` directly
+- Returns confirmation message — does NOT log the key or hash
+
+**Recall & format:**
+```
+recallSharedChannel(projectPath, { limit=50, type? })
+    → SELECT ... FROM broadcasts ORDER BY created_at DESC LIMIT ?
+    → parse files + depends_on as JSON arrays
+    → return BroadcastMessage[]
+
+formatSharedChannelForContext(broadcasts)
+    → Group by type in display order: ASSIGN, MERGE, REJECT, REVISE, PROPOSED, DEPENDENCY, STATUS
+    → Each entry: [#id] agent_id task= files= depends_on= reason=
+    →             → summary (indented)
+    →             (YYYY-MM-DDTHH:MM)
+```
 
 ---
 
@@ -482,6 +596,12 @@ getRecentEvents(projectPath, limit=20)
 | Strict mode: tamper = crash | `ZC_STRICT_INTEGRITY=1` | integrity.ts, server.ts |
 | Rate limiting bypass via restart prevented | Persistent SQLite global.db counter | server.ts |
 | Memory values sanitized | Control char strip + length cap | memory.ts |
+| **[v0.7.0]** Biba integrity: workers can't write without key | `verifyChannelKey()` reference monitor | memory.ts |
+| **[v0.7.0]** Bell-La Padula: private WM invisible to peers | `agent_id` namespace isolation | memory.ts |
+| **[v0.7.0]** Channel key stored as hash only | SHA256 of plaintext, raw never persisted | memory.ts |
+| **[v0.7.0]** Timing-safe key comparison | `timingSafeEqual` prevents oracle attacks | memory.ts |
+| **[v0.7.0]** Broadcast values sanitized + capped | Control char strip; task/reason 500, summary 1000 | memory.ts |
+| **[v0.7.0]** Non-transitive delegation enforced | Workers can read but not re-broadcast as orchestrator | memory.ts |
 
 ---
 
@@ -556,20 +676,21 @@ Ollama embeddings are computed fire-and-forget after indexing — never block th
 ```
 SecureContext/
 ├── src/                    TypeScript source
-│   ├── server.ts           MCP server — 12 tools, startup, rate limiting
-│   ├── config.ts           Centralized constants + env overrides (NEW v0.6.0)
-│   ├── migrations.ts       Versioned atomic schema migrations (NEW v0.6.0)
+│   ├── server.ts           MCP server — 13 tools, startup, rate limiting
+│   ├── config.ts           Centralized constants + env overrides
+│   ├── migrations.ts       Versioned atomic schema migrations (8 migrations in v0.7.0)
 │   ├── sandbox.ts          Isolated code execution
 │   ├── fetcher.ts          SSRF-protected URL fetcher
 │   ├── knowledge.ts        Hybrid BM25+vector KB + cross-project search
 │   ├── embedder.ts         Ollama nomic-embed-text client
-│   ├── memory.ts           MemGPT working memory with agent namespacing
+│   ├── memory.ts           MemGPT working memory + A2A broadcast channel (v0.7.0)
 │   ├── integrity.ts        SHA256 tamper detection + strict mode
 │   ├── session.ts          JSONL event log reader
-│   ├── migrations.test.ts  Migration idempotency + rollback tests (NEW v0.6.0)
-│   ├── memory.test.ts      Working memory tests incl. agent namespacing (NEW v0.6.0)
-│   ├── sandbox.test.ts     Credential isolation + stdin delivery tests (NEW v0.6.0)
-│   ├── fetcher.test.ts     SSRF vector tests (NEW v0.6.0)
+│   ├── migrations.test.ts  Migration idempotency + rollback tests
+│   ├── memory.test.ts      Working memory tests incl. agent namespacing
+│   ├── broadcast.test.ts   A2A broadcast channel tests — 62 tests (NEW v0.7.0)
+│   ├── sandbox.test.ts     Credential isolation + stdin delivery tests
+│   ├── fetcher.test.ts     SSRF vector tests
 │   └── knowledge.test.ts   BM25 search, trust labeling, dedup tests
 ├── hooks/
 │   ├── pretooluse.mjs      Blocks risky tool calls
@@ -577,7 +698,7 @@ SecureContext/
 │   └── stop.mjs            Session boundary marker
 ├── .github/
 │   └── workflows/
-│       └── ci.yml          Build + 138 unit tests + 77 security vectors (NEW v0.6.0)
+│       └── ci.yml          Build + 200 unit tests + 77 security vectors
 ├── dist/                   Compiled JS (gitignored)
 ├── security-tests/
 │   ├── run-all.mjs         77-vector red-team suite
@@ -589,6 +710,21 @@ SecureContext/
 ```
 
 ---
+
+## v0.7.0 Changes Summary
+
+| Change | Impact |
+|--------|--------|
+| `zc_broadcast` (13th tool) | A2A multi-agent coordination channel — ASSIGN/STATUS/PROPOSED/DEPENDENCY/MERGE/REJECT/REVISE |
+| Migration 8 — `broadcasts` table | Append-only ledger with CHECK constraint, 3 performance indexes |
+| Channel key capability token | SHA256 hash + timing-safe comparison; Biba integrity enforcement |
+| Bell-La Padula isolation | Private working_memory invisible to other agents' channel reads |
+| Reference Monitor pattern | `broadcastFact()` = single enforcement point, no bypass |
+| Non-transitive delegation | Workers read channel but cannot re-broadcast as orchestrator |
+| `zc_recall_context` extended | Now includes Shared Channel section (grouped by type) |
+| Channel status in System Status | "open" vs "key-protected" surfaced every session start |
+| `broadcast.test.ts` — 62 tests | Covers all security properties: Biba, Bell-La Padula, sanitization, isolation, audit trail |
+| **200 unit tests total** | Up from 138 (v0.6.0) + 62 broadcast tests |
 
 ## v0.6.0 Changes Summary
 

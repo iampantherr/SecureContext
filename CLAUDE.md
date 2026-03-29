@@ -8,7 +8,7 @@ MemGPT-style persistent memory, session continuity, SSRF-protected web fetch) wi
 maximum security — no pre-compiled bundles, no credential leakage, no cloud sync.
 
 **Plugin ID:** `zc-ctx@zeroclaw`
-**Version:** `0.6.0`
+**Version:** `0.7.0`
 **License:** MIT
 **Language:** TypeScript (Node.js ≥ 22)
 
@@ -55,7 +55,7 @@ SecureContext/
 ```bash
 npm ci                           # Install deps from lockfile
 npm run build                    # tsc compile → dist/
-npm test                         # Vitest unit tests (138 tests)
+npm test                         # Vitest unit tests (200 tests)
 node security-tests/run-all.mjs  # 77 security attack vectors
 node install.mjs                 # Install for Claude Code CLI + Desktop App
 node install.mjs --uninstall     # Remove from all configs
@@ -63,7 +63,7 @@ node install.mjs --uninstall     # Remove from all configs
 
 ---
 
-## 12 MCP Tools
+## 13 MCP Tools
 
 | Tool | Description |
 |------|-------------|
@@ -76,9 +76,10 @@ node install.mjs --uninstall     # Remove from all configs
 | `zc_batch(commands[], queries[])` | Parallel: shell commands + KB search |
 | `zc_remember(key, value, importance?, agent_id?)` | Store fact in working memory |
 | `zc_forget(key, agent_id?)` | Delete fact from working memory |
-| `zc_recall_context(agent_id?)` | Restore full context (memory + events + status) |
+| `zc_recall_context(agent_id?)` | Restore full context (memory + shared channel + events + status) |
 | `zc_summarize_session(summary)` | Archive session summary (kept 365 days) |
 | `zc_status(agent_id?)` | DB health, KB counts, memory fill, fetch budget |
+| `zc_broadcast(type, agent_id, ...)` | [v0.7.0] Post to shared A2A channel (ASSIGN/STATUS/PROPOSED/DEPENDENCY/MERGE/REJECT/REVISE/set_key) |
 
 ---
 
@@ -97,7 +98,7 @@ node install.mjs --uninstall     # Remove from all configs
 
 ---
 
-## Schema (v0.6.0 — 7 migrations)
+## Schema (v0.7.0 — 8 migrations)
 
 | Table | Purpose |
 |-------|---------|
@@ -105,7 +106,8 @@ node install.mjs --uninstall     # Remove from all configs
 | `embeddings` | Ollama vectors with `model_name` + `dimensions` |
 | `source_meta` | `source_type` (internal/external) + `retention_tier` |
 | `working_memory` | MemGPT facts with `agent_id` namespacing |
-| `project_meta` | Human-readable project labels (cross-project search) |
+| `broadcasts` | A2A shared coordination channel (append-only, key-authenticated) |
+| `project_meta` | Human-readable project labels + channel key hash |
 | `db_meta` | Schema version metadata |
 | `schema_migrations` | Applied migration tracking |
 
@@ -119,6 +121,6 @@ Retention tiers: `external`=14d · `internal`=30d · `summary`=365d
 2. Check `git log --oneline` for recent changes
 3. Run `npm run build && npm test` after any `.ts` change
 4. Run `node security-tests/run-all.mjs` after security-related changes
-5. All 138 unit tests + 77 security vectors must pass before pushing
+5. All 200 unit tests + 77 security vectors must pass before pushing
 6. Never break the 10 security rules above
 7. Commit after every stable milestone with a descriptive message
