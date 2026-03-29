@@ -461,12 +461,9 @@ zc_broadcast(type="ASSIGN", agent_id="orchestrator",
 - **GitHub Actions CI** — TypeScript build + unit tests + security tests run on every push and PR
 - **`zc_recall_context` structured output** — three-tier grouping (Critical/Normal/Ephemeral) + System Status section baked in
 
-### v0.5.0
-- Hybrid BM25 + Ollama vector search (cosine reranking)
-- MemGPT hierarchical memory (50-fact bounded working memory + archival KB)
-- SHA256 integrity baseline on startup
-- `zc_forget` tool
-- 77 security attack vectors, 72 pass
+### Earlier versions
+- v0.5.0: Hybrid BM25+vector search, MemGPT hierarchical memory, SHA256 integrity baseline, 77 security tests
+- v0.4.0 and earlier: Initial public release, basic context management
 
 ## Contributing
 
