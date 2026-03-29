@@ -33,10 +33,10 @@ jobs:
       - name: TypeScript build
         run: npm run build
 
-      - name: Unit tests (vitest)
+      - name: Unit tests (vitest — 248 tests)
         run: npm test
 
-      - name: Security attack vector tests
+      - name: Security attack vector tests (84 vectors — exits 1 on any FAIL)
         run: node security-tests/run-all.mjs
 
       - name: Verify dist/server.js starts cleanly
