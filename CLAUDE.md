@@ -19,7 +19,7 @@ maximum security — no pre-compiled bundles, no credential leakage, no cloud sy
 ```
 SecureContext/
 ├── src/
-│   ├── server.ts           MCP server entrypoint — 12 tools
+│   ├── server.ts           MCP server entrypoint — 13 tools
 │   ├── config.ts           All constants + env var overrides
 │   ├── migrations.ts       Versioned schema migrations (9 migrations)
 │   ├── sandbox.ts          Isolated code executor (python/js/bash)

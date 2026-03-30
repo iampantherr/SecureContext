@@ -1,13 +1,19 @@
 # ZeroClaw SecureContext — Red Team Security Report
 
-**Date:** 2026-03-16
-**Version tested:** 0.2.0
-**Tester:** Automated red-team suite (60 attack vectors)
-**Final score:** 52 PASS · 0 FAIL · 8 WARN (documented limitations)
+> **Current version: 0.7.1 — 84 attack vectors · 78 PASS · 0 FAIL · 6 WARN**
+> See the **[v0.7.1 Broadcast Channel Security Audit](#appendix----v071-broadcast-channel-security-audit-2026-03-29)** appendix for the latest findings.
+> The sections below document the v0.2.0 foundational red-team baseline (vulnerabilities found and fixed before initial release).
 
 ---
 
-## Executive Summary
+**Baseline audit date:** 2026-03-16
+**Baseline version:** 0.2.0
+**Tester:** Automated red-team suite (60 attack vectors)
+**Baseline score:** 52 PASS · 0 FAIL · 8 WARN — **6 vulnerabilities found and fixed before this version shipped**
+
+---
+
+## Executive Summary (v0.2.0 Baseline)
 
 SecureContext was subjected to an aggressive red-team test across 6 attack categories covering every major threat surface of a Claude Code plugin:
 
@@ -18,7 +24,7 @@ SecureContext was subjected to an aggressive red-team test across 6 attack categ
 - **Prompt injection via the knowledge base**
 - **MCP protocol abuse and edge cases**
 
-During testing, **6 real vulnerabilities** were discovered and fixed before the final run. The patched build has **zero failures** across all 60 tests.
+During v0.2.0 testing, **6 real vulnerabilities** were discovered and fixed before the initial release. The patched baseline build has **zero failures** across all 60 tests. Additional vulnerabilities found and fixed in later versions are documented in the appendix below.
 
 ---
 

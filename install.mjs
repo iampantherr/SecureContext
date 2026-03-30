@@ -142,7 +142,7 @@ if (MODE_DESKTOP || UNINSTALL) {
 // ─── Done ─────────────────────────────────────────────────────────────────────
 console.log();
 if (!UNINSTALL) {
-  console.log(`${GREEN}SecureContext v0.6.0 installed successfully.${RESET}`);
+  console.log(`${GREEN}SecureContext v0.7.1 installed successfully.${RESET}`);
   console.log();
   console.log(`${DIM}Next steps:${RESET}`);
   console.log(`  1. Start a new Claude Code session`);
