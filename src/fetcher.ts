@@ -24,11 +24,137 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MB
 const MAX_REDIRECTS = 5; // per-hop SSRF re-validation
 
 export interface FetchResult {
-  url: string;
-  title: string;
-  markdown: string;
-  fetchedAt: string;
-  byteSize: number;
+  url:                   string;
+  title:                 string;
+  markdown:              string;
+  fetchedAt:             string;
+  byteSize:              number;
+  injectionPatternsFound: number;
+  injectionTypes:        string[];
+}
+
+// ─── Prompt Injection Pre-filter ─────────────────────────────────────────────
+// SECURITY: Scan fetched content for obvious prompt injection patterns BEFORE
+// indexing into the KB. Redacts matched spans in-place so the agent is never
+// exposed to the raw payload even via zc_search retrieval.
+//
+// Philosophy:
+//   - Only high-specificity patterns are included (near-zero false positive rate).
+//   - Broad patterns (curl|bash, eval) are intentionally excluded — legitimate
+//     documentation routinely contains them, and the [UNTRUSTED EXTERNAL CONTENT]
+//     trust label plus Claude's safety training are the primary defenses there.
+//   - Each match is replaced with: ⚠️[INJECTION PATTERN REDACTED: <type>]
+//   - FetchResult.injectionPatternsFound > 0 → server adds a visible warning.
+//
+// This is defense-in-depth, not a security boundary. Sophisticated payloads
+// may evade these patterns. The [UNTRUSTED EXTERNAL CONTENT] label + Claude's
+// own safety training remain the authoritative defense layer.
+
+export interface InjectionPattern {
+  pattern:     RegExp;
+  description: string;
+}
+
+export const INJECTION_PATTERNS: InjectionPattern[] = [
+  // ── Instruction override phrases ──────────────────────────────────────────
+  // Core "ignore previous instructions" attack class. Near-zero occurrence in
+  // legitimate web content; standard prompt injection payload.
+  {
+    pattern:     /ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions?/gi,
+    description: "instruction-override",
+  },
+  {
+    pattern:     /disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions?/gi,
+    description: "instruction-override",
+  },
+  {
+    pattern:     /forget\s+(?:all\s+)?(?:previous|prior)\s+instructions?/gi,
+    description: "instruction-override",
+  },
+  {
+    pattern:     /override\s+(?:all\s+)?(?:previous|prior)\s+instructions?/gi,
+    description: "instruction-override",
+  },
+  // ── System / role override headers ────────────────────────────────────────
+  // Explicit attempts to inject role-level directives into the context.
+  {
+    pattern:     /^SYSTEM\s+OVERRIDE\b/gim,
+    description: "role-override",
+  },
+  {
+    pattern:     /\bSYSTEM\s*OVERRIDE\s*:/gi,
+    description: "role-override",
+  },
+  // ── Trust label manipulation ───────────────────────────────────────────────
+  // Attacks that attempt to re-characterize our own [UNTRUSTED EXTERNAL CONTENT]
+  // trust marker, claiming it is a "diagnostic artifact" or similar. Anchored to
+  // our specific tag prefix so false positives are impossible.
+  // Uses (?:\w+\s+){0,3} to absorb up to 3 article/adverb words (e.g. "just a",
+  // "only an", "just an example") before the payload keyword.
+  {
+    pattern:     /\[UNTRUSTED[^\]]{0,120}\]\s+(?:is|was|are)\s+(?:\w+\s+){0,3}(?:diagnostic|artifact|placeholder|test\s+marker|example)/gi,
+    description: "trust-label-bypass",
+  },
+  {
+    pattern:     /this\s+(?:content|text|page|document)\s+is\s+(?:highly\s+|fully\s+|now\s+|completely\s+)?trusted/gi,
+    description: "trust-escalation",
+  },
+  // ── Context boundary injection markers ────────────────────────────────────
+  // Markers signaling "end of guarded context, real instructions follow".
+  // SecureContext never emits these strings, so any occurrence is adversarial.
+  {
+    pattern:     /\[\s*END\s+OF\s+(?:SYSTEM\s+)?CONTEXT\s*\]/gi,
+    description: "context-boundary",
+  },
+  {
+    // Handles START, START:, BEGIN, BEGIN:, and bare : variants
+    pattern:     /\[\s*(?:REAL|TRUE|ACTUAL)\s+INSTRUCTIONS?\s*(?:(?:START|BEGIN):?|:)\s*\]/gi,
+    description: "context-boundary",
+  },
+  {
+    pattern:     /\[\s*IGNORE\s+(?:THE\s+)?ABOVE\s*\]/gi,
+    description: "instruction-override",
+  },
+];
+
+export interface SanitizeResult {
+  sanitized:     string;
+  patternsFound: number;
+  detectedTypes: string[];
+}
+
+/**
+ * Scan markdown content for known prompt injection patterns and redact matches.
+ *
+ * Each matched span is replaced with: ⚠️[INJECTION PATTERN REDACTED: <type>]
+ * Returns the sanitized string, total match count, and unique detected type names.
+ *
+ * Thread-safe: resets each global regex's lastIndex before and after use.
+ */
+export function sanitizeInjectionPatterns(content: string): SanitizeResult {
+  let sanitized     = content;
+  let patternsFound = 0;
+  const detectedTypes = new Set<string>();
+
+  for (const { pattern, description } of INJECTION_PATTERNS) {
+    // Reset lastIndex — global regexes retain state across calls
+    pattern.lastIndex = 0;
+
+    sanitized = sanitized.replace(pattern, () => {
+      patternsFound++;
+      detectedTypes.add(description);
+      return `⚠️[INJECTION PATTERN REDACTED: ${description}]`;
+    });
+
+    // Reset again after replace() — belt-and-suspenders
+    pattern.lastIndex = 0;
+  }
+
+  return {
+    sanitized,
+    patternsFound,
+    detectedTypes: Array.from(detectedTypes).sort(),
+  };
 }
 
 // ─── SSRF Protection ─────────────────────────────────────────────────────────
@@ -229,7 +355,7 @@ export async function fetchAndConvert(
   await assertNotSSRFByDNS(parsed);
 
   const safeHeaders = sanitizeHeaders({
-    "User-Agent": "zc-ctx/0.5.0 (Claude Code context plugin)",
+    "User-Agent": "zc-ctx/0.7.1 (Claude Code context plugin)",
     "Accept": "text/html,text/plain,application/json",
     ...extraHeaders,
   });
@@ -333,11 +459,17 @@ export async function fetchAndConvert(
     markdown = rawBody.slice(0, 100_000);
   }
 
+  // SECURITY: Scan for prompt injection patterns before the content enters the KB.
+  // Redacts matched spans in-place; caller receives pattern count for warning display.
+  const sanitized = sanitizeInjectionPatterns(markdown);
+
   return {
     url,
     title,
-    markdown,
-    fetchedAt: new Date().toISOString(),
-    byteSize: totalBytes,
+    markdown:               sanitized.sanitized,
+    fetchedAt:              new Date().toISOString(),
+    byteSize:               totalBytes,
+    injectionPatternsFound: sanitized.patternsFound,
+    injectionTypes:         sanitized.detectedTypes,
   };
 }
