@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.7.1)
+# SecureContext — Architecture Reference (v0.7.2)
 
 ## Overview
 
@@ -48,7 +48,7 @@ Project databases are scoped by SHA256 hash of the project path — no path trav
 All constants and tunables are centralized in a single `Config` object. Key settings are overridable via environment variables for power users — no source changes required.
 
 ```
-Config.VERSION              "0.7.1"
+Config.VERSION              "0.7.2"
 Config.DB_DIR               ~/.claude/zc-ctx/sessions/
 Config.GLOBAL_DIR           ~/.claude/zc-ctx/
 Config.WORKING_MEMORY_MAX   50 facts
@@ -133,7 +133,7 @@ The entry point. Implements the MCP protocol over stdin/stdout using `@modelcont
 
 **Persistent rate limiting:** Per-project daily fetch counter stored in `~/.claude/zc-ctx/global.db`. Resets at UTC midnight. Cannot be bypassed by restarting the MCP server.
 
-**Version:** `0.7.1` — bumped on each release to trigger integrity re-baseline.
+**Version:** `0.7.2` — bumped on each release to trigger integrity re-baseline.
 
 ---
 
@@ -753,6 +753,18 @@ SecureContext/
 ```
 
 ---
+
+## v0.7.2 Changes Summary (KB Injection Pre-filter)
+
+| Change | Impact |
+|--------|--------|
+| **P2** `sanitizeInjectionPatterns()` in `fetcher.ts` | 11 patterns across 4 categories scan fetched markdown before KB indexing; matched spans replaced with `⚠️[INJECTION PATTERN REDACTED: <type>]` |
+| Categories: `instruction-override`, `role-override`, `trust-label-bypass`, `context-boundary` | High-specificity only — `curl\|bash`, `eval()` intentionally excluded (false-positive risk) |
+| `FetchResult` extended: `injectionPatternsFound`, `injectionTypes` | `zc_fetch` response shows visible warning banner when matches detected |
+| `lastIndex` reset before+after each `replace()` | Prevents regex state leakage between calls in the INJECTION_PATTERNS loop |
+| User-Agent version string: `0.7.1` → `0.7.2` | Consistent HTTP client identification |
+| **27 new unit tests** in `fetcher.test.ts` | Total: **300 unit tests** (was 248) |
+| `SECURITY_REPORT.md`: Gap 13 write-up + 3 Known Limitations | Documents injection pre-filter scope, excluded patterns rationale, and accepted-risk threat classes (context poisoning, memory DoS, adversarial vector collision) |
 
 ## v0.7.1 Changes Summary (Security Hardening)
 

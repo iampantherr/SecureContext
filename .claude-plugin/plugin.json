@@ -1,7 +1,7 @@
 {
   "name": "zc-ctx",
-  "version": "0.7.1",
-  "description": "Persistent memory, token optimization, and secure A2A multi-agent coordination for Claude Code. 13 MCP tools: credential-isolated sandbox, hybrid BM25+vector KB, MemGPT working memory, SSRF-protected fetch, and append-only broadcast channel with scrypt-hardened key. 84 security tests. MIT license.",
+  "version": "0.7.2",
+  "description": "Persistent memory, token optimization, and secure A2A multi-agent coordination for Claude Code. 13 MCP tools: credential-isolated sandbox, hybrid BM25+vector KB, MemGPT working memory, SSRF-protected fetch, KB injection pre-filter, and append-only broadcast channel with scrypt-hardened key. 300 unit tests, 84 security vectors. MIT license.",
   "marketplace": "zeroclaw",
   "type": "mcp",
   "mcp": {

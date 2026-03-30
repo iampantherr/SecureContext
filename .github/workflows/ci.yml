@@ -33,7 +33,7 @@ jobs:
       - name: TypeScript build
         run: npm run build
 
-      - name: Unit tests (vitest — 248 tests)
+      - name: Unit tests (vitest — 300 tests)
         run: npm test
 
       - name: Security attack vector tests (84 vectors — exits 1 on any FAIL)

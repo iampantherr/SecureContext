@@ -4,9 +4,9 @@
 > Drop-in replacement for context-mode. MemGPT-style persistent memory, hybrid BM25+vector search, credential-isolated sandbox, A2A multi-agent broadcast channel, 87% fewer tokens. Zero cloud sync. MIT license.
 
 [![Tests](https://img.shields.io/badge/security%20tests-78%20PASS%20%7C%200%20FAIL%20%7C%206%20WARN-brightgreen)](security-tests/results.json)
-[![Unit Tests](https://img.shields.io/badge/unit%20tests-248%20passed-brightgreen)](src)
+[![Unit Tests](https://img.shields.io/badge/unit%20tests-300%20passed-brightgreen)](src)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
-[![Version](https://img.shields.io/badge/version-0.7.1-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.7.2-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
@@ -443,6 +443,13 @@ zc_broadcast(type="ASSIGN", agent_id="orchestrator",
 ---
 
 ## Changelog
+
+### v0.7.2 — KB Prompt Injection Pre-filter
+- **Injection pre-filter on `zc_fetch`** — fetched content is scanned for 11 high-specificity injection patterns across 4 categories before entering the KB: `instruction-override` ("ignore/disregard/forget/override previous instructions"), `role-override` ("SYSTEM OVERRIDE"), `trust-label-bypass` (attacks re-characterizing our `[UNTRUSTED EXTERNAL CONTENT]` tag), `context-boundary` (`[END OF CONTEXT]`, `[REAL INSTRUCTIONS START]`, `[IGNORE THE ABOVE]`). Matched spans replaced with `⚠️[INJECTION PATTERN REDACTED: <type>]` in-place.
+- **Visible warning** — `zc_fetch` response includes a warning banner listing match count and detected types when injection patterns are found.
+- **Defense-in-depth scope** — broad patterns (`curl|bash`, `eval()`) intentionally excluded due to false positive risk in legitimate documentation. The `[UNTRUSTED EXTERNAL CONTENT]` trust label and Claude's safety training remain the primary defense.
+- **27 new unit tests** covering all pattern categories, clean content passthrough, case variants, multi-pattern counting, and regex correctness validation.
+- **Total: 300 unit tests** | **84 security attack vectors** (78 pass, 0 fail, 6 warn)
 
 ### v0.7.1 — Security Hardening (broadcast channel)
 - **scrypt KDF** — channel key now stored as `scrypt(key, 256-bit salt, N=32768, r=8, p=1)` in versioned format `scrypt:v1:...`. Replaces plain SHA256 (v0.7.0 bug: no salt, no KDF, trivially brute-forceable). Session-scoped HMAC cache means only the first broadcast per session pays the ~25ms KDF cost; subsequent calls take <1ms.

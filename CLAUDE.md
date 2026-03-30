@@ -8,7 +8,7 @@ MemGPT-style persistent memory, session continuity, SSRF-protected web fetch) wi
 maximum security — no pre-compiled bundles, no credential leakage, no cloud sync.
 
 **Plugin ID:** `zc-ctx@zeroclaw`
-**Version:** `0.7.1`
+**Version:** `0.7.2`
 **License:** MIT
 **Language:** TypeScript (Node.js ≥ 22)
 
@@ -98,7 +98,7 @@ node install.mjs --uninstall     # Remove from all configs
 
 ---
 
-## Schema (v0.7.1 — 9 migrations)
+## Schema (v0.7.2 — 9 migrations)
 
 | Table | Purpose |
 |-------|---------|
