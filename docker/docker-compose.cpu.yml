@@ -1,0 +1,10 @@
+# CPU-only overlay for Ollama
+# Applied automatically by start.ps1 / start.sh when no GPU is detected,
+# or when ZC_GPU_MODE=cpu is explicitly set.
+# Sets thread count for CPU inference (tune OLLAMA_NUM_THREADS in .env).
+
+services:
+  sc-ollama:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-4}

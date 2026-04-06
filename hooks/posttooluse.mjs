@@ -17,6 +17,7 @@ import { mkdirSync, appendFileSync, statSync, readFileSync, writeFileSync, exist
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 
 const ZC_DIR = join(homedir(), ".claude", "zc-ctx", "sessions");
 const EVENT_LOG_MAX_BYTES = 512 * 1024; // 512 KB — rotate when exceeded
@@ -66,6 +67,7 @@ function sanitizeForJsonl(value) {
  */
 const REDACTED_PARAM_NAMES = new Set([
   "channel_key", "key", "password", "secret", "token",
+  "session_token", "registration_secret",
   "api_key", "apikey", "auth", "credential", "passphrase",
 ]);
 
@@ -76,6 +78,42 @@ function redactSensitiveParams(toolInput) {
     out[k] = REDACTED_PARAM_NAMES.has(k.toLowerCase()) ? "[REDACTED]" : v;
   }
   return out;
+}
+
+/** Get the SQLite DB path for a project (mirrors logic in memory.ts) */
+function getProjectDbPath(projectPath) {
+  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return join(ZC_DIR, `${hash}.db`);
+}
+
+/**
+ * Auto-write a working_memory row to the project SQLite DB.
+ * Silently no-ops if DB doesn't exist or schema is not ready.
+ * All SQLite writes are wrapped in try/catch — hook must NEVER crash Claude Code.
+ */
+function autoRememberInDb(dbPath, key, value, importance, agentId) {
+  try {
+    if (!existsSync(dbPath)) return; // Don't create DB if plugin hasn't initialized it
+    const db = new DatabaseSync(dbPath);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA busy_timeout = 3000");
+    db.prepare(`
+      INSERT INTO working_memory(key, value, importance, agent_id, created_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(key, agent_id) DO UPDATE SET
+        value      = excluded.value,
+        importance = excluded.importance,
+        created_at = excluded.created_at
+    `).run(
+      key.slice(0, 100),
+      String(value).slice(0, 500),
+      importance,
+      agentId,
+      new Date().toISOString()
+    );
+    db.close();
+  } catch {
+    // Never crash Claude Code due to hook error
+  }
 }
 
 /**
@@ -117,6 +155,20 @@ function extractSafeEvent(toolName, toolInput, toolResponse) {
     return { event_type: "task_complete", task_name: completedTasks.join(", "), created_at: now };
   }
 
+  // Auto-extract MERGE broadcasts to working memory
+  if (toolName === "zc_broadcast") {
+    // Note: toolInput has already had sensitive params redacted above
+    const type    = toolInput?.type;
+    const summary = toolInput?.summary;
+    const agentId = toolInput?.agent_id;
+    if (type === "MERGE" && summary && agentId && String(summary).length > 10) {
+      // Return null so no JSONL event is written, but mark for merge auto-remember
+      // The actual DB write happens in main() where we have access to projectPath
+      return { _autoMerge: true, agentId: String(agentId), summary: String(summary) };
+    }
+    return null;
+  }
+
   return null;
 }
 
@@ -141,7 +193,41 @@ async function main() {
   const projectPath = event?.cwd ?? process.cwd();
 
   const safeEvent = extractSafeEvent(toolName, toolInput, toolResponse);
-  if (!safeEvent) process.exit(0);
+
+  // Handle auto-merge memory extraction (no JSONL event needed)
+  if (safeEvent && safeEvent._autoMerge) {
+    const dbPath = getProjectDbPath(projectPath);
+    const date   = new Date().toISOString().slice(0, 10);
+    autoRememberInDb(
+      dbPath,
+      `merge:${safeEvent.agentId}:${date}`,
+      safeEvent.summary,
+      4,
+      "auto"
+    );
+    process.exit(0);
+  }
+
+  if (!safeEvent) {
+    // Auto-remember file writes (low importance, auto-namespaced)
+    if (toolName === "Write" || toolName === "Edit" || toolName === "NotebookEdit") {
+      const rawInput = redactSensitiveParams(toolInput);
+      const filePath = rawInput?.file_path ?? rawInput?.path ?? null;
+      if (filePath && typeof filePath === "string") {
+        const dbPath   = getProjectDbPath(projectPath);
+        const fileName = filePath.split("/").pop() || filePath.split("\\").pop() || filePath;
+        const date     = new Date().toISOString().slice(0, 16);
+        autoRememberInDb(
+          dbPath,
+          `auto:${filePath}`,
+          `Modified: ${fileName} at ${date}`,
+          2,
+          "auto"
+        );
+      }
+    }
+    process.exit(0);
+  }
 
   // Write to JSONL event log — only inside ~/.claude/zc-ctx/ (with rotation)
   try {

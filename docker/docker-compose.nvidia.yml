@@ -1,0 +1,17 @@
+# NVIDIA GPU overlay for Ollama
+# Applied automatically by start.ps1 / start.sh when NVIDIA GPU is detected.
+# Adds CUDA runtime + reserves all NVIDIA devices for the sc-ollama container.
+
+services:
+  sc-ollama:
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

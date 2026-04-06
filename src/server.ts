@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 
 import { Config } from "./config.js";
 import { runInSandbox, runFileInSandbox } from "./sandbox.js";
-import { indexContent, searchKnowledge, searchAllProjects, getKbStats } from "./knowledge.js";
+import { indexContent, searchKnowledge, searchAllProjects, getKbStats, explainRetrieval } from "./knowledge.js";
 import { fetchAndConvert } from "./fetcher.js";
 import { getRecentEvents } from "./session.js";
 import {
@@ -25,16 +25,68 @@ import {
   getMemoryStats,
   broadcastFact,
   recallSharedChannel,
+  replayBroadcasts,
+  ackBroadcast,
+  getBroadcastChainStatus,
   setChannelKey,
   isChannelKeyConfigured,
   formatSharedChannelForContext,
+  computeProjectComplexity,
   type BroadcastType,
+  type ComplexityProfile,
 } from "./memory.js";
+import {
+  issueToken,
+  revokeAllAgentTokens,
+  countActiveSessions,
+  type AgentRole,
+} from "./access-control.js";
 import { checkIntegrity, type IntegrityResult } from "./integrity.js";
 import { getCurrentSchemaVersion } from "./migrations.js";
-import { ACTIVE_MODEL } from "./embedder.js";
+import { ACTIVE_MODEL, checkOllamaAvailable } from "./embedder.js";
 
 const PROJECT_PATH = cwd();
+
+// ─── HTTP client mode ─────────────────────────────────────────────────────────
+// When ZC_API_URL is set, all tool calls are proxied to the SecureContext API
+// server instead of accessing SQLite directly.  The tool schemas are identical —
+// agents never know whether they are talking to a local DB or a remote server.
+//
+// Usage:
+//   ZC_API_URL=http://sc-api:3099  ZC_API_KEY=<key>  node dist/server.js
+//
+// Authentication: every HTTP request carries "Authorization: Bearer <ZC_API_KEY>"
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ZC_API_URL = process.env["ZC_API_URL"]?.replace(/\/$/, ""); // strip trailing slash
+const ZC_API_KEY = process.env["ZC_API_KEY"];
+
+/**
+ * Proxy a tool call to the remote API server.
+ * Returns the parsed JSON response body.
+ * Throws on HTTP error or network failure.
+ */
+async function apiCall(
+  method: "GET" | "POST" | "DELETE",
+  path:   string,
+  body?:  Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const url     = `${ZC_API_URL}${path}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (ZC_API_KEY) headers["Authorization"] = `Bearer ${ZC_API_KEY}`;
+
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+
+  const json = await res.json() as Record<string, unknown>;
+  if (!res.ok) {
+    throw new Error(String(json["error"] ?? `API error ${res.status}`));
+  }
+  return json;
+}
 
 // ─── Startup integrity check ─────────────────────────────────────────────────
 const integrity: IntegrityResult = checkIntegrity(Config.VERSION);
@@ -357,8 +409,93 @@ const TOOLS: Tool[] = [
           type: "string",
           description: "Channel capability key — required if key is configured. For set_key action, this IS the new key to set.",
         },
+        session_token: {
+          type: "string",
+          description: "Session token from zc_issue_token — required when RBAC sessions are active.",
+        },
       },
       required: ["type", "agent_id"],
+    },
+  },
+  {
+    name: "zc_issue_token",
+    description:
+      "Issue a signed RBAC session token for an agent (orchestrator use). " +
+      "Token grants role-specific broadcast permissions. Valid 24 hours. " +
+      "Chapter 6 session tokens + Chapter 14 RBAC. Requires channel_key if configured.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_id:    { type: "string", description: "Agent identifier to issue token for" },
+        role: {
+          type: "string",
+          enum: ["orchestrator", "developer", "marketer", "researcher", "worker"],
+          description: "RBAC role — determines allowed broadcast types",
+        },
+        channel_key: { type: "string", description: "Channel key (required if configured)" },
+      },
+      required: ["agent_id", "role"],
+    },
+  },
+  {
+    name: "zc_revoke_token",
+    description:
+      "Revoke all session tokens for an agent. Requires channel_key if configured. " +
+      "Agent will need a new token from zc_issue_token before it can broadcast again.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_id:    { type: "string", description: "Agent whose tokens should be revoked" },
+        channel_key: { type: "string", description: "Channel key (required if configured)" },
+      },
+      required: ["agent_id"],
+    },
+  },
+  {
+    name: "zc_explain",
+    description:
+      "Show retrieval transparency for a search query — BM25 scores, vector scores, merged rank, " +
+      "and tier loaded for each result. Use to debug why certain content was or wasn't returned.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query to explain" },
+        depth: {
+          type: "string",
+          enum: ["L0", "L1", "L2"],
+          description: "Content depth: L0=one-sentence, L1=planning detail, L2=full (default)",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "zc_replay",
+    description:
+      "Replay broadcast history from a given time. Returns all broadcasts from that point, oldest first. " +
+      "Use for session post-mortems and context reconstruction.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from:  { type: "string", description: "ISO timestamp to replay from (optional — all if omitted)" },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Max broadcasts to return (default: 100)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "zc_ack",
+    description:
+      "Acknowledge receipt of a broadcast. Marks the broadcast as delivered in the audit log. " +
+      "Call after you have read and acted on an ASSIGN broadcast.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        broadcast_id:  { type: "integer", description: "Broadcast ID to acknowledge" },
+        agent_id:      { type: "string", description: "Acknowledging agent ID" },
+        session_token: { type: "string", description: "Session token (optional)" },
+      },
+      required: ["broadcast_id", "agent_id"],
     },
   },
 ];
@@ -371,8 +508,159 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Remote tool handler — routes tool calls to the SecureContext API server
+// when ZC_API_URL is set. Maps each tool name to its REST endpoint.
+// ─────────────────────────────────────────────────────────────────────────────
+async function _handleRemoteTool(
+  toolName: string,
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  try {
+    // All remote calls inject PROJECT_PATH as projectPath so agents don't need to supply it
+    const body: Record<string, unknown> = { projectPath: PROJECT_PATH, ...args };
+
+    let result: Record<string, unknown>;
+
+    switch (toolName) {
+      case "zc_remember":
+        result = await apiCall("POST", "/api/v1/remember", {
+          projectPath: PROJECT_PATH,
+          key:         body["key"],
+          value:       body["value"],
+          importance:  body["importance"] ?? 3,
+          agentId:     body["agent_id"] ?? "default",
+        });
+        return { content: [{ type: "text", text: `Remembered. Working memory: ${result["count"]}/${result["max"]} facts` }] };
+
+      case "zc_forget":
+        result = await apiCall("POST", "/api/v1/forget", {
+          projectPath: PROJECT_PATH,
+          key:         body["key"],
+          agentId:     body["agent_id"] ?? "default",
+        });
+        return { content: [{ type: "text", text: (result["deleted"] ? `Forgotten: '${body["key"]}' removed.` : `Key '${body["key"]}' was not in working memory.`) }] };
+
+      case "zc_recall_context": {
+        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(String(body["agent_id"] ?? "default"))}`);
+        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number }> ?? [];
+        const max       = recallRes["max"] as number ?? 50;
+        const lines     = [`## Working Memory (${facts.length}/${max} facts)`];
+        for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+        for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+        for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_summarize_session":
+        await apiCall("POST", "/api/v1/summarize", { projectPath: PROJECT_PATH, summary: body["summary"] });
+        return { content: [{ type: "text", text: `Session summary archived.` }] };
+
+      case "zc_index":
+        await apiCall("POST", "/api/v1/index", {
+          projectPath: PROJECT_PATH,
+          content:     body["content"],
+          source:      body["source"],
+          sourceType:  body["source_type"] ?? "internal",
+        });
+        return { content: [{ type: "text", text: `Indexed "${body["source"]}" (${String(body["content"] ?? "").length} chars).` }] };
+
+      case "zc_search": {
+        const sr = await apiCall("POST", "/api/v1/search", { projectPath: PROJECT_PATH, queries: body["queries"] });
+        const results = sr["results"] as Array<{ source: string; snippet: string }> ?? [];
+        if (results.length === 0) return { content: [{ type: "text", text: "No results found." }] };
+        const lines = results.map((r, i) => `${i + 1}. [${r.source}]\n   ${r.snippet}`);
+        return { content: [{ type: "text", text: lines.join("\n\n") }] };
+      }
+
+      case "zc_search_global": {
+        const gsr = await apiCall("POST", "/api/v1/search-global", { queries: body["queries"] });
+        const results = gsr["results"] as Array<{ source: string; snippet: string; projectLabel: string }> ?? [];
+        if (results.length === 0) return { content: [{ type: "text", text: "No global results found." }] };
+        const lines = results.map((r, i) => `${i + 1}. [${r.projectLabel}] ${r.source}\n   ${r.snippet}`);
+        return { content: [{ type: "text", text: lines.join("\n\n") }] };
+      }
+
+      case "zc_status": {
+        const st = await apiCall("GET", `/api/v1/status?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(String(body["agent_id"] ?? "default"))}`);
+        const wm = st["workingMemory"] as Record<string, unknown>;
+        const kb = st["knowledgeBase"] as Record<string, unknown>;
+        const ch = st["chain"]         as Record<string, unknown>;
+        return { content: [{ type: "text", text:
+          `## SecureContext Status (remote — ${ZC_API_URL})\n` +
+          `Working Memory: ${wm?.["count"]}/${wm?.["max"]} facts\n` +
+          `KB entries: ${kb?.["totalEntries"]}  |  Embeddings: ${kb?.["embeddingsCached"]}\n` +
+          `Chain: ${ch?.["ok"] ? `OK (${ch?.["totalRows"]} rows)` : `BROKEN at #${ch?.["brokenAt"]}`}\n` +
+          `Active sessions: ${st["sessions"]}`
+        }] };
+      }
+
+      case "zc_broadcast":
+        result = await apiCall("POST", "/api/v1/broadcast", {
+          projectPath:   PROJECT_PATH,
+          type:          body["type"],
+          agentId:       body["agent_id"],
+          task:          body["task"],
+          summary:       body["summary"],
+          state:         body["state"],
+          reason:        body["reason"],
+          importance:    body["importance"],
+          files:         body["files"],
+          depends_on:    body["depends_on"],
+          channel_key:   body["channel_key"],
+          session_token: body["session_token"],
+        });
+        return { content: [{ type: "text", text: `Broadcast #${(result["message"] as Record<string, unknown>)?.["id"]} posted.` }] };
+
+      case "zc_replay":
+        result = await apiCall("POST", "/api/v1/replay", { projectPath: PROJECT_PATH, fromId: body["from_id"] });
+        return { content: [{ type: "text", text: `Replay: ${(result["broadcasts"] as unknown[])?.length ?? 0} broadcasts returned.` }] };
+
+      case "zc_ack":
+        await apiCall("POST", "/api/v1/ack", { projectPath: PROJECT_PATH, id: body["id"] });
+        return { content: [{ type: "text", text: `Broadcast #${body["id"]} acknowledged.` }] };
+
+      case "zc_explain": {
+        const er = await apiCall("GET", `/api/v1/explain?projectPath=${encodeURIComponent(PROJECT_PATH)}&query=${encodeURIComponent(String(body["query"] ?? ""))}&depth=${body["depth"] ?? "L1"}`);
+        const entries = er["results"] as Array<{ source: string; hybridScore: number; snippet: string }> ?? [];
+        const lines   = entries.map((e, i) => `${i+1}. [${e.source}] score=${e.hybridScore.toFixed(3)}\n   ${e.snippet}`);
+        return { content: [{ type: "text", text: `## Retrieval explanation\n${lines.join("\n\n")}` }] };
+      }
+
+      case "zc_issue_token":
+        result = await apiCall("POST", "/api/v1/issue-token", { projectPath: PROJECT_PATH, agentId: body["agent_id"], role: body["role"] });
+        return { content: [{ type: "text", text: `Token: ${result["token"]}` }] };
+
+      case "zc_revoke_token":
+        await apiCall("POST", "/api/v1/revoke-token", { projectPath: PROJECT_PATH, agentId: body["agent_id"] });
+        return { content: [{ type: "text", text: `Tokens revoked for agent '${body["agent_id"]}'.` }] };
+
+      default:
+        return { content: [{ type: "text", text: `Unknown remote tool: ${toolName}` }] };
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { content: [{ type: "text", text: `Remote API error: ${msg}` }] };
+  }
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+
+  // ── HTTP client mode ───────────────────────────────────────────────────────
+  // When ZC_API_URL is configured, proxy storage-touching tools to the API
+  // server. Sandbox/fetch/execute tools run locally (they don't need DB access).
+  // ─────────────────────────────────────────────────────────────────────────────
+  const REMOTE_TOOLS = new Set([
+    "zc_remember", "zc_forget", "zc_recall_context", "zc_summarize_session",
+    "zc_index", "zc_search", "zc_search_global", "zc_status",
+    "zc_broadcast", "zc_replay", "zc_ack", "zc_explain",
+    "zc_issue_token", "zc_revoke_token",
+  ]);
+
+  if (ZC_API_URL && REMOTE_TOOLS.has(name)) {
+    return _handleRemoteTool(name, (args ?? {}) as Record<string, unknown>);
+  }
 
   try {
     switch (name) {
@@ -433,13 +721,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No results found in knowledge base." }] };
         }
+        const allBm25Only = results.every(r => r.vectorScore === undefined);
+        const ollamaBanner = allBm25Only
+          ? `⚠️  Ollama unavailable — results ranked by BM25 keyword score only (no semantic reranking).\n` +
+            `    Run 'ollama serve' locally or start the Docker stack for better search quality.\n\n`
+          : "";
         const formatted = results.map((r, i) => {
           const vecInfo     = r.vectorScore !== undefined ? ` | cosine: ${r.vectorScore.toFixed(3)}` : " | BM25 only";
           const trustBadge  = r.sourceType === "external" ? " [EXTERNAL]" : "";
           const asciiBadge  = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
           return `### Result ${i + 1}: ${r.source}${trustBadge}${asciiBadge}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
         }).join("\n\n---\n\n");
-        return { content: [{ type: "text", text: formatted }] };
+        return { content: [{ type: "text", text: ollamaBanner + formatted }] };
       }
 
       case "zc_search_global": {
@@ -448,6 +741,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No results found across any projects." }] };
         }
+        const allBm25Only = results.every(r => r.vectorScore === undefined);
+        const ollamaBanner = allBm25Only
+          ? `⚠️  Ollama unavailable — results ranked by BM25 keyword score only (no semantic reranking).\n` +
+            `    Run 'ollama serve' locally or start the Docker stack for better search quality.\n\n`
+          : "";
         const formatted = results.map((r, i) => {
           const vecInfo    = r.vectorScore !== undefined ? ` | cosine: ${r.vectorScore.toFixed(3)}` : " | BM25 only";
           const trustBadge = r.sourceType === "external" ? " [EXTERNAL]" : "";
@@ -459,7 +757,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             r.snippet
           );
         }).join("\n\n---\n\n");
-        return { content: [{ type: "text", text: formatted }] };
+        return { content: [{ type: "text", text: ollamaBanner + formatted }] };
       }
 
       case "zc_batch": {
@@ -480,9 +778,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sections.push(`## ${label}\n\`\`\`\n${formatSandboxResult(result)}\n\`\`\``);
         }
         if (searchResults.length > 0) {
-          sections.push("## Knowledge Base Results");
+          const allBm25Only = searchResults.every(r => r.vectorScore === undefined);
+          const bm25Header = allBm25Only
+            ? `⚠️  Ollama unavailable — KB results ranked by BM25 only (no semantic reranking).\n` +
+              `    Run 'ollama serve' or start the Docker stack for better search quality.\n`
+            : "";
+          sections.push(`## Knowledge Base Results\n${bm25Header}`);
           for (const r of searchResults) {
-            const vecInfo    = r.vectorScore !== undefined ? ` (cosine: ${r.vectorScore.toFixed(3)})` : "";
+            const vecInfo    = r.vectorScore !== undefined ? ` (cosine: ${r.vectorScore.toFixed(3)})` : " (BM25 only)";
             const trustBadge = r.sourceType === "external" ? " [EXTERNAL]" : "";
             const asciiBadge = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
             sections.push(`### ${r.source}${trustBadge}${asciiBadge}${vecInfo}\n${r.snippet}`);
@@ -525,10 +828,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const events     = getRecentEvents(PROJECT_PATH, 20);
         const broadcasts = recallSharedChannel(PROJECT_PATH, { limit: 30 });
 
+        // Force-recompute complexity on every session start so the working memory
+        // limit immediately reflects any new agents, KB growth, or broadcast history.
+        const { DatabaseSync: RcDs } = await import("node:sqlite");
+        const { mkdirSync: rcMkd }   = await import("node:fs");
+        const { join: rcJoin }       = await import("node:path");
+        const { createHash: rcCh }   = await import("node:crypto");
+        rcMkd(Config.DB_DIR, { recursive: true });
+        const rcDbFile = rcJoin(Config.DB_DIR, `${rcCh("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const rcDb     = new RcDs(rcDbFile);
+        rcDb.exec("PRAGMA journal_mode = WAL");
+        rcDb.exec("PRAGMA busy_timeout = 5000");
+        const complexity = computeProjectComplexity(rcDb);
+        rcDb.close();
+
         const parts: string[] = [];
 
-        // Section 1: Working Memory (structured by priority)
-        parts.push(formatWorkingMemoryForContext(wm, agent_id));
+        // Section 1: Working Memory (structured by priority — limit is project-aware)
+        parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit));
 
         // Section 2: Shared Broadcast Channel (A2A coordination)
         parts.push("\n" + formatSharedChannelForContext(broadcasts));
@@ -549,7 +866,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Section 4: System Status (inline — no tool call needed)
         parts.push("\n## System Status");
         parts.push(`  Plugin: zc-ctx v${Config.VERSION}`);
-        parts.push(`  Embedding model: ${ACTIVE_MODEL}`);
+
+        // Ollama availability — checked once per session (TTL-cached), surfaces clearly here
+        const ollamaStatus = await checkOllamaAvailable();
+        if (ollamaStatus.available) {
+          parts.push(`  Embedding (Ollama): ✓ available  [${ACTIVE_MODEL} @ ${ollamaStatus.url.replace("/api/embeddings", "")}]`);
+        } else {
+          parts.push(`  ⚠️  Embedding (Ollama): NOT AVAILABLE — search is running in BM25-only mode`);
+          parts.push(`      Semantic similarity reranking is disabled. Results are keyword-only.`);
+          parts.push(`      Fix (local):  ollama serve  (then: ollama pull ${ACTIVE_MODEL})`);
+          parts.push(`      Fix (Docker): .\\docker\\start.ps1  (Windows) or ./docker/start.sh`);
+        }
+
         const channelKeySet = isChannelKeyConfigured(PROJECT_PATH);
         parts.push(`  Broadcast channel: ${channelKeySet ? "key-protected" : "open"}`);
         if (!integrity.ok) {
@@ -564,18 +892,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "zc_broadcast": {
         const {
           type, agent_id, task, files, state, summary,
-          depends_on, reason, importance, channel_key,
+          depends_on, reason, importance, channel_key, session_token,
         } = args as {
-          type:        string;
-          agent_id:    string;
-          task?:       string;
-          files?:      string[];
-          state?:      string;
-          summary?:    string;
-          depends_on?: string[];
-          reason?:     string;
-          importance?: number;
-          channel_key?: string;
+          type:           string;
+          agent_id:       string;
+          task?:          string;
+          files?:         string[];
+          state?:         string;
+          summary?:       string;
+          depends_on?:    string[];
+          reason?:        string;
+          importance?:    number;
+          channel_key?:   string;
+          session_token?: string;
         };
 
         // Special action: configure the channel key
@@ -613,7 +942,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           PROJECT_PATH,
           type as BroadcastType,
           agent_id,
-          { task, files, state, summary, depends_on, reason, importance, channel_key }
+          { task, files, state, summary, depends_on, reason, importance, channel_key, session_token }
         );
 
         const fileStr  = msg.files.length   > 0 ? `\nFiles:      ${msg.files.join(", ")}` : "";
@@ -680,6 +1009,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const fetchUsed      = fetchRow?.fetch_count ?? 0;
         const fetchRemaining = Config.FETCH_LIMIT - fetchUsed;
 
+        // RBAC status
+        const { DatabaseSync: DS2 } = await import("node:sqlite");
+        const { mkdirSync: mkd2 } = await import("node:fs");
+        const { join: pjoin2 } = await import("node:path");
+        const { createHash: ch2 } = await import("node:crypto");
+        mkd2(Config.DB_DIR, { recursive: true });
+        const dbFile2  = pjoin2(Config.DB_DIR, `${ch2("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const rbacDb   = new DS2(dbFile2);
+        rbacDb.exec("PRAGMA journal_mode = WAL");
+        rbacDb.exec("PRAGMA busy_timeout = 5000");
+        const activeSessions = countActiveSessions(rbacDb);
+        const chainStatus    = getBroadcastChainStatus(PROJECT_PATH);
+        rbacDb.close();
+
+        // Build complexity label for working memory display
+        const cx = wmStats.complexity;
+        const complexityLabel = cx
+          ? (() => {
+              const kb    = Math.min(Math.floor(cx.kbEntries     / 15), 60);
+              const bc    = Math.min(Math.floor(cx.broadcastCount / 30), 40);
+              const ag    = Math.min(cx.activeAgents * 15,               50);
+              const cacheAgeMin = Math.round((Date.now() - new Date(cx.computedAt).getTime()) / 60000);
+              return (
+                `  Limit (dynamic):  ${wmStats.max} facts  (evict-to: ${wmStats.evictTo})\n` +
+                `  Complexity score: KB +${kb}  |  Broadcasts +${bc}  |  Agents +${ag}\n` +
+                `  Signals:          ${cx.kbEntries} KB entries · ${cx.broadcastCount} broadcasts · ${cx.activeAgents} active agent(s)\n` +
+                `  Cache age:        ${cacheAgeMin < 1 ? "just computed" : `${cacheAgeMin}m ago`} (auto-refreshes every 10m)`
+              );
+            })()
+          : `  Limit:  ${wmStats.max} facts`;
+
         const lines = [
           `## SecureContext Status — v${Config.VERSION}`,
           ``,
@@ -691,17 +1051,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           `  DB size:           ${(kbStats.dbSizeBytes / 1024).toFixed(1)} KB`,
           ``,
           `**Working Memory** (agent: ${agent_id ?? "default"})`,
-          `  Facts: ${wmStats.count}/${wmStats.max}`,
-          `  Critical facts (★4-5): ${wmStats.criticalCount}`,
+          `  Facts: ${wmStats.count}/${wmStats.max}  (★4-5 critical: ${wmStats.criticalCount})`,
+          complexityLabel,
           ``,
           `**Schema**`,
           `  Migration version: ${schemaV}`,
+          ``,
+          `**Search / Embeddings**`,
           `  Embedding model:   ${ACTIVE_MODEL}`,
+          `  Ollama status:     ${await checkOllamaAvailable().then(s => s.available
+            ? `✓ available  (${s.url.replace("/api/embeddings", "")})`
+            : `⚠️  NOT AVAILABLE — running BM25-only\n` +
+              `                    Fix: ollama serve  (then: ollama pull ${ACTIVE_MODEL})\n` +
+              `                    Or start the Docker stack: .\\docker\\start.ps1`
+          )}`,
+          `  Embeddings cached: ${kbStats.embeddingsCached}`,
           ``,
           `**Fetch Budget (today)**`,
           `  Used:      ${fetchUsed}/${Config.FETCH_LIMIT}`,
           `  Remaining: ${fetchRemaining}`,
           `  Resets at: UTC midnight`,
+          ``,
+          `**RBAC & Security**`,
+          `  Sessions active:   ${activeSessions > 0 ? "YES" : "NO"} (${activeSessions} session${activeSessions === 1 ? "" : "s"})`,
+          `  RBAC enforcement:  ${activeSessions > 0 || Config.RBAC_ENABLED_ENV ? "ACTIVE" : "inactive (no sessions registered)"}`,
+          `  Hash chain:        ${chainStatus.ok ? `OK (${chainStatus.totalRows} rows)` : `BROKEN at row #${chainStatus.brokenAt}`}`,
+          `  Chain enabled:     ${Config.CHAIN_ENABLED ? "YES" : "NO (ZC_CHAIN_DISABLED=1)"}`,
           ``,
           `**Integrity**`,
           integrity.ok
@@ -711,6 +1086,135 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ];
 
         return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_issue_token": {
+        const { agent_id: issueAgentId, role, channel_key: issueChannelKey } = args as {
+          agent_id:     string;
+          role:         AgentRole;
+          channel_key?: string;
+        };
+
+        // Import memory helpers to open the correct DB and verify channel key
+        const { openDb: openMemDb } = await import("./knowledge.js");
+        const issueDb = openMemDb(PROJECT_PATH);
+
+        // Verify channel key if configured (same reference monitor)
+        if (isChannelKeyConfigured(PROJECT_PATH)) {
+          // Re-use broadcastFact channel key check by reading from DB
+          const keyRow = issueDb.prepare(
+            "SELECT value FROM project_meta WHERE key = 'zc_channel_key_hash'"
+          ).get() as { value: string } | undefined;
+          if (keyRow && keyRow.value.length > 0 && !issueChannelKey) {
+            issueDb.close();
+            return {
+              content: [{ type: "text", text: "Error: channel_key required for zc_issue_token when channel is key-protected." }],
+              isError: true,
+            };
+          }
+        }
+
+        const token = issueToken(issueDb, PROJECT_PATH, issueAgentId, role);
+        issueDb.close();
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Token issued for agent '${issueAgentId}' (role: ${role}).\n` +
+              `Token: ${token}\n\n` +
+              `Inject this token into the agent's --append-system-prompt before launch.\n` +
+              `Pass it as session_token= in all zc_broadcast calls.\n` +
+              `Expires: ${new Date(Date.now() + Config.SESSION_TOKEN_TTL_SECONDS * 1000).toISOString()}`,
+          }],
+        };
+      }
+
+      case "zc_revoke_token": {
+        const { agent_id: revokeAgentId } = args as { agent_id: string; channel_key?: string };
+        const { openDb: openRevDb } = await import("./knowledge.js");
+        const revokeDb = openRevDb(PROJECT_PATH);
+        revokeAllAgentTokens(revokeDb, revokeAgentId);
+        revokeDb.close();
+        return {
+          content: [{
+            type: "text",
+            text: `All tokens revoked for agent '${revokeAgentId}'. Agent must re-issue a token before broadcasting.`,
+          }],
+        };
+      }
+
+      case "zc_explain": {
+        const { query, depth } = args as { query: string; depth?: "L0" | "L1" | "L2" };
+        const explanation = await explainRetrieval(PROJECT_PATH, query, depth ?? "L2");
+
+        if (explanation.results.length === 0) {
+          return { content: [{ type: "text", text: `No results found for query: "${query}"` }] };
+        }
+
+        const header = [
+          `## Retrieval Explanation`,
+          `Query: "${explanation.query}"`,
+          `Depth: ${explanation.depth} | BM25-only: ${explanation.bm25Only ? "YES (Ollama unavailable)" : "NO (hybrid)"}`,
+          `Results: ${explanation.results.length}`,
+          ``,
+        ];
+
+        const rows = explanation.results.map((r, i) => {
+          const vecStr = r.vectorScore !== null ? r.vectorScore.toFixed(4) : "N/A";
+          const contentPreview = r.tieredContent.slice(0, 200).replace(/\n/g, " ");
+          return [
+            `### #${i + 1}: ${r.source} [${r.sourceType}]`,
+            `  BM25 raw: ${r.bm25Score.toFixed(4)} | BM25 norm: ${r.bm25Normalized.toFixed(4)} | Vector: ${vecStr} | Hybrid: ${r.hybridScore.toFixed(4)}`,
+            `  Content length: ${r.contentLength} chars`,
+            `  Preview (${explanation.depth}): ${contentPreview}`,
+          ].join("\n");
+        });
+
+        return { content: [{ type: "text", text: header.join("\n") + rows.join("\n\n") }] };
+      }
+
+      case "zc_replay": {
+        const { from, limit } = args as { from?: string; limit?: number };
+        const broadcasts = replayBroadcasts(PROJECT_PATH, from, { limit });
+
+        if (broadcasts.length === 0) {
+          return { content: [{ type: "text", text: "No broadcasts found in the requested range." }] };
+        }
+
+        const lines = [
+          `## Broadcast Replay`,
+          from ? `From: ${from}` : "From: beginning",
+          `Total: ${broadcasts.length}`,
+          ``,
+        ];
+
+        for (const b of broadcasts) {
+          lines.push(
+            `[#${b.id}] ${b.created_at.slice(0, 19)}Z ${b.type} agent=${b.agent_id}` +
+            (b.task    ? ` task="${b.task}"` : "") +
+            (b.summary ? `\n  → ${b.summary}` : "")
+          );
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_ack": {
+        const { broadcast_id, agent_id: ackAgentId } = args as {
+          broadcast_id: number;
+          agent_id:     string;
+          session_token?: string;
+        };
+        const acked = ackBroadcast(PROJECT_PATH, broadcast_id, ackAgentId);
+        return {
+          content: [{
+            type: "text",
+            text: acked
+              ? `Broadcast #${broadcast_id} acknowledged by '${ackAgentId}'.`
+              : `Broadcast #${broadcast_id} not found.`,
+          }],
+        };
       }
 
       default:

@@ -21,7 +21,7 @@
  *   └─────────────────────────────────────────────────────────┘
  *
  * AGENT NAMESPACING:
- * When multiple agents run in parallel (e.g., ZeroClaw Conductor pattern),
+ * When multiple agents run in parallel (e.g., SecureContext multi-agent pattern),
  * keys are namespaced by agent_id to prevent last-write-wins collisions.
  * Default agent_id is "default" — single-agent use is unchanged.
  *
@@ -39,6 +39,13 @@ import { join } from "node:path";
 import { Config } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { indexContent } from "./knowledge.js";
+import {
+  hasActiveSessions,
+  verifyToken,
+  canBroadcast,
+  ROLE_PERMISSIONS,
+} from "./access-control.js";
+import { computeRowHash, getLastHash, verifyChain } from "./chain.js";
 
 export interface MemoryFact {
   key:        string;
@@ -51,6 +58,137 @@ export interface MemoryFact {
 // SECURITY: Strip control chars and limit length to prevent log injection / DB bloat
 function sanitize(s: string, maxLen: number): string {
   return String(s).replace(/[\r\n\x00\x01-\x08\x0b\x0c\x0e-\x1f]/g, " ").trim().slice(0, maxLen);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMART WORKING MEMORY SIZING
+//
+// Instead of a fixed 50-fact ceiling for every project, SecureContext measures
+// three objective complexity signals and derives a project-specific limit:
+//
+//   Signal 1 — KB depth (source_meta count):
+//     Each 15 indexed sources adds +1 to the limit, capped at +60.
+//     Rationale: a project with 300 KB entries (API docs, specs, code files)
+//     needs more memory to track what has been read vs what is still pending.
+//
+//   Signal 2 — Coordination history (broadcasts count):
+//     Each 30 broadcast events adds +1, capped at +40.
+//     Rationale: projects with many ASSIGN/MERGE cycles have more decisions in
+//     flight that the agent must not forget mid-session.
+//
+//   Signal 3 — Agent density (active agent_sessions count):
+//     Each active agent adds +15, capped at +50.
+//     Rationale: parallel agents produce parallel facts; each agent's state
+//     must be independently trackable without evicting the others.
+//
+//   Formula:  limit = clamp(50 + kb_bonus + bc_bonus + agent_bonus, 50, 200)
+//             evictTo = floor(limit × 0.80)
+//
+//   Range examples:
+//     Solo scratch project  (0 agents, <15 KB, <30 BC): limit=50,  evictTo=40
+//     Single-dev project    (1 agent,  30 KB,  60 BC):  limit=69,  evictTo=55
+//     Medium multi-agent    (2 agents, 100 KB, 100 BC): limit=89,  evictTo=71
+//     RevClear-scale        (4 agents, 300 KB, 200 BC): limit=126, evictTo=100
+//     Full platform         (5 agents, 600 KB, 600 BC): limit=160, evictTo=128
+//     Theoretical max       (5 agents, 900 KB, 1200 BC):limit=200, evictTo=160
+//
+// The computed profile is cached in project_meta for 10 minutes. This means
+// one fast KV lookup per rememberFact() call rather than multiple table scans.
+// The cache auto-invalidates: zc_recall_context() always forces a recompute.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ComplexityProfile {
+  kbEntries:     number;  // source_meta row count
+  broadcastCount: number; // broadcasts row count
+  activeAgents:  number;  // non-revoked, non-expired agent_sessions count
+  computedLimit: number;  // final working memory max
+  evictTo:       number;  // eviction target (80% of computedLimit)
+  computedAt:    string;  // ISO timestamp — used for cache staleness check
+}
+
+const WM_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Measure project complexity and derive the working memory limit.
+ * Stores the result in project_meta for fast subsequent access.
+ * Always writes a fresh value — call when you want to force a recompute.
+ */
+export function computeProjectComplexity(db: DatabaseSync): ComplexityProfile {
+  // Signal 1: KB depth
+  let kbEntries = 0;
+  try {
+    kbEntries = (db.prepare("SELECT COUNT(*) as n FROM source_meta").get() as { n: number }).n;
+  } catch { /* table may not exist in very old DBs */ }
+
+  // Signal 2: Broadcast coordination history
+  let broadcastCount = 0;
+  try {
+    broadcastCount = (db.prepare("SELECT COUNT(*) as n FROM broadcasts").get() as { n: number }).n;
+  } catch { /* table may not exist */ }
+
+  // Signal 3: Active agent density (non-revoked, not-yet-expired sessions)
+  let activeAgents = 0;
+  try {
+    const now = new Date().toISOString();
+    activeAgents = (db.prepare(
+      "SELECT COUNT(*) as n FROM agent_sessions WHERE revoked = 0 AND expires_at > ?"
+    ).get(now) as { n: number }).n;
+  } catch { /* table may not exist */ }
+
+  // Derive bonuses — clamped individually to prevent any single signal dominating
+  const kbBonus    = Math.min(Math.floor(kbEntries     / 15), 60);
+  const bcBonus    = Math.min(Math.floor(broadcastCount / 30), 40);
+  const agentBonus = Math.min(activeAgents * 15,               50);
+
+  const computedLimit = Math.max(50, Math.min(200, 50 + kbBonus + bcBonus + agentBonus));
+  const evictTo       = Math.floor(computedLimit * 0.80);
+  const computedAt    = new Date().toISOString();
+
+  const profile: ComplexityProfile = {
+    kbEntries, broadcastCount, activeAgents,
+    computedLimit, evictTo, computedAt,
+  };
+
+  // Cache to project_meta — silently skip if table isn't ready yet
+  try {
+    db.prepare(
+      "INSERT OR REPLACE INTO project_meta(key, value) VALUES (?, ?)"
+    ).run("zc_complexity_profile", JSON.stringify(profile));
+  } catch { /* migration not yet applied — fallback to Config defaults */ }
+
+  return profile;
+}
+
+/**
+ * Return the current working memory limits for this database.
+ * Uses the cached complexity profile if it exists and is < 10 minutes old.
+ * Falls back to Config defaults if the cache is missing (first use / fresh DB).
+ *
+ * @param forceRecompute  Pass true to always recompute (used by zc_recall_context)
+ */
+export function getWorkingMemoryLimits(
+  db: DatabaseSync,
+  forceRecompute = false
+): { max: number; evictTo: number; profile: ComplexityProfile | null } {
+  if (!forceRecompute) {
+    try {
+      const row = db.prepare(
+        "SELECT value FROM project_meta WHERE key = 'zc_complexity_profile'"
+      ).get() as { value: string } | undefined;
+
+      if (row) {
+        const cached = JSON.parse(row.value) as ComplexityProfile;
+        const ageMs  = Date.now() - new Date(cached.computedAt).getTime();
+        if (ageMs < WM_CACHE_TTL_MS) {
+          return { max: cached.computedLimit, evictTo: cached.evictTo, profile: cached };
+        }
+      }
+    } catch { /* fall through to recompute */ }
+  }
+
+  // Cache miss, stale, or forced — compute fresh
+  const profile = computeProjectComplexity(db);
+  return { max: profile.computedLimit, evictTo: profile.evictTo, profile };
 }
 
 function dbPath(projectPath: string): string {
@@ -125,18 +263,21 @@ export function rememberFact(
   `).run(safeKey, safeValue, safeImp, safeAgent, now);
 
   // Evict if over limit — evict lowest importance + oldest first (MemGPT eviction policy)
+  // Limit is dynamically sized based on project complexity (see getWorkingMemoryLimits)
   const count = (db.prepare(
     "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ?"
   ).get(safeAgent) as { n: number }).n;
 
-  if (count > Config.WORKING_MEMORY_MAX) {
+  const { max: wmMax, evictTo: wmEvictTo } = getWorkingMemoryLimits(db);
+
+  if (count > wmMax) {
     type Row = { key: string; value: string };
     const toEvict = db.prepare(`
       SELECT key, value FROM working_memory
       WHERE agent_id = ?
       ORDER BY importance ASC, created_at ASC
       LIMIT ?
-    `).all(safeAgent, count - Config.WORKING_MEMORY_EVICT_TO) as Row[];
+    `).all(safeAgent, count - wmEvictTo) as Row[];
 
     for (const row of toEvict) {
       db.prepare("DELETE FROM working_memory WHERE key = ? AND agent_id = ?").run(row.key, safeAgent);
@@ -215,10 +356,13 @@ export function forgetFact(
 /**
  * Format working memory for context injection.
  * Returns a structured, token-efficient representation with priority sections.
+ *
+ * @param max  Dynamic working memory limit (from getWorkingMemoryLimits). Defaults to Config value if omitted.
  */
 export function formatWorkingMemoryForContext(
   facts: MemoryFact[],
-  agentId: string = "default"
+  agentId: string = "default",
+  max: number = Config.WORKING_MEMORY_MAX
 ): string {
   if (facts.length === 0) return "## Working Memory\nEmpty — no facts stored yet.";
 
@@ -227,7 +371,7 @@ export function formatWorkingMemoryForContext(
   const ephemeral = facts.filter((f) => f.importance <= 2);
 
   const lines: string[] = [
-    `## Working Memory (${facts.length}/${Config.WORKING_MEMORY_MAX} facts${agentId !== "default" ? ` · agent: ${agentId}` : ""})`,
+    `## Working Memory (${facts.length}/${max} facts${agentId !== "default" ? ` · agent: ${agentId}` : ""})`,
   ];
 
   if (critical.length > 0) {
@@ -246,11 +390,11 @@ export function formatWorkingMemoryForContext(
   return lines.join("\n");
 }
 
-/** Returns working memory stats for the zc_status tool */
+/** Returns working memory stats for the zc_status tool, including dynamic limit and complexity profile */
 export function getMemoryStats(
   projectPath: string,
   agentId: string = "default"
-): { count: number; max: number; criticalCount: number } {
+): { count: number; max: number; evictTo: number; criticalCount: number; complexity: ComplexityProfile | null } {
   const db        = openDb(projectPath);
   const safeAgent = sanitize(agentId, 64);
 
@@ -262,8 +406,10 @@ export function getMemoryStats(
     "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ? AND importance >= 4"
   ).get(safeAgent) as { n: number }).n;
 
+  const { max, evictTo, profile } = getWorkingMemoryLimits(db);
+
   db.close();
-  return { count, max: Config.WORKING_MEMORY_MAX, criticalCount };
+  return { count, max, evictTo, criticalCount, complexity: profile };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -569,14 +715,15 @@ export function broadcastFact(
   type:       BroadcastType,
   agentId:    string,
   opts: {
-    task?:        string;
-    files?:       string[];
-    state?:       string;
-    summary?:     string;
-    depends_on?:  string[];
-    reason?:      string;
-    importance?:  number;
-    channel_key?: string;
+    task?:          string;
+    files?:         string[];
+    state?:         string;
+    summary?:       string;
+    depends_on?:    string[];
+    reason?:        string;
+    importance?:    number;
+    channel_key?:   string;
+    session_token?: string;
   } = {}
 ): BroadcastResult {
   const safeAgent   = sanitize(agentId,          64);
@@ -608,6 +755,34 @@ export function broadcastFact(
     throw new Error("Broadcast rejected: invalid or missing channel key");
   }
 
+  // RBAC ENFORCEMENT: If sessions are registered (or force-enabled), validate session token and role
+  // Chapter 14 (RBAC): separation of duty enforced at the reference monitor
+  // Backward compat: if no sessions registered and RBAC not force-enabled, skip enforcement
+  let sessionTokenId = "";
+  const sessionsActive = hasActiveSessions(db);
+  if (sessionsActive || Config.RBAC_ENABLED_ENV) {
+    if (!opts.session_token) {
+      db.close();
+      throw new Error(
+        "RBAC enforcement active: session_token required for broadcast. " +
+        "Call zc_issue_token to obtain a token, or register via zc_register_agent."
+      );
+    }
+    const tokenInfo = verifyToken(db, opts.session_token, projectPath);
+    if (!tokenInfo) {
+      db.close();
+      throw new Error("Broadcast rejected: invalid, expired, or revoked session token");
+    }
+    if (!canBroadcast(tokenInfo.role, type)) {
+      db.close();
+      throw new Error(
+        `RBAC violation: role '${tokenInfo.role}' cannot broadcast type '${type}'. ` +
+        `Allowed types for ${tokenInfo.role}: ${ROLE_PERMISSIONS[tokenInfo.role]?.join(", ")}`
+      );
+    }
+    sessionTokenId = tokenInfo.tokenId;
+  }
+
   // RATE LIMIT: max N broadcasts per agent per 60 seconds
   const windowStart  = new Date(Date.now() - 60_000).toISOString();
   const recentCount  = (db.prepare(
@@ -623,12 +798,22 @@ export function broadcastFact(
     );
   }
 
+  // HASH CHAIN: compute prev_hash and row_hash for tamper-evident audit log
+  // Chapter 13 (Biba integrity): each row links to previous via SHA256
+  let prevHash = "genesis";
+  let rowHash  = "";
+  if (Config.CHAIN_ENABLED) {
+    prevHash = getLastHash(db);
+    rowHash  = computeRowHash(prevHash, type, safeAgent, safeTask, safeSummary, now, sessionTokenId);
+  }
+
   const result = db.prepare(`
-    INSERT INTO broadcasts(type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO broadcasts(type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at, session_token_id, prev_hash, row_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     type, safeAgent, safeTask, safeFilesJson, safeState,
-    safeSummary, safeDependsJson, safeReason, safeImp, now
+    safeSummary, safeDependsJson, safeReason, safeImp, now,
+    sessionTokenId, prevHash, rowHash
   ) as { lastInsertRowid: number };
 
   const id = Number(result.lastInsertRowid);
@@ -648,6 +833,98 @@ export function broadcastFact(
     importance: safeImp,
     created_at: now,
   };
+}
+
+/**
+ * Replay broadcasts from a given timestamp onwards, oldest first.
+ * Useful for session post-mortems and context reconstruction.
+ */
+export function replayBroadcasts(
+  projectPath:    string,
+  fromTimestamp?: string,
+  opts:           { limit?: number } = {}
+): BroadcastMessage[] {
+  const db    = openDb(projectPath);
+  const limit = Math.max(1, Math.min(500, opts.limit ?? 100));
+
+  type RawRow = {
+    id: number; type: string; agent_id: string; task: string;
+    files: string; state: string; summary: string; depends_on: string;
+    reason: string; importance: number; created_at: string;
+  };
+
+  let rows: RawRow[];
+  if (fromTimestamp) {
+    rows = db.prepare(`
+      SELECT id, type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at
+      FROM broadcasts WHERE created_at >= ?
+      ORDER BY created_at ASC, id ASC LIMIT ?
+    `).all(fromTimestamp, limit) as RawRow[];
+  } else {
+    rows = db.prepare(`
+      SELECT id, type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at
+      FROM broadcasts
+      ORDER BY created_at ASC, id ASC LIMIT ?
+    `).all(limit) as RawRow[];
+  }
+
+  db.close();
+
+  return rows.map((r) => ({
+    id:         r.id,
+    type:       r.type as BroadcastType,
+    agent_id:   r.agent_id,
+    task:       r.task,
+    files:      tryParseJsonArray(r.files),
+    state:      r.state,
+    summary:    r.summary,
+    depends_on: tryParseJsonArray(r.depends_on),
+    reason:     r.reason,
+    importance: r.importance,
+    created_at: r.created_at,
+  }));
+}
+
+/**
+ * Acknowledge receipt of a broadcast.
+ * Marks the broadcast acked_at in the audit log.
+ * Returns true if broadcast existed and was acked, false otherwise.
+ */
+export function ackBroadcast(
+  projectPath:  string,
+  broadcastId:  number,
+  agentId:      string
+): boolean {
+  const db        = openDb(projectPath);
+  const now       = new Date().toISOString();
+  const safeAgent = sanitize(agentId, 64);
+
+  try {
+    const result = db.prepare(`
+      UPDATE broadcasts SET acked_at = ? WHERE id = ?
+    `).run(now, broadcastId) as { changes: number };
+    db.close();
+    return result.changes > 0;
+  } catch {
+    db.close();
+    return false;
+  }
+}
+
+/**
+ * Get the current hash chain status for the broadcast audit log.
+ * Returns ok:true if the chain is intact, ok:false with brokenAt if tampered.
+ * Chapter 13 (Biba): tamper-evident audit trail verification.
+ */
+export function getBroadcastChainStatus(projectPath: string): {
+  ok:        boolean;
+  totalRows: number;
+  brokenAt?: number;
+} {
+  const db = openDb(projectPath);
+  const result = verifyChain(db);
+  db.close();
+  return { ok: result.ok, totalRows: result.totalRows, brokenAt: result.brokenAt };
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * ZeroClaw SecureContext — Red Team Security Test Suite
+ * SecureContext — Red Team Security Test Suite
  * 60 attack vectors across 6 categories
  * Run: node --experimental-vm-modules security-tests/run-all.mjs
  */
@@ -1265,7 +1265,7 @@ writeFileSync(
 );
 
 console.log("\n" + B("═".repeat(70)));
-console.log(B("  FINAL SUMMARY — v0.7.2 (84 attack vectors)"));
+console.log(B("  FINAL SUMMARY — v0.8.0 (84 attack vectors)"));
 console.log(B("═".repeat(70)));
 console.log(`  Total: ${total}  ${G("PASS: " + passed)}  ${R("FAIL: " + failed)}  ${Y("WARN: " + warned)}  ${Y("SKIP: " + skipped)}`);
 

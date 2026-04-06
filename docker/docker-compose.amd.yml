@@ -1,0 +1,13 @@
+# AMD ROCm GPU overlay for Ollama
+# Applied automatically by start.ps1 / start.sh when AMD GPU is detected.
+# Switches to the ROCm Ollama image and grants access to GPU device nodes.
+
+services:
+  sc-ollama:
+    image: ollama/ollama:rocm
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render

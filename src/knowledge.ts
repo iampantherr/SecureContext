@@ -193,20 +193,49 @@ export function indexContent(
   const now = new Date().toISOString();
   const db = openDb(projectPath);
 
+  // L0/L1 summaries for tiered retrieval (reduces token consumption at L0/L1 depth)
+  const l0 = content.slice(0, Config.TIER_L0_CHARS).trim();
+  const l1 = content.slice(0, Config.TIER_L1_CHARS).trim();
+
   db.prepare("DELETE FROM knowledge WHERE source = ?").run(source);
   db.prepare(
     "INSERT INTO knowledge(source, content, created_at) VALUES (?, ?, ?)"
   ).run(source, content, now);
 
-  db.prepare(
-    `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at)
-     VALUES (?, ?, ?, ?)`
-  ).run(source, sourceType, retentionTier, now);
+  try {
+    db.prepare(
+      `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at, l0_summary, l1_summary)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(source, sourceType, retentionTier, now, l0, l1);
+  } catch {
+    // Fallback for DBs without l0/l1 columns yet (pre-migration)
+    db.prepare(
+      `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at)
+       VALUES (?, ?, ?, ?)`
+    ).run(source, sourceType, retentionTier, now);
+  }
 
   db.close();
 
   // Async embedding — never blocks the indexing call
   storeEmbeddingAsync(projectPath, content, source).catch(() => undefined);
+}
+
+/**
+ * Return content at the requested depth tier.
+ * L0 = one-line summary (TIER_L0_CHARS)
+ * L1 = planning detail (TIER_L1_CHARS)
+ * L2 = full content
+ */
+export function getContentAtDepth(
+  content: string,
+  l0:      string,
+  l1:      string,
+  depth:   "L0" | "L1" | "L2"
+): string {
+  if (depth === "L0") return l0 || content.slice(0, Config.TIER_L0_CHARS);
+  if (depth === "L1") return l1 || content.slice(0, Config.TIER_L1_CHARS);
+  return content; // L2 = full
 }
 
 /**
@@ -330,18 +359,174 @@ function _searchDb(
 /**
  * Hybrid BM25 + vector search for the current project.
  * Returns results ranked by combined score. Falls back to pure BM25 if Ollama unavailable.
+ *
+ * @param depth Optional content depth tier: 'L0' (summary), 'L1' (overview), 'L2' (full, default)
  */
 export async function searchKnowledge(
   projectPath: string,
-  queries: string[]
+  queries: string[],
+  depth: "L0" | "L1" | "L2" = "L2"
 ): Promise<KnowledgeEntry[]> {
   const db          = openDb(projectPath);
   const queryText   = queries.filter((q) => q.trim()).join(" ");
   const embedResult = await getEmbedding(queryText);
   const queryVector = embedResult?.vector ?? null;
   const results     = _searchDb(db, queries, queryVector);
+
+  if (depth !== "L2") {
+    // Apply tiered content to snippets
+    type MetaTierRow = { source: string; l0_summary: string; l1_summary: string };
+    const sources = results.map((r) => r.source);
+    let tierMap = new Map<string, { l0: string; l1: string }>();
+    if (sources.length > 0) {
+      const placeholders = sources.map(() => "?").join(",");
+      try {
+        const tierRows = db.prepare(
+          `SELECT source, l0_summary, l1_summary FROM source_meta WHERE source IN (${placeholders})`
+        ).all(...sources) as MetaTierRow[];
+        for (const row of tierRows) {
+          tierMap.set(row.source, { l0: row.l0_summary, l1: row.l1_summary });
+        }
+      } catch {}
+    }
+
+    for (const result of results) {
+      const tier = tierMap.get(result.source);
+      result.snippet = getContentAtDepth(
+        result.content,
+        tier?.l0 ?? "",
+        tier?.l1 ?? "",
+        depth
+      );
+    }
+  }
+
   db.close();
   return results;
+}
+
+/**
+ * Explain retrieval scoring for a query — shows BM25, vector, hybrid scores per result.
+ * Use to debug why content was or wasn't returned.
+ */
+export async function explainRetrieval(
+  projectPath: string,
+  query: string,
+  depth: "L0" | "L1" | "L2" = "L2"
+): Promise<{
+  query:     string;
+  depth:     string;
+  bm25Only:  boolean;
+  results: Array<{
+    rank:            number;
+    source:          string;
+    bm25Score:       number;
+    bm25Normalized:  number;
+    vectorScore:     number | null;
+    hybridScore:     number;
+    contentLength:   number;
+    tieredContent:   string;
+    sourceType:      string;
+  }>;
+}> {
+  const db = openDb(projectPath);
+
+  const queries     = [query];
+  const embedResult = await getEmbedding(query);
+  const queryVector = embedResult?.vector ?? null;
+  const bm25Only    = queryVector === null;
+
+  type BM25Row  = { source: string; content: string; rank: number };
+  type EmbedRow = { source: string; vector: Buffer; model_name: string };
+  type MetaRow  = { source: string; source_type: string; l0_summary: string; l1_summary: string };
+
+  // BM25 candidates
+  const candidateMap = new Map<string, BM25Row>();
+  for (const q of queries) {
+    if (!q.trim()) continue;
+    let rows: BM25Row[];
+    try {
+      rows = db.prepare(
+        `SELECT source, content, rank FROM knowledge WHERE knowledge MATCH ? ORDER BY rank LIMIT ?`
+      ).all(q, Config.BM25_CANDIDATES) as BM25Row[];
+    } catch {
+      continue;
+    }
+    for (const row of rows) {
+      if (!candidateMap.has(row.source)) candidateMap.set(row.source, row);
+    }
+  }
+
+  if (candidateMap.size === 0) {
+    db.close();
+    return { query, depth, bm25Only, results: [] };
+  }
+
+  const sources      = Array.from(candidateMap.keys());
+  const placeholders = sources.map(() => "?").join(",");
+
+  let embedRows: EmbedRow[] = [];
+  let metaRows:  MetaRow[]  = [];
+  try {
+    embedRows = db.prepare(
+      `SELECT source, vector, model_name FROM embeddings WHERE source IN (${placeholders}) AND (model_name = ? OR model_name = 'unknown')`
+    ).all(...sources, ACTIVE_MODEL) as EmbedRow[];
+    metaRows = db.prepare(
+      `SELECT source, source_type, COALESCE(l0_summary,'') as l0_summary, COALESCE(l1_summary,'') as l1_summary FROM source_meta WHERE source IN (${placeholders})`
+    ).all(...sources) as MetaRow[];
+  } catch {}
+
+  const embeddingMap = new Map<string, Float32Array>();
+  for (const row of embedRows) embeddingMap.set(row.source, deserializeVector(row.vector));
+
+  const metaMap = new Map<string, MetaRow>();
+  for (const row of metaRows) metaMap.set(row.source, row);
+
+  const ranks     = Array.from(candidateMap.values()).map((r) => r.rank);
+  const minRank   = Math.min(...ranks);
+  const maxRank   = Math.max(...ranks);
+  const rankRange = maxRank - minRank || 1;
+
+  const detailed: Array<{
+    rank: number; source: string; bm25Score: number; bm25Normalized: number;
+    vectorScore: number | null; hybridScore: number; contentLength: number;
+    tieredContent: string; sourceType: string;
+  }> = [];
+
+  let idx = 0;
+  for (const [source, row] of candidateMap) {
+    const bm25Normalized = 1 - (row.rank - minRank) / rankRange;
+    const storedVec = embeddingMap.get(source);
+    const cosine    = (queryVector && storedVec) ? cosineSimilarity(queryVector, storedVec) : null;
+    const hybridScore = (queryVector && storedVec)
+      ? Config.W_BM25 * bm25Normalized + Config.W_COSINE * cosine!
+      : bm25Normalized;
+
+    const meta = metaMap.get(source);
+    const tieredContent = getContentAtDepth(
+      row.content,
+      meta?.l0_summary ?? "",
+      meta?.l1_summary ?? "",
+      depth
+    );
+
+    detailed.push({
+      rank:           idx++,
+      source,
+      bm25Score:      row.rank,
+      bm25Normalized,
+      vectorScore:    cosine,
+      hybridScore,
+      contentLength:  row.content.length,
+      tieredContent,
+      sourceType:     meta?.source_type ?? "internal",
+    });
+  }
+
+  detailed.sort((a, b) => b.hybridScore - a.hybridScore);
+  db.close();
+
+  return { query, depth, bm25Only, results: detailed.slice(0, Config.MAX_RESULTS) };
 }
 
 /**

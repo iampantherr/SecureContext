@@ -34,22 +34,69 @@ export interface EmbeddingResult {
 let ollamaAvailable: boolean | null = null;
 let lastAvailabilityCheck = 0;
 
+// Resolved embedding URL — may differ from Config.OLLAMA_URL if Docker fallback is used
+let resolvedOllamaUrl: string = Config.OLLAMA_URL;
+
+/**
+ * Candidate Ollama embedding URLs tried in order on first availability check.
+ * Covers: native install, plugin outside Docker with Ollama in Docker (host.docker.internal),
+ * and Docker default bridge gateway fallback.
+ */
+function ollamaFallbackUrls(): string[] {
+  const primary = Config.OLLAMA_URL;
+  const base = primary.replace(/\/api\/embeddings$/, "");
+  const urls = [primary];
+  // Only add Docker fallbacks if the primary points to localhost/127.0.0.1
+  if (/127\.0\.0\.1|localhost/.test(base)) {
+    urls.push("http://host.docker.internal:11434/api/embeddings");
+    urls.push("http://172.17.0.1:11434/api/embeddings");
+  }
+  return urls;
+}
+
 async function isOllamaAvailable(): Promise<boolean> {
   const now = Date.now();
   if (ollamaAvailable !== null && now - lastAvailabilityCheck < Config.EMBED_AVAIL_TTL) {
     return ollamaAvailable;
   }
-  try {
-    const ctrl  = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 2_000);
-    const resp  = await fetch(Config.OLLAMA_TAGS_URL, { signal: ctrl.signal });
-    clearTimeout(timer);
-    ollamaAvailable = resp.ok;
-  } catch {
-    ollamaAvailable = false;
+
+  // On first check (or after TTL), probe primary URL then Docker fallbacks
+  const candidates = ollamaFallbackUrls();
+  for (const url of candidates) {
+    try {
+      const tagsUrl = url.replace(/\/api\/embeddings$/, "/api/tags");
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 2_000);
+      const resp  = await fetch(tagsUrl, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (resp.ok) {
+        if (url !== Config.OLLAMA_URL) {
+          console.error(`[zc-ctx] Ollama not at primary URL — using fallback: ${url}`);
+        }
+        resolvedOllamaUrl = url;
+        ollamaAvailable = true;
+        lastAvailabilityCheck = now;
+        return true;
+      }
+    } catch {
+      // try next candidate
+    }
   }
+
+  ollamaAvailable = false;
   lastAvailabilityCheck = now;
-  return ollamaAvailable;
+  return false;
+}
+
+/**
+ * Returns whether Ollama is currently reachable.
+ * Uses the same module-level TTL cache as getEmbedding — no extra network call
+ * if a check has been made recently.
+ * Exported so zc_status and zc_recall_context can surface a clear user warning.
+ */
+export async function checkOllamaAvailable(): Promise<{ available: boolean; url: string }> {
+  const available = await isOllamaAvailable();
+  return { available, url: resolvedOllamaUrl };
 }
 
 /**
@@ -65,7 +112,7 @@ export async function getEmbedding(text: string): Promise<EmbeddingResult | null
   const timer       = setTimeout(() => controller.abort(), Config.EMBED_TIMEOUT_MS);
 
   try {
-    const resp = await fetch(Config.OLLAMA_URL, {
+    const resp = await fetch(resolvedOllamaUrl, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ model: Config.OLLAMA_MODEL, prompt: truncated }),

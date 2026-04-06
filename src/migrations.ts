@@ -194,6 +194,38 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  // ── v0.8.0 migrations ────────────────────────────────────────────────────
+
+  {
+    id: 10,
+    description: "v0.8.0: agent_sessions RBAC table + hash chain columns on broadcasts + L0/L1 tiers on source_meta",
+    up: (db) => {
+      // Agent session registry (Chapter 6 session tokens + Chapter 14 RBAC)
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+          token_id    TEXT    PRIMARY KEY,
+          agent_id    TEXT    NOT NULL,
+          role        TEXT    NOT NULL CHECK(role IN ('orchestrator','developer','marketer','researcher','worker')),
+          token_hmac  TEXT    NOT NULL,
+          issued_at   TEXT    NOT NULL,
+          expires_at  TEXT    NOT NULL,
+          revoked     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_as_agent ON agent_sessions(agent_id, revoked);
+      `);
+
+      // Hash chain columns (Chapter 13 Biba integrity chain)
+      try { db.exec(`ALTER TABLE broadcasts ADD COLUMN session_token_id TEXT NOT NULL DEFAULT ''`); } catch {}
+      try { db.exec(`ALTER TABLE broadcasts ADD COLUMN prev_hash TEXT NOT NULL DEFAULT 'genesis'`); } catch {}
+      try { db.exec(`ALTER TABLE broadcasts ADD COLUMN row_hash TEXT NOT NULL DEFAULT ''`); } catch {}
+      try { db.exec(`ALTER TABLE broadcasts ADD COLUMN acked_at TEXT`); } catch {}
+
+      // L0/L1 tier columns (tiered context loading)
+      try { db.exec(`ALTER TABLE source_meta ADD COLUMN l0_summary TEXT NOT NULL DEFAULT ''`); } catch {}
+      try { db.exec(`ALTER TABLE source_meta ADD COLUMN l1_summary TEXT NOT NULL DEFAULT ''`); } catch {}
+    },
+  },
+
 ];
 
 /**

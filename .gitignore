@@ -4,6 +4,7 @@ dist/
 *.d.ts.map
 .env
 .env.*
+!.env.example
 
 # Internal agent working files — not for public consumption
 .claude/

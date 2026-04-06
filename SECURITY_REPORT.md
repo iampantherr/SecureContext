@@ -1,7 +1,7 @@
-# ZeroClaw SecureContext — Red Team Security Report
+# SecureContext — Red Team Security Report
 
-> **Current version: 0.7.2 — 84 attack vectors · 78 PASS · 0 FAIL · 6 WARN**
-> See the **[v0.7.2 KB Injection Pre-filter](#v072----kb-injection-pre-filter)** and **[v0.7.1 Broadcast Channel Security Audit](#appendix----v071-broadcast-channel-security-audit-2026-03-29)** appendices for the latest findings.
+> **Current version: 0.8.0 — 84 attack vectors · 78 PASS · 0 FAIL · 6 WARN**
+> See the **[v0.8.0 Store Abstraction & Docker API](#v080----store-abstraction--docker-api)**, **[v0.7.2 KB Injection Pre-filter](#v072----kb-injection-pre-filter)** and **[v0.7.1 Broadcast Channel Security Audit](#appendix----v071-broadcast-channel-security-audit-2026-03-29)** appendices for the latest findings.
 > The sections below document the v0.2.0 foundational red-team baseline (vulnerabilities found and fixed before initial release).
 
 ---

@@ -1,43 +1,110 @@
-# SecureContext — Architecture Reference (v0.7.2)
+# SecureContext — Architecture Reference (v0.8.0)
 
 ## Overview
 
 SecureContext is a Claude Code MCP (Model Context Protocol) plugin that extends the AI's effective context window through persistent memory and searchable knowledge, while maintaining strict security boundaries around credentials, network access, and external content.
 
+---
+
+## Deployment Modes
+
+SecureContext ships with two storage backends. The Docker Stack is the recommended default. Local SQLite is a lightweight fallback for solo developers.
+
+### Mode 1 — Docker Stack (Recommended Default)
+
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Claude Code (host process)                                          │
-│                                                                      │
-│  ┌──────────────┐   stdin/stdout   ┌──────────────────────────────┐ │
-│  │   Claude AI  │ ◄──────────────► │  MCP Server (dist/server.js) │ │
-│  └──────────────┘    JSON-RPC      └──────────────────────────────┘ │
-│         │                                        │                   │
-│         │ tool calls              ┌──────────────┼──────────────┐   │
-│         ▼                         ▼              ▼              ▼   │
-│  ┌─────────────┐          sandbox  knowledge  memory  fetcher        │
-│  │    Hooks    │          .ts      .ts         .ts     .ts            │
-│  │  (PreTool)  │                                                      │
-│  │  (PostTool) │          config   migrations  embedder integrity     │
-│  │  (Stop)     │          .ts      .ts         .ts      .ts           │
-│  └─────────────┘                                                      │
-└─────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┴──────────────────┐
-                    ▼                                  ▼
-         ~/.claude/zc-ctx/sessions/          ~/.claude/zc-ctx/
-         ├── {hash}.db                       ├── global.db         (rate limits)
-         │   ├── knowledge (FTS5)            ├── integrity.json    (tamper baseline)
-         │   ├── embeddings                  └── zc-ctx/           (plugin data root)
-         │   ├── source_meta
-         │   ├── working_memory
-         │   ├── broadcasts          ← v0.7.0 (A2A shared channel) + v0.7.1 (scrypt, rate limit)
-         │   ├── project_meta
-         │   ├── db_meta
-         │   └── schema_migrations
-         └── {hash}.events.jsonl
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Claude Code (host process)                                               │
+│  ┌──────────────┐  stdin/stdout  ┌────────────────────────────────────┐  │
+│  │   Claude AI  │ ◄────────────► │  MCP Server (dist/server.js)       │  │
+│  └──────────────┘   JSON-RPC     └────────────────┬───────────────────┘  │
+│                                                    │ ZC_API_URL set       │
+└────────────────────────────────────────────────────┼─────────────────────┘
+                                                     │ HTTP (Bearer token)
+                    ┌────────────────────────────────▼──────────────────┐
+                    │  Docker network: securecontext-net                  │
+                    │                                                     │
+                    │  ┌─────────────────────┐  ┌──────────────────────┐│
+                    │  │  securecontext-api   │  │ securecontext-ollama ││
+                    │  │  (Fastify HTTP :3099)│  │ (nomic-embed-text)   ││
+                    │  │  store-postgres.ts   │  │ GPU-accelerated      ││
+                    │  └──────────┬──────────┘  └──────────────────────┘│
+                    │             │ pg driver                             │
+                    │  ┌──────────▼──────────────────────────────────┐  │
+                    │  │  securecontext-postgres (pgvector/pgvector)  │  │
+                    │  │  knowledge · embeddings · working_memory     │  │
+                    │  │  broadcasts · session_tokens · source_meta   │  │
+                    │  └─────────────────────────────────────────────┘  │
+                    └─────────────────────────────────────────────────────┘
 ```
 
-Project databases are scoped by SHA256 hash of the project path — no path traversal possible. The `global.db` file lives one level up, shared across all projects, and holds the persistent daily fetch rate limiter.
+**When to use:**
+- Working on multiple projects (possibly concurrently)
+- Running parallel agents (A2A orchestration)
+- Want GPU-accelerated vector search built in
+- Want memory to survive machine reboots automatically
+- Part of a team sharing one knowledge base
+
+**Key properties:**
+- All containers named `securecontext-*` — identifiable at a glance, never confused with other stacks
+- `restart: unless-stopped` on all containers — automatically restart on system reboot
+- PostgreSQL advisory locks for correct concurrent broadcast writes
+- `ollamaAvailable` surfaced in `/health` endpoint — agents see search mode at startup
+
+### Mode 2 — Local SQLite (Single Developer, No Docker)
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Claude Code (host process)                                           │
+│  ┌──────────────┐  stdin/stdout  ┌──────────────────────────────────┐│
+│  │   Claude AI  │ ◄────────────► │  MCP Server (dist/server.js)     ││
+│  └──────────────┘   JSON-RPC     └───────────────┬──────────────────┘│
+│                                                   │ ZC_API_URL not set │
+│                                          ┌────────▼──────────────┐    │
+│                                          │  store-sqlite.ts       │    │
+│                                          │  (Node 22 built-in)    │    │
+│                                          └────────┬───────────────┘    │
+└───────────────────────────────────────────────────┼────────────────────┘
+                                                    │
+                    ┌───────────────────────────────┴─────────────────┐
+                    │   ~/.claude/zc-ctx/                              │
+                    │   ├── sessions/{sha256-of-project-path}.db       │
+                    │   │   ├── knowledge (FTS5 BM25)                  │
+                    │   │   ├── embeddings (Float32 vectors, optional) │
+                    │   │   ├── source_meta                            │
+                    │   │   ├── working_memory                         │
+                    │   │   ├── broadcasts                             │
+                    │   │   ├── project_meta                           │
+                    │   │   └── schema_migrations                      │
+                    │   ├── global.db  (fetch rate limits)             │
+                    │   └── integrity.json  (tamper baseline)          │
+                    └──────────────────────────────────────────────────┘
+```
+
+**When to use:**
+- Solo developer, one project at a time
+- No concurrent agents or parallel Claude sessions
+- Prefer zero Docker dependency
+- Just getting started and want the simplest possible setup
+
+**Key properties:**
+- Per-project databases auto-created on first use — no setup required
+- Fully self-contained: zero network services needed
+- Optional Ollama for vector search (auto-detected at `127.0.0.1:11434`)
+- When Ollama is unavailable, `zc_recall_context` and `zc_status` show a clear warning with fix instructions
+- Not suitable for concurrent agents — SQLite has no row-level locking for the broadcast chain
+
+### Store Selection
+
+The MCP server selects the backend at startup:
+
+```
+ZC_API_URL set?
+    YES → proxy all store calls to the remote API server (Docker mode)
+    NO  → open local SQLite database at ~/.claude/zc-ctx/sessions/{hash}.db
+```
+
+No code change needed between modes. The `Store` interface is identical — all 13 tools work the same way in both modes.
 
 ---
 
@@ -48,7 +115,7 @@ Project databases are scoped by SHA256 hash of the project path — no path trav
 All constants and tunables are centralized in a single `Config` object. Key settings are overridable via environment variables for power users — no source changes required.
 
 ```
-Config.VERSION              "0.7.2"
+Config.VERSION              "0.8.0"
 Config.DB_DIR               ~/.claude/zc-ctx/sessions/
 Config.GLOBAL_DIR           ~/.claude/zc-ctx/
 Config.WORKING_MEMORY_MAX   50 facts
@@ -85,7 +152,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 ```
 
-**Applied migrations (v0.7.1):**
+**Applied migrations (v0.8.0):**
 | ID | Description |
 |----|-------------|
 | 1  | Add `source_meta` table (source_type for trust labeling) |
@@ -96,7 +163,9 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 | 6  | Add `db_meta` table (schema version metadata for `zc_status`) |
 | 7  | Add `project_meta` table (human-readable project labels for cross-project search) |
 | 8  | **[v0.7.0]** Add `broadcasts` table — A2A shared coordination channel with CHECK constraint on type, indexes on type/agent/created_at |
-| 9  | **[v0.7.1]** Purge legacy SHA256 channel key hashes — forces re-keying after scrypt upgrade. Deletes any `project_meta` row where `key = 'zc_channel_key_hash'` and value does not start with `scrypt:v1:` |
+| 9  | **[v0.7.1]** Purge legacy SHA256 channel key hashes — forces re-keying after scrypt upgrade |
+
+**Note (PostgreSQL / Docker mode):** The PostgreSQL schema is initialized from `docker/postgres/init.sql` (not migrations.ts). It is equivalent to the final SQLite schema. `init.sql` only runs on first-boot (empty volume); subsequent starts use the existing data.
 
 **Idempotency:** Each migration is recorded in `schema_migrations`. `runMigrations()` skips already-applied IDs. Re-running is always safe.
 
@@ -133,7 +202,84 @@ The entry point. Implements the MCP protocol over stdin/stdout using `@modelcont
 
 **Persistent rate limiting:** Per-project daily fetch counter stored in `~/.claude/zc-ctx/global.db`. Resets at UTC midnight. Cannot be bypassed by restarting the MCP server.
 
-**Version:** `0.7.2` — bumped on each release to trigger integrity re-baseline.
+**Ollama availability warning:** `zc_recall_context` and `zc_status` call `checkOllamaAvailable()` on each invocation (TTL-cached, 30s). If Ollama is not reachable, the output includes a clear warning block with fix instructions. `zc_search` results include a BM25-only banner when no vector scores are present.
+
+**Version:** `0.8.0` — bumped on each release to trigger integrity re-baseline.
+
+---
+
+### 3b. Store Abstraction (`src/store.ts`, `src/store-sqlite.ts`, `src/store-postgres.ts`)
+
+**[New in v0.8.0]** The storage layer is abstracted behind a `Store` interface. The MCP server and API server are both storage-backend-agnostic.
+
+```
+Store interface (src/store.ts)
+    │
+    ├── StoreSqlite  (src/store-sqlite.ts)  — Node 22 built-in SQLite, in-process
+    └── StorePostgres (src/store-postgres.ts) — pg driver, PostgreSQL + pgvector
+```
+
+**Selection at startup:**
+```typescript
+// createStore() in src/store.ts:
+if (process.env.ZC_STORE === "postgres") return new StorePostgres(pgUrl);
+return new StoreSqlite();
+```
+
+In Docker mode, `ZC_STORE=postgres` is set in `docker-compose.yml`. The MCP server itself never touches PostgreSQL directly — all calls go through the HTTP API.
+
+**PostgreSQL notes:**
+- `broadcasts.created_at` stored as `TEXT` (ISO-8601) — prevents `pg` driver `TIMESTAMPTZ → Date` type coercion breaking the SHA256 hash chain
+- Advisory locks (`pg_try_advisory_xact_lock`) ensure correct broadcast ordering under concurrent agents
+- `vector(768)` column for pgvector cosine similarity search (equivalent to SQLite BLOB Float32Array)
+
+---
+
+### 3c. HTTP API Server (`src/api-server.ts`)
+
+**[New in v0.8.0]** Exposes the full `Store` interface as an HTTP REST API so agents on any machine can connect.
+
+**Authentication:** Every request (except `GET /health`) requires `Authorization: Bearer <ZC_API_KEY>`. Timing-safe comparison via double SHA256. No key → server starts in open mode with a warning.
+
+**Rate limiting:** Per-IP in-process rate limit (500 req/min). Prunes stale entries when map exceeds 10,000 IPs.
+
+**`GET /health` response (Docker mode):**
+```json
+{
+  "status": "ok",
+  "version": "0.8.0",
+  "store": "postgres",
+  "ollamaAvailable": true,
+  "ollamaUrl": "http://sc-ollama:11434",
+  "searchMode": "hybrid (BM25 + vector)"
+}
+```
+When `ollamaAvailable` is `false`, `searchMode` is `"BM25-only (Ollama unavailable)"`. Agents calling `zc_recall_context` see the same warning in their session output.
+
+**Endpoints:**
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Stack health + Ollama status (unauthenticated) |
+| POST | `/api/v1/remember` | Store working memory fact |
+| POST | `/api/v1/forget` | Delete working memory fact |
+| GET | `/api/v1/recall` | Retrieve all working memory |
+| POST | `/api/v1/summarize` | Archive session summary |
+| GET | `/api/v1/status` | Full project status |
+| POST | `/api/v1/index` | Index content into KB |
+| POST | `/api/v1/search` | Hybrid KB search |
+| POST | `/api/v1/search-global` | Cross-project search |
+| GET | `/api/v1/explain` | Search transparency debug |
+| POST | `/api/v1/broadcast` | A2A broadcast write |
+| GET | `/api/v1/broadcasts` | A2A broadcast read |
+| POST | `/api/v1/replay` | Broadcast replay from ID |
+| POST | `/api/v1/ack` | Acknowledge broadcast |
+| GET | `/api/v1/chain` | Hash chain integrity check |
+| POST | `/api/v1/set-key` | Set channel key |
+| POST | `/api/v1/issue-token` | Issue RBAC session token |
+| POST | `/api/v1/revoke-token` | Revoke agent tokens |
+| POST | `/api/v1/verify-token` | Verify RBAC token |
+
+**Security:** `projectPath` validated as absolute path (no traversal). All inputs validated before passing to Store. Error responses never expose stack traces or internal paths. Request body limit: 1MB.
 
 ---
 
@@ -598,7 +744,7 @@ getRecentEvents(projectPath, limit=20)
 
 **JSONL rotation:** Both hooks rotate the log when it exceeds 512KB — keeps the newest 384KB (aligned to line boundaries). Prevents unbounded disk growth in long-lived projects.
 
-**WAL + busy_timeout:** All DB opens use `PRAGMA journal_mode = WAL` + `PRAGMA busy_timeout = 5000`. This prevents `SQLITE_BUSY` errors when ZeroClaw runs parallel agents writing to the same project DB simultaneously.
+**WAL + busy_timeout:** All DB opens use `PRAGMA journal_mode = WAL` + `PRAGMA busy_timeout = 5000`. This prevents `SQLITE_BUSY` errors when SecureContext runs parallel agents writing to the same project DB simultaneously.
 
 ---
 
@@ -808,7 +954,7 @@ SecureContext/
 | `src/config.ts` — centralized constants | No more hardcoded values scattered across files |
 | `src/migrations.ts` — 7 atomic migrations | Crash-safe schema upgrades; v0.5.0 → v0.6.0 non-destructive |
 | Tiered retention (14d/30d/365d) | Session summaries no longer expire in 14 days |
-| Agent namespacing (`agent_id`) | Parallel ZeroClaw agents can't clobber each other's memory |
+| Agent namespacing (`agent_id`) | Parallel SecureContext agents can't clobber each other's memory |
 | Persistent rate limiting (`global.db`) | Daily fetch budget survives server restarts |
 | WAL mode + busy_timeout | Multi-agent SQLite concurrent write safety |
 | Embedding model version tracking | No stale vector cosine scores after model switch |

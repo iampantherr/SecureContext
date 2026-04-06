@@ -1,0 +1,37 @@
+# Production overlay — add nginx reverse proxy in front of sc-api
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What this adds:
+#   securecontext-nginx — rate limiting, request size cap, security headers, access logs
+#
+# With this overlay:
+#   - External traffic hits nginx on port 80 (or 443 with SSL termination added)
+#   - sc-api port is unexposed to host (internal only)
+#   - nginx handles per-IP rate limiting as a second layer (app rate limit is first)
+
+name: securecontext
+
+services:
+
+  # ── nginx reverse proxy ────────────────────────────────────────────────────
+  sc-nginx:
+    image: nginx:1.27-alpine
+    container_name: securecontext-nginx
+    networks: [sc-net]
+    ports:
+      - "80:80"
+      # For SSL: add "443:443" and mount certs + update nginx.conf
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      sc-api:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  # ── sc-api: remove direct host port exposure in prod (nginx handles it) ────
+  sc-api:
+    ports: !reset []  # Unexpose direct port — all traffic goes through nginx

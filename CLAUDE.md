@@ -7,8 +7,8 @@ Provides context-window optimization (sandbox execution, FTS5+vector knowledge b
 MemGPT-style persistent memory, session continuity, SSRF-protected web fetch) with
 maximum security — no pre-compiled bundles, no credential leakage, no cloud sync.
 
-**Plugin ID:** `zc-ctx@zeroclaw`
-**Version:** `0.7.2`
+**Plugin ID:** `zc-ctx`
+**Version:** `0.8.0`
 **License:** MIT
 **Language:** TypeScript (Node.js ≥ 22)
 
@@ -98,7 +98,7 @@ node install.mjs --uninstall     # Remove from all configs
 
 ---
 
-## Schema (v0.7.2 — 9 migrations)
+## Schema (v0.8.0 — 9 migrations)
 
 | Table | Purpose |
 |-------|---------|

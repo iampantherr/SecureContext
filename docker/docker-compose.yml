@@ -1,0 +1,132 @@
+name: securecontext
+
+# ─── Networks ────────────────────────────────────────────────────────────────
+# All services communicate on the internal 'sc-net' bridge.
+# Only sc-api and sc-nginx expose ports to the host.
+networks:
+  sc-net:
+    name: securecontext-net
+    driver: bridge
+
+# ─── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  ollama_data:
+    name: securecontext-ollama-models
+  postgres_data:
+    name: securecontext-postgres-data
+
+services:
+
+  # ── PostgreSQL + pgvector ──────────────────────────────────────────────────
+  # All SecureContext data: working memory, knowledge base, embeddings,
+  # broadcasts, tokens. pgvector enables native cosine similarity search.
+  sc-postgres:
+    image: pgvector/pgvector:pg16   # Official pgvector image — pg16 + vector extension pre-installed
+    container_name: securecontext-postgres
+    networks: [sc-net]
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-securecontext}
+      POSTGRES_USER:     ${POSTGRES_USER:-scuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"  # exposed for admin access — bind to 127.0.0.1 in production
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scuser} -d ${POSTGRES_DB:-securecontext}"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 20s
+    restart: unless-stopped   # auto-restarts when Docker daemon starts (on system reboot)
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # ── SecureContext API Server ───────────────────────────────────────────────
+  # Exposes the full Store interface over HTTP.
+  # Agents connect here instead of reading SQLite directly.
+  # Horizontally scalable: run multiple replicas behind a load balancer.
+  sc-api:
+    build:
+      context: ..         # project root (where package.json is)
+      dockerfile: docker/Dockerfile
+    image: securecontext-api:latest
+    container_name: securecontext-api
+    networks: [sc-net]
+    environment:
+      ZC_STORE:     postgres
+      ZC_PG_URL:    postgresql://${POSTGRES_USER:-scuser}:${POSTGRES_PASSWORD}@sc-postgres:5432/${POSTGRES_DB:-securecontext}
+      ZC_API_PORT:  3099
+      ZC_API_HOST:  "0.0.0.0"
+      ZC_API_KEY:   ${ZC_API_KEY:?ZC_API_KEY is required}
+      ZC_OLLAMA_URL: http://sc-ollama:11434/api/embeddings
+      ZC_OLLAMA_MODEL: ${OLLAMA_MODEL:-nomic-embed-text}
+      NODE_ENV:     production
+    ports:
+      - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
+    depends_on:
+      sc-postgres:
+        condition: service_healthy
+      sc-ollama:
+        condition: service_healthy
+    healthcheck:
+      # Use 127.0.0.1 explicitly — Alpine's 'localhost' resolves to ::1 (IPv6)
+      # but the server listens on 0.0.0.0 (IPv4 only by default).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3099/health || exit 1"]
+      interval: 15s
+      timeout:  5s
+      retries:  3
+      start_period: 10s
+    restart: unless-stopped   # auto-restarts when Docker daemon starts (on system reboot)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # ── Ollama (GPU-accelerated embeddings) ────────────────────────────────────
+  # Shared embedding server. All agents use this single instance —
+  # one GPU load instead of one per developer machine.
+  # GPU acceleration is applied via overlay: docker-compose.nvidia.yml / amd / cpu
+  sc-ollama:
+    image: ollama/ollama:latest
+    container_name: securecontext-ollama
+    networks: [sc-net]
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped   # auto-restarts when Docker daemon starts (on system reboot)
+    healthcheck:
+      # ollama binary is always present in the container; 'list' talks to the server.
+      # Cannot use curl/wget — the ollama image does not include them.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 20s
+
+  # ── Model initialization (runs once at first boot, then exits) ─────────────
+  # Pulls the embedding model into the ollama_data volume so it persists.
+  # On subsequent starts Ollama loads from volume cache — this init is a no-op.
+  sc-ollama-init:
+    image: curlimages/curl:latest
+    container_name: securecontext-ollama-init
+    networks: [sc-net]
+    depends_on:
+      sc-ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        echo 'Pulling ${OLLAMA_MODEL:-nomic-embed-text}...' &&
+        curl -s -X POST http://sc-ollama:11434/api/pull
+          -d '{\"name\":\"${OLLAMA_MODEL:-nomic-embed-text}\"}' &&
+        echo 'Model ready.'
+      "
+    restart: "no"

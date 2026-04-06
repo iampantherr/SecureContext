@@ -6,7 +6,7 @@
 [![Tests](https://img.shields.io/badge/security%20tests-78%20PASS%20%7C%200%20FAIL%20%7C%206%20WARN-brightgreen)](security-tests/results.json)
 [![Unit Tests](https://img.shields.io/badge/unit%20tests-300%20passed-brightgreen)](src)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
-[![Version](https://img.shields.io/badge/version-0.7.2-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
@@ -225,7 +225,135 @@ For the complete technical architecture with all security properties documented,
 
 ## Installation
 
-### One-command install (recommended)
+SecureContext has two storage modes. Pick the one that fits your setup:
+
+| | **Mode 1 — Docker Stack** ✅ Recommended | **Mode 2 — Local SQLite** |
+|---|---|---|
+| **Best for** | Most developers — any project, concurrent agents, persistent memory | Solo developer, single focused project, minimal dependencies |
+| **Storage** | PostgreSQL + pgvector in Docker | SQLite on local disk |
+| **Search** | Hybrid BM25 + vector (Ollama built-in) | BM25 only (+ Ollama if installed separately) |
+| **Multi-project** | ✅ All projects share one stack | ✅ Per-project DBs auto-created |
+| **Concurrent agents** | ✅ Fully concurrent (advisory locks) | ⚠️ Single machine only |
+| **Setup effort** | ~5 min (Docker required) | ~1 min (Node.js only) |
+| **Requirement** | Docker Desktop 4.x+ | Node.js 22+ |
+
+> **Not sure which to pick?** Use Docker (Mode 1). It is the default for this project. Local SQLite (Mode 2) is a lighter fallback for developers who are working on a single project, don't run concurrent agents, and want zero Docker overhead. For everyone else Docker is the better choice — you get persistent memory across reboots, GPU-accelerated vector search, and correct concurrency out of the box.
+
+---
+
+### Mode 1 — Docker Stack (recommended default)
+
+**Prerequisites:** Docker Desktop 4.x+ (or Docker Engine on Linux), Node.js 22+.
+
+#### Step 1 — Clone and configure
+
+```bash
+git clone https://github.com/iampantherr/SecureContext
+cd SecureContext
+cp docker/.env.example docker/.env
+```
+
+Edit `docker/.env` and set **two values** (everything else has safe defaults):
+
+```env
+POSTGRES_PASSWORD=<strong-random-password>
+ZC_API_KEY=<strong-random-key>
+```
+
+Generate a key:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+The stack refuses to start with missing credentials — you will see a clear error if either value is unset.
+
+#### Step 2 — Start the stack
+
+```powershell
+# Windows (PowerShell — auto-detects NVIDIA / AMD / CPU-only GPU mode)
+.\docker\start.ps1
+```
+```bash
+# Linux / macOS
+chmod +x docker/start.sh
+./docker/start.sh
+```
+
+Three containers start, all prefixed `securecontext-` so they're instantly identifiable and never confused with other projects:
+
+| Container | Role |
+|---|---|
+| `securecontext-postgres` | PostgreSQL + pgvector — all memory and knowledge |
+| `securecontext-api` | HTTP API server — agents connect here |
+| `securecontext-ollama` | GPU-accelerated embedding server (BM25 + vector search) |
+
+Containers use **`restart: unless-stopped`** — they come back automatically every time your computer reboots.
+
+**Enable auto-start (one-time):**
+- **Windows:** Docker Desktop → Settings → General → *"Start Docker Desktop when you sign in"* ✓
+- **Linux:** `sudo systemctl enable docker`
+- **macOS:** Docker Desktop → Settings → General → *"Start at Login"* ✓
+
+**Verify the stack is healthy:**
+```bash
+curl http://localhost:3099/health
+```
+Expected response:
+```json
+{
+  "status": "ok",
+  "version": "0.8.0",
+  "store": "postgres",
+  "ollamaAvailable": true,
+  "searchMode": "hybrid (BM25 + vector)"
+}
+```
+
+If `ollamaAvailable` is `false`, search runs in BM25-only mode until the Ollama container finishes pulling the embedding model (usually 1–2 minutes on first boot).
+
+#### Step 3 — Register with Claude
+
+```bash
+node install.mjs --remote http://localhost:3099 <your-ZC_API_KEY>
+```
+
+This writes `ZC_API_URL` and `ZC_API_KEY` into the MCP server's `env` block in `~/.claude/settings.json` and the Claude Desktop config. Restart Claude Code / Desktop after running.
+
+The resulting config:
+```json
+{
+  "mcpServers": {
+    "zc-ctx": {
+      "command": "node",
+      "args": ["/path/to/SecureContext/dist/server.js"],
+      "env": {
+        "ZC_API_URL": "http://localhost:3099",
+        "ZC_API_KEY": "your-key-here"
+      }
+    }
+  }
+}
+```
+
+**Upgrading from a previous version:**
+```bash
+git pull
+.\docker\start.ps1 --pull   # pulls latest images + restarts
+node install.mjs --remote http://localhost:3099 <key>
+```
+
+To stop the stack:
+```bash
+docker compose -f docker/docker-compose.yml down
+```
+
+---
+
+### Mode 2 — Local SQLite (single developer, no Docker)
+
+Use this if you are working on **one project at a time**, don't run concurrent agents, and want the simplest possible setup with no Docker dependency. The trade-off: no built-in vector search (unless you install Ollama separately), and no shared memory across multiple machines.
+
+**Prerequisites:** Node.js 22+ only.
 
 ```bash
 git clone https://github.com/iampantherr/SecureContext
@@ -233,36 +361,45 @@ cd SecureContext
 node install.mjs
 ```
 
-The installer: builds the project, registers the MCP server in Claude Code CLI (`~/.claude/settings.json`), and registers it in the Claude Desktop app config. Restart both after running.
+That's it. The installer builds the project, registers the MCP server in `~/.claude/settings.json` and the Claude Desktop config, and prints next steps. Restart Claude Code / Desktop after running.
+
+SecureContext creates a separate SQLite database per project (keyed by SHA256 of the project path) — so you can work on multiple projects sequentially without any collision, just not concurrently with parallel agents.
+
+**Optional — enable Ollama for vector search (highly recommended):**
+```bash
+# Install from https://ollama.com, then:
+ollama pull nomic-embed-text
+ollama serve
+```
+SecureContext auto-detects Ollama at `http://127.0.0.1:11434`. Falls back to pure BM25 if Ollama is not running — no config change needed. When Ollama is unavailable, `zc_recall_context` and `zc_status` will show a clear warning.
+
+**Upgrading from a previous version:**
+```bash
+git pull
+node install.mjs   # rebuilds and re-registers
+```
+Zero config changes needed. Schema migrations run automatically. All existing memory and KB data is preserved.
 
 To uninstall:
 ```bash
 node install.mjs --uninstall
 ```
 
+**Switching from SQLite to Docker:**
+```bash
+# Stop local mode, start Docker stack, re-register:
+node install.mjs --uninstall
+.\docker\start.ps1        # or ./docker/start.sh
+node install.mjs --remote http://localhost:3099 <key>
+```
+
+Your working memory and KB data from SQLite is **not automatically migrated** — the Docker stack starts with an empty PostgreSQL database. Use `zc_recall_context` in the old setup to export facts before switching.
+
 ---
 
-### Manual install
+### Manual MCP config (if you prefer not to use the installer)
 
-#### Prerequisites
-
-- **Node.js 22+** — uses the built-in `node:sqlite` module. No native compilation. No `node-gyp`. No binary downloads.
-- **Claude Code** and/or **Claude Desktop App**
-- **Ollama** _(optional)_ — enables vector search. Falls back to pure BM25 without it.
-
-#### Step 1 — Clone and Build
-
-```bash
-git clone https://github.com/iampantherr/SecureContext
-cd SecureContext
-npm install
-npm run build
-```
-
-#### Step 2 — Add to Claude Code CLI
-
-**`~/.claude/settings.json`**:
-
+**Local SQLite mode:**
 ```json
 {
   "mcpServers": {
@@ -274,37 +411,40 @@ npm run build
 }
 ```
 
-#### Step 3 — Add to Claude Desktop App (optional)
-
-**`~/AppData/Roaming/Claude/claude_desktop_config.json`** (Windows)
-**`~/Library/Application Support/Claude/claude_desktop_config.json`** (macOS):
-
+**Remote / Docker mode:**
 ```json
 {
   "mcpServers": {
     "zc-ctx": {
       "command": "node",
-      "args": ["/absolute/path/to/SecureContext/dist/server.js"]
+      "args": ["/absolute/path/to/SecureContext/dist/server.js"],
+      "env": {
+        "ZC_API_URL": "http://localhost:3099",
+        "ZC_API_KEY": "your-api-key"
+      }
     }
   }
 }
 ```
 
-Restart Claude Desktop after editing.
+Add to `~/.claude/settings.json` (Claude Code CLI) and/or:
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
-#### Step 4 — Verify
+#### Verify the install
 
-In a new session, call `zc_status()` — you should see DB health, KB entry counts, and fetch budget. Call `zc_recall_context()` to start using the memory system.
-
-#### Step 5 (Optional) — Enable Vector Search
-
+**Docker mode** — check the stack is healthy before opening Claude:
 ```bash
-# Install Ollama from https://ollama.com
-ollama pull nomic-embed-text
-ollama serve
+curl http://localhost:3099/health
+# → {"status":"ok","store":"postgres","ollamaAvailable":true,"searchMode":"hybrid (BM25 + vector)"}
+
+docker ps --filter name=securecontext
+# securecontext-api      Up X minutes (healthy)
+# securecontext-postgres Up X minutes (healthy)
+# securecontext-ollama   Up X minutes (healthy)
 ```
 
-SecureContext auto-detects Ollama at `http://127.0.0.1:11434`. No config needed. Falls back to pure BM25 if Ollama is not running.
+**Both modes** — in a new Claude session: `zc_status()` shows DB health, store type (`sqlite` or `postgres`), KB entry counts, Ollama status, and fetch budget. Then `zc_recall_context()` to restore working memory.
 
 ---
 
@@ -444,6 +584,20 @@ zc_broadcast(type="ASSIGN", agent_id="orchestrator",
 
 ## Changelog
 
+### v0.8.0 — Production Architecture (PostgreSQL + Docker + Smart Memory)
+
+**Zero breaking changes for single-developer SQLite users. All new capabilities are opt-in.**
+
+- **Store abstraction layer** — `Store` interface with `SqliteStore` (default, wraps existing SQLite code) and `PostgresStore` (full PostgreSQL + pgvector). Switch with `ZC_STORE=postgres`. If `ZC_STORE` is unset, behaviour is identical to v0.7.2.
+- **PostgreSQL production backend** — multi-tenant schema (`project_hash` discriminator on every table), `pgvector` for native cosine similarity (`vector(768)`, IVFFlat index), PostgreSQL FTS (`tsvector` + GIN) replacing SQLite FTS5, `pg_advisory_xact_lock` for broadcast hash-chain integrity under concurrency.
+- **HTTP API server** (`src/api-server.ts`) — Fastify, all 19 storage endpoints, Bearer token auth (timing-safe SHA-256 comparison), per-IP rate limiting (500 req/min), 1 MB body cap, full RBAC + chain integrity surface. CLI-startable as `node dist/api-server.js`.
+- **Remote mode in MCP plugin** — set `ZC_API_URL` env var: all storage-touching tools proxy to the API server via `fetch()`. Sandbox/execute tools always remain local.
+- **Docker stack** (`docker/`) — `securecontext-postgres`, `securecontext-api`, `securecontext-ollama` containers; all named with `securecontext-` prefix; `restart: unless-stopped` for auto-boot. GPU overlays for NVIDIA, AMD ROCm, CPU. Production nginx overlay. `start.ps1` (Windows) + `start.sh` (Linux/macOS) with mode selection, credential validation, auto GPU detection.
+- **Smart working memory sizing** — `computeProjectComplexity()` measures KB entries, broadcast count, active agents and dynamically scales the working memory limit between 50 and 200 facts (cached 10 min). Formula: `base(50) + kb_bonus(max 60) + broadcast_bonus(max 40) + agent_bonus(max 50)`. Displayed in `zc_status` as a complexity breakdown.
+- **Auto memory extraction** (PostToolUse hook) — file writes are silently recorded at importance ★2; MERGE broadcasts at importance ★4. Agents never need to call `zc_remember` for these events.
+- **`install.mjs --remote <url> <key>`** — new flag writes `ZC_API_URL` + `ZC_API_KEY` into the MCP server `env` block. One command to switch any agent from local to remote mode.
+- **192 integration tests** — `live-store-test.mjs` (62), `live-rbac-test.mjs` (46), `live-smart-memory-test.mjs` (29), `live-api-test.mjs` (55) — all 192/192 pass.
+
 ### v0.7.2 — KB Prompt Injection Pre-filter
 - **Injection pre-filter on `zc_fetch`** — fetched content is scanned for 11 high-specificity injection patterns across 4 categories before entering the KB: `instruction-override` ("ignore/disregard/forget/override previous instructions"), `role-override` ("SYSTEM OVERRIDE"), `trust-label-bypass` (attacks re-characterizing our `[UNTRUSTED EXTERNAL CONTENT]` tag), `context-boundary` (`[END OF CONTEXT]`, `[REAL INSTRUCTIONS START]`, `[IGNORE THE ABOVE]`). Matched spans replaced with `⚠️[INJECTION PATTERN REDACTED: <type>]` in-place.
 - **Visible warning** — `zc_fetch` response includes a warning banner listing match count and detected types when injection patterns are found.
@@ -480,7 +634,7 @@ zc_broadcast(type="ASSIGN", agent_id="orchestrator",
 - **Tiered retention** — external KB: 14 days · internal: 30 days · session summaries: 365 days (previously all entries expired at flat 14 days, destroying long-term memory)
 - **Persistent rate limiting** — fetch budget stored in `~/.claude/zc-ctx/global.db`, resets at UTC midnight (was per-session in-memory, bypassed by restarting)
 - **Embedding model version tracking** — `model_name` + `dimensions` stored per vector; stale vectors from a different model excluded from cosine scoring automatically
-- **WAL mode + busy_timeout** — `PRAGMA busy_timeout = 5000` on all DB opens for concurrent multi-agent safety (ZeroClaw parallel agents no longer contend on writes)
+- **WAL mode + busy_timeout** — `PRAGMA busy_timeout = 5000` on all DB opens for concurrent multi-agent safety (parallel agents no longer contend on writes)
 - **Agent namespacing for working memory** — `agent_id` parameter on `zc_remember` / `zc_forget` / `zc_recall_context` prevents key collisions between parallel agents
 - **`zc_status` tool** — DB size, KB entry counts, working memory fill, schema version, embedding model, fetch budget, integrity status — in one call
 - **Structured `zc_recall_context`** — output now has Critical / Normal / Ephemeral priority sections + inline System Status; eliminates a separate `zc_status` call at session start
@@ -511,4 +665,4 @@ MIT — free to use, modify, and distribute.
 
 ---
 
-*Keywords: claude code plugin, claude code memory, claude persistent memory, never lose context claude, claude code context management, context-mode alternative, claude-mem alternative, reduce claude token usage, claude token optimization, claude context window optimization, secure claude plugin, anthropic claude context, MCP server memory, MCP plugin security, MemGPT claude, hybrid search claude, claude code context window, claude code session memory, claude code persistent memory plugin, AI agent memory management, LLM memory management, claude desktop memory, zc-ctx, zeroclaw, SecureContext*
+*Keywords: claude code plugin, claude code memory, claude persistent memory, never lose context claude, claude code context management, context-mode alternative, claude-mem alternative, reduce claude token usage, claude token optimization, claude context window optimization, secure claude plugin, anthropic claude context, MCP server memory, MCP plugin security, MemGPT claude, hybrid search claude, claude code context window, claude code session memory, claude code persistent memory plugin, AI agent memory management, LLM memory management, claude desktop memory, zc-ctx, SecureContext*

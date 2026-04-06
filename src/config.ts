@@ -12,6 +12,8 @@
  *   ZC_STALE_DAYS_EXTERNAL — Days before external (web-fetched) KB entries expire (default: 14)
  *   ZC_STALE_DAYS_INTERNAL — Days before internal KB entries expire (default: 30)
  *   ZC_STALE_DAYS_SUMMARY  — Days before session summaries expire (default: 365)
+ *   ZC_RBAC_ENABLED        — "1" to force-enable RBAC even without registered sessions
+ *   ZC_CHAIN_DISABLED      — "1" to disable hash chain (not recommended, audit use only)
  */
 
 import { homedir } from "node:os";
@@ -21,7 +23,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.7.2",
+  VERSION: "0.8.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -95,4 +97,23 @@ export const Config = {
   // Broadcast rate limit — max broadcasts per agent per 60 seconds.
   // Prevents DoS via broadcast spam causing context window overflow.
   BROADCAST_RATE_LIMIT_PER_MINUTE: 10,
+
+  // ── RBAC + Session Token (v0.8.0) ────────────────────────────────────────────
+  // Token TTL: 24 hours. Short enough to limit blast radius, long enough for a full work session.
+  // Chapter 6 (session tokens): short-lived tickets reduce exposure window.
+  SESSION_TOKEN_TTL_SECONDS: 24 * 60 * 60,  // 24h
+
+  // RBAC enforcement is opt-in: activates only when agent sessions are registered.
+  // Keeps backward compatibility — existing setups without sessions work unchanged.
+  // Chapter 14 RBAC: progressive security hardening without breaking changes.
+  RBAC_ENABLED_ENV: env["ZC_RBAC_ENABLED"] === "1",  // force-enable even without sessions
+
+  // L0/L1/L2 content tier lengths
+  // Tiered loading reduces token consumption by returning only as much as needed
+  TIER_L0_CHARS: 100,    // one-sentence summary
+  TIER_L1_CHARS: 1500,   // planning-level overview
+
+  // Hash chain enabled by default for all new broadcasts (Chapter 13 Biba integrity)
+  // Set ZC_CHAIN_DISABLED=1 to disable (not recommended — disables tamper detection)
+  CHAIN_ENABLED: env["ZC_CHAIN_DISABLED"] !== "1",
 } as const;
