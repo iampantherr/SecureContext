@@ -82,30 +82,22 @@ Typical real-world improvement: **Claude stops repeating questions it already an
 
 ### vs. OpenViking (ByteDance/Volcengine, 21k+ stars)
 
-OpenViking is an open-source context database from ByteDance's Volcano Engine team. It uses a filesystem paradigm (`viking://` URIs) with progressive L0/L1/L2 loading (abstracts → overviews → full content). It's a heavier system designed for general-purpose AI agent context management, not specifically for Claude Code.
-
 | Feature | OpenViking | SecureContext |
 |---------|-----------|--------------|
-| **Primary use case** | General AI agent context DB | Claude Code MCP plugin (drop-in) |
-| **Installation** | Python 3.10+ / Go 1.22+ / C++ compiler / Docker | `node install.mjs` (one command) |
-| **Claude Code integration** | Via MCP adapter or OpenClaw plugin | Native MCP plugin with hooks |
-| **Memory model** | Filesystem paradigm (viking:// URIs), VLM-driven auto-categorization | MemGPT importance-scored facts (1-10), bounded working memory with archival eviction |
-| **Token optimization** | Progressive loading: L0 (~100 tok) → L1 (~2k) → L2 (full) | Hybrid BM25+vector search returns top-10 chunks only (~1.5k tokens) |
-| **Token reduction (claimed)** | ~91% vs traditional RAG (LoCoMo10 benchmark) | ~87% vs native Claude context (measured across 10-session project) |
-| **Multi-agent support** | Per-agent memory scopes via URI namespacing | Broadcast channel (ASSIGN/MERGE/STATUS/PROPOSED), agent_id namespacing, channel key auth |
-| **Multi-agent coordination** | Memory isolation only (no task dispatch) | Full coordination protocol: task delegation, status tracking, merge/review workflow |
-| **Security audit** | Path traversal prevention, per-account isolation | 84 automated attack vectors (78 pass, 0 fail), credential isolation, SSRF protection, injection defense |
-| **Credential isolation** | API key auth for server mode | PATH-only sandbox — no env vars passed to code execution |
-| **Docker deployment** | Yes (ghcr.io image) | Yes (PostgreSQL + API + Ollama, GPU overlays for NVIDIA/AMD/CPU) |
-| **External dependencies** | Requires VLM provider (OpenAI/Volcengine/Ollama) for L0/L1 generation | Ollama for embeddings only (optional — BM25 works without it) |
-| **Offline/local mode** | Requires at least Ollama for VLM | Fully functional with SQLite alone (embeddings optional) |
-| **Production stage** | Alpha (v0.1.x, APIs may change) | Stable (v0.8.0, 8 production releases, backward-compatible) |
-| **Language** | Python + Go + C++ | TypeScript (compiles locally, fully auditable) |
-| **License** | Apache 2.0 | MIT |
-
-**When to choose OpenViking:** You're building a multi-provider AI agent system outside Claude Code and want a general-purpose context database with progressive loading and visual retrieval traces.
-
-**When to choose SecureContext:** You use Claude Code and want a drop-in plugin that works immediately — persistent memory, security-hardened sandbox, multi-agent coordination, and token optimization without changing your workflow.
+| Drop-in Claude Code plugin | ❌ Requires MCP adapter or OpenClaw plugin | ✅ Native MCP plugin — `node install.mjs` and it works |
+| One-command install | ❌ Python 3.10+ / Go 1.22+ / C++ compiler required | ✅ `node install.mjs` — one command, no build toolchain |
+| Works offline without any AI provider | ❌ Requires VLM (OpenAI/Volcengine/Ollama) even for basic operations | ✅ Fully functional with SQLite alone — embeddings are optional |
+| PostToolUse hooks (auto memory capture) | ❌ No Claude Code hook integration | ✅ File writes and broadcasts auto-recorded silently |
+| Credential isolation in sandbox | ❌ API key auth only — no sandbox execution model | ✅ PATH-only sandbox — credentials never exposed to code execution |
+| Security audit (automated) | ❌ Path traversal prevention only | ✅ 84 automated attack vectors — SSRF, injection, credential leaks, hook tampering |
+| SSRF protection | ❌ Not documented | ✅ 4-layer: hostname + DNS rebind + redirect re-validation + cloud metadata block |
+| Multi-agent coordination protocol | ❌ Memory isolation only — no task dispatch or merge workflow | ✅ Broadcast channel with ASSIGN/MERGE/STATUS/PROPOSED + channel key auth |
+| Production stability | ❌ Alpha (v0.1.x) — APIs may change | ✅ Stable (v0.8.0) — 8 releases, backward-compatible upgrades |
+| Progressive content loading (L0/L1/L2) | ✅ Abstracts → overviews → full content on demand | ❌ Fixed top-10 chunk retrieval |
+| Visual retrieval traces (observable search) | ✅ Shows directory traversal path and scoring rationale | ❌ Not available |
+| Multi-provider VLM support | ✅ Volcengine, OpenAI, LiteLLM, Ollama, Gemini | ❌ Ollama only for embeddings |
+| Console UI / web dashboard | ✅ Built-in web console on port 8020 | ❌ CLI/tool-call only — no visual dashboard |
+| Lightweight footprint | ❌ Python + Go + C++ — heavy dependency stack | ✅ TypeScript only — compiles locally, fully auditable |
 
 ### vs. `context-mode` (most popular alternative)
 
