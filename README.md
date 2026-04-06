@@ -92,7 +92,6 @@ Typical real-world improvement: **Claude stops repeating questions it already an
 | Security audit (automated) | ❌ Path traversal prevention only | ✅ 84 automated attack vectors — SSRF, injection, credential leaks, hook tampering |
 | SSRF protection | ❌ Not documented | ✅ 4-layer: hostname + DNS rebind + redirect re-validation + cloud metadata block |
 | Multi-agent coordination protocol | ❌ Memory isolation only — no task dispatch or merge workflow | ✅ Broadcast channel with ASSIGN/MERGE/STATUS/PROPOSED + channel key auth |
-| Production stability | ❌ Alpha (v0.1.x) — APIs may change | ✅ Stable (v0.8.0) — 8 releases, backward-compatible upgrades |
 | Progressive content loading (L0/L1/L2) | ✅ Abstracts → overviews → full content on demand | ❌ Fixed top-10 chunk retrieval |
 | Visual retrieval traces (observable search) | ✅ Shows directory traversal path and scoring rationale | ❌ Not available |
 | Multi-provider VLM support | ✅ Volcengine, OpenAI, LiteLLM, Ollama, Gemini | ❌ Ollama only for embeddings |
