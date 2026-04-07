@@ -452,13 +452,15 @@ export function getMemoryStats(
 
 // Valid broadcast types — drives CHECK constraint in DB schema too
 export type BroadcastType =
-  | "ASSIGN"      // orchestrator assigns a task to an agent
-  | "STATUS"      // agent reports current work state
-  | "PROPOSED"    // agent proposes file changes pending review
-  | "DEPENDENCY"  // agent declares it depends on another agent's output
-  | "MERGE"       // orchestrator approves and merges proposed changes
-  | "REJECT"      // orchestrator rejects proposed changes
-  | "REVISE";     // orchestrator requests revision of proposed changes
+  | "ASSIGN"       // orchestrator assigns a task to an agent
+  | "STATUS"       // agent reports current work state
+  | "PROPOSED"     // agent proposes file changes pending review
+  | "DEPENDENCY"   // agent declares it depends on another agent's output
+  | "MERGE"        // orchestrator approves and merges proposed changes
+  | "REJECT"       // orchestrator rejects proposed changes
+  | "REVISE"       // orchestrator requests revision of proposed changes
+  | "LAUNCH_ROLE"  // orchestrator requests dispatcher to spawn a new agent role
+  | "RETIRE_ROLE"; // orchestrator requests dispatcher to retire an agent role
 
 // Worker-originated types whose summaries are labeled [UNVERIFIED WORKER CONTENT]
 // in formatted context output. Orchestrator types are trusted by construction.

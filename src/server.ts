@@ -356,17 +356,19 @@ const TOOLS: Tool[] = [
       "Shared channel is readable by all agents via zc_recall_context(). " +
       "If a channel key is configured (via set_key action), all WRITE operations require it. " +
       "READ and STATUS actions never require a key. " +
-      "Actions: ASSIGN · STATUS · PROPOSED · DEPENDENCY · MERGE · REJECT · REVISE · set_key",
+      "Actions: ASSIGN · STATUS · PROPOSED · DEPENDENCY · MERGE · REJECT · REVISE · LAUNCH_ROLE · RETIRE_ROLE · set_key",
     inputSchema: {
       type: "object",
       properties: {
         type: {
           type: "string",
-          enum: ["ASSIGN", "STATUS", "PROPOSED", "DEPENDENCY", "MERGE", "REJECT", "REVISE", "set_key"],
+          enum: ["ASSIGN", "STATUS", "PROPOSED", "DEPENDENCY", "MERGE", "REJECT", "REVISE", "LAUNCH_ROLE", "RETIRE_ROLE", "set_key"],
           description:
             "ASSIGN=orchestrator assigns task | STATUS=report progress | " +
             "PROPOSED=propose file changes | DEPENDENCY=declare file deps | " +
             "MERGE=approve changes | REJECT=reject changes | REVISE=request revision | " +
+            "LAUNCH_ROLE=spawn new agent role (orchestrator, via dispatcher) | " +
+            "RETIRE_ROLE=retire agent role (orchestrator, via dispatcher) | " +
             "set_key=configure channel key (orchestrator only)",
         },
         agent_id: {
@@ -930,6 +932,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validate broadcast type
         const VALID_TYPES: BroadcastType[] = [
           "ASSIGN", "STATUS", "PROPOSED", "DEPENDENCY", "MERGE", "REJECT", "REVISE",
+          "LAUNCH_ROLE", "RETIRE_ROLE",
         ];
         if (!VALID_TYPES.includes(type as BroadcastType)) {
           return {

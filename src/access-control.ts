@@ -28,7 +28,7 @@ import type { BroadcastType } from "./memory.js";
 
 // ── RBAC permission matrix (Chapter 14) ──────────────────────────────────────
 export const ROLE_PERMISSIONS: Record<string, BroadcastType[]> = {
-  orchestrator: ["ASSIGN", "MERGE", "REJECT", "REVISE", "STATUS"],
+  orchestrator: ["ASSIGN", "MERGE", "REJECT", "REVISE", "STATUS", "LAUNCH_ROLE", "RETIRE_ROLE"],
   developer:    ["STATUS", "PROPOSED", "DEPENDENCY", "MERGE"],
   marketer:     ["STATUS", "PROPOSED", "DEPENDENCY", "MERGE"],
   researcher:   ["STATUS", "PROPOSED", "DEPENDENCY", "MERGE"],

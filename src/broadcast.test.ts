@@ -58,9 +58,10 @@ describe("broadcastFact — open mode (no channel key)", () => {
     expect(msg.summary).toBe("Scaffolding JWT middleware");
   });
 
-  it("writes all 7 broadcast types without a key", () => {
+  it("writes all 9 broadcast types without a key", () => {
     const types: BroadcastType[] = [
       "ASSIGN", "STATUS", "PROPOSED", "DEPENDENCY", "MERGE", "REJECT", "REVISE",
+      "LAUNCH_ROLE", "RETIRE_ROLE",
     ];
     for (const type of types) {
       const msg = broadcastFact(TEST_PATH, type, "orchestrator", { task: `${type}-task` });

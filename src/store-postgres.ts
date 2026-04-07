@@ -587,7 +587,7 @@ export class PostgresStore implements Store {
     opts: BroadcastOptions
   ): Promise<BroadcastMessage> {
     const projectHash  = ph(projectPath);
-    const VALID_TYPES: BroadcastType[] = ["ASSIGN","STATUS","PROPOSED","DEPENDENCY","MERGE","REJECT","REVISE"];
+    const VALID_TYPES: BroadcastType[] = ["ASSIGN","STATUS","PROPOSED","DEPENDENCY","MERGE","REJECT","REVISE","LAUNCH_ROLE","RETIRE_ROLE"];
     if (!VALID_TYPES.includes(type)) {
       throw new Error(`Invalid broadcast type: ${type}`);
     }
@@ -971,7 +971,7 @@ CREATE INDEX IF NOT EXISTS idx_emb_cosine ON embeddings USING ivfflat (vector ve
 CREATE TABLE IF NOT EXISTS broadcasts (
   id               SERIAL PRIMARY KEY,
   project_hash     TEXT    NOT NULL,
-  type             TEXT    NOT NULL CHECK(type IN ('ASSIGN','STATUS','PROPOSED','DEPENDENCY','MERGE','REJECT','REVISE')),
+  type             TEXT    NOT NULL CHECK(type IN ('ASSIGN','STATUS','PROPOSED','DEPENDENCY','MERGE','REJECT','REVISE','LAUNCH_ROLE','RETIRE_ROLE')),
   agent_id         TEXT    NOT NULL DEFAULT 'default',
   task             TEXT    NOT NULL DEFAULT '',
   files            TEXT    NOT NULL DEFAULT '[]',
@@ -1023,4 +1023,21 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   fetch_count  INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (project_hash, date)
 );
+
+-- Migration: expand broadcasts type CHECK to include LAUNCH_ROLE and RETIRE_ROLE
+-- This ALTER is idempotent — if the constraint already allows the new types, the
+-- DROP will succeed on the old constraint name and ADD will recreate with the new list.
+-- If the constraint name doesn't match (fresh DB), this is a no-op since CREATE TABLE above
+-- already includes the expanded CHECK.
+DO $$
+BEGIN
+  -- Try to drop the old constraint (Postgres auto-names it broadcasts_type_check)
+  ALTER TABLE broadcasts DROP CONSTRAINT IF EXISTS broadcasts_type_check;
+  -- Recreate with expanded type list
+  ALTER TABLE broadcasts ADD CONSTRAINT broadcasts_type_check
+    CHECK(type IN ('ASSIGN','STATUS','PROPOSED','DEPENDENCY','MERGE','REJECT','REVISE','LAUNCH_ROLE','RETIRE_ROLE'));
+EXCEPTION WHEN OTHERS THEN
+  -- Constraint may have a different name or already be correct — ignore
+  NULL;
+END $$;
 `;

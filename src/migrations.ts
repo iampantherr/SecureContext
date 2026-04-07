@@ -226,6 +226,40 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 11,
+    description: "Expand broadcasts type CHECK to include LAUNCH_ROLE and RETIRE_ROLE for on-demand agent spawning",
+    up: (db) => {
+      // SQLite cannot ALTER a CHECK constraint — must recreate the table.
+      // Copy data, drop old, create new with expanded CHECK, restore data.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS broadcasts_new (
+          id               INTEGER PRIMARY KEY AUTOINCREMENT,
+          type             TEXT    NOT NULL
+                                   CHECK(type IN ('ASSIGN','STATUS','PROPOSED','DEPENDENCY','MERGE','REJECT','REVISE','LAUNCH_ROLE','RETIRE_ROLE')),
+          agent_id         TEXT    NOT NULL DEFAULT 'default',
+          task             TEXT    NOT NULL DEFAULT '',
+          files            TEXT    NOT NULL DEFAULT '[]',
+          state            TEXT    NOT NULL DEFAULT '',
+          summary          TEXT    NOT NULL DEFAULT '',
+          depends_on       TEXT    NOT NULL DEFAULT '[]',
+          reason           TEXT    NOT NULL DEFAULT '',
+          importance       INTEGER NOT NULL DEFAULT 3,
+          created_at       TEXT    NOT NULL,
+          session_token_id TEXT    NOT NULL DEFAULT '',
+          prev_hash        TEXT    NOT NULL DEFAULT 'genesis',
+          row_hash         TEXT    NOT NULL DEFAULT '',
+          acked_at         TEXT
+        );
+        INSERT INTO broadcasts_new SELECT * FROM broadcasts;
+        DROP TABLE broadcasts;
+        ALTER TABLE broadcasts_new RENAME TO broadcasts;
+        CREATE INDEX IF NOT EXISTS idx_bc_type  ON broadcasts(type);
+        CREATE INDEX IF NOT EXISTS idx_bc_agent ON broadcasts(agent_id);
+      `);
+    },
+  },
+
 ];
 
 /**
