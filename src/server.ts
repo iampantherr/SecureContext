@@ -45,7 +45,7 @@ import { checkIntegrity, type IntegrityResult } from "./integrity.js";
 import { getCurrentSchemaVersion } from "./migrations.js";
 import { ACTIVE_MODEL, checkOllamaAvailable } from "./embedder.js";
 
-const PROJECT_PATH = cwd();
+const PROJECT_PATH = process.env["ZC_PROJECT_PATH"] || cwd();
 
 // ─── HTTP client mode ─────────────────────────────────────────────────────────
 // When ZC_API_URL is set, all tool calls are proxied to the SecureContext API
