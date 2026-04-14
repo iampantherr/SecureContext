@@ -274,7 +274,7 @@ const TOOLS: Tool[] = [
     name: "zc_remember",
     description:
       "Store a key-value fact in working memory (MemGPT-style). " +
-      "Working memory is bounded (50 facts max) — lowest-importance facts auto-evict to archival KB. " +
+      "Working memory is bounded (100 facts base, scales up to 250 by project complexity) — lowest-importance facts auto-evict to archival KB. " +
       "Use importance 5 for critical facts, 1 for ephemeral notes. " +
       "Use agent_id to namespace facts for parallel agent use.",
     inputSchema: {

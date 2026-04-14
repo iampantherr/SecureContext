@@ -312,7 +312,7 @@ export class PostgresStore implements Store {
     const kbBonus    = Math.min(Math.floor(kbEntries     / 15), 60);
     const bcBonus    = Math.min(Math.floor(broadcastCount / 30), 40);
     const agentBonus = Math.min(activeAgents * 15, 50);
-    const computedLimit = Math.max(50, Math.min(200, 50 + kbBonus + bcBonus + agentBonus));
+    const computedLimit = Math.max(100, Math.min(250, 100 + kbBonus + bcBonus + agentBonus));
     const evictTo       = Math.floor(computedLimit * 0.80);
     const computedAt    = new Date().toISOString();
 

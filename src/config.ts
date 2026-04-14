@@ -31,8 +31,8 @@ export const Config = {
   GLOBAL_DB:   join(homedir(), ".claude", "zc-ctx", "global.db"),  // cross-project rate limits
 
   // ── Working memory ────────────────────────────────────────────────────────
-  WORKING_MEMORY_MAX:      50,   // evict when this count is exceeded
-  WORKING_MEMORY_EVICT_TO: 40,   // target count after eviction batch
+  WORKING_MEMORY_MAX:      100,  // evict when this count is exceeded
+  WORKING_MEMORY_EVICT_TO: 80,   // target count after eviction batch (80% of MAX)
 
   // ── Knowledge base retention (tiered by content type) ────────────────────
   // External (web-fetched) content expires soonest — untrusted, ephemeral

@@ -6,7 +6,7 @@
  *   ┌─────────────────────────────────────────────────────────┐
  *   │  WORKING MEMORY (hot, bounded, fast)                    │
  *   │  - Key-value facts with importance scores (1–5)         │
- *   │  - Max 50 entries before auto-eviction                  │
+ *   │  - Max 100 entries before auto-eviction (dynamic 100-250)│
  *   │  - Persisted in SQLite for cross-restart continuity     │
  *   │  - Returned in full on zc_recall_context()              │
  *   └─────────────────────────────────────────────────────────┘
@@ -63,7 +63,7 @@ function sanitize(s: string, maxLen: number): string {
 // ─────────────────────────────────────────────────────────────────────────────
 // SMART WORKING MEMORY SIZING
 //
-// Instead of a fixed 50-fact ceiling for every project, SecureContext measures
+// Instead of a fixed 100-fact ceiling for every project, SecureContext measures
 // three objective complexity signals and derives a project-specific limit:
 //
 //   Signal 1 — KB depth (source_meta count):
@@ -81,16 +81,16 @@ function sanitize(s: string, maxLen: number): string {
 //     Rationale: parallel agents produce parallel facts; each agent's state
 //     must be independently trackable without evicting the others.
 //
-//   Formula:  limit = clamp(50 + kb_bonus + bc_bonus + agent_bonus, 50, 200)
+//   Formula:  limit = clamp(100 + kb_bonus + bc_bonus + agent_bonus, 100, 250)
 //             evictTo = floor(limit × 0.80)
 //
 //   Range examples:
-//     Solo scratch project  (0 agents, <15 KB, <30 BC): limit=50,  evictTo=40
-//     Single-dev project    (1 agent,  30 KB,  60 BC):  limit=69,  evictTo=55
-//     Medium multi-agent    (2 agents, 100 KB, 100 BC): limit=89,  evictTo=71
-//     RevClear-scale        (4 agents, 300 KB, 200 BC): limit=126, evictTo=100
-//     Full platform         (5 agents, 600 KB, 600 BC): limit=160, evictTo=128
-//     Theoretical max       (5 agents, 900 KB, 1200 BC):limit=200, evictTo=160
+//     Solo scratch project  (0 agents, <15 KB, <30 BC): limit=100, evictTo=80
+//     Single-dev project    (1 agent,  30 KB,  60 BC):  limit=119, evictTo=95
+//     Medium multi-agent    (2 agents, 100 KB, 100 BC): limit=139, evictTo=111
+//     RevClear-scale        (4 agents, 300 KB, 200 BC): limit=176, evictTo=140
+//     Full platform         (5 agents, 600 KB, 600 BC): limit=210, evictTo=168
+//     Theoretical max       (5 agents, 900 KB, 1200 BC):limit=250, evictTo=200
 //
 // The computed profile is cached in project_meta for 10 minutes. This means
 // one fast KV lookup per rememberFact() call rather than multiple table scans.
@@ -140,7 +140,7 @@ export function computeProjectComplexity(db: DatabaseSync): ComplexityProfile {
   const bcBonus    = Math.min(Math.floor(broadcastCount / 30), 40);
   const agentBonus = Math.min(activeAgents * 15,               50);
 
-  const computedLimit = Math.max(50, Math.min(200, 50 + kbBonus + bcBonus + agentBonus));
+  const computedLimit = Math.max(100, Math.min(250, 100 + kbBonus + bcBonus + agentBonus));
   const evictTo       = Math.floor(computedLimit * 0.80);
   const computedAt    = new Date().toISOString();
 

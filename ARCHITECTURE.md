@@ -118,7 +118,7 @@ All constants and tunables are centralized in a single `Config` object. Key sett
 Config.VERSION              "0.8.0"
 Config.DB_DIR               ~/.claude/zc-ctx/sessions/
 Config.GLOBAL_DIR           ~/.claude/zc-ctx/
-Config.WORKING_MEMORY_MAX   50 facts
+Config.WORKING_MEMORY_MAX   100 facts (dynamic: 100-250 by project complexity)
 Config.STALE_DAYS_EXTERNAL  14  (ZC_STALE_DAYS_EXTERNAL)
 Config.STALE_DAYS_INTERNAL  30  (ZC_STALE_DAYS_INTERNAL)
 Config.STALE_DAYS_SUMMARY   365 (ZC_STALE_DAYS_SUMMARY)

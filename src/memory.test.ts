@@ -110,7 +110,7 @@ describe("getMemoryStats", () => {
     rememberFact(TEST_PATH, "s3", "v", 1, agent);
     const stats = getMemoryStats(TEST_PATH, agent);
     expect(stats.count).toBe(3);
-    expect(stats.max).toBe(50);
+    expect(stats.max).toBe(100);
     expect(stats.criticalCount).toBe(2); // ★4 and ★5
   });
 });
