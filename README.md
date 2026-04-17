@@ -256,6 +256,75 @@ For the complete technical architecture with all security properties documented,
 
 ---
 
+## System Requirements — Full vs Degraded Mode
+
+SecureContext always works, but its power is gated on two optional backends: **Ollama** (for embeddings + semantic summaries) and **the Docker stack** (for Postgres-backed multi-user storage). Running without them is *degraded mode* — you keep the core memory/search/broadcast features but lose semantic search, semantic summaries, and multi-user coordination.
+
+| Feature | Full mode | Degraded mode |
+|---|---|---|
+| Keyword search (BM25) | ✓ | ✓ |
+| **Semantic search** (cosine rerank) | ✓ needs `nomic-embed-text` | ✗ BM25-only |
+| **Semantic L0/L1 summaries** (v0.10.0) | ✓ needs coder model (e.g. `qwen2.5-coder:14b`) | ✗ first-N-char truncation |
+| Working memory / recall | ✓ | ✓ |
+| Project card, file summary, check, capture (v0.10.0) | ✓ | ✓ (but summaries are lower quality) |
+| Auto-reindex on edit (hooks) | ✓ | ✓ (but re-writes truncation summaries) |
+| Auto-capture bash output (hooks) | ✓ | ✓ |
+| A2A broadcasts + hash chain | ✓ | ✓ |
+| **Multi-machine / team storage** | ✓ needs Docker `sc-api` + `sc-postgres` | ✗ local SQLite only |
+
+**What you lose in degraded mode, measured:**
+
+| Operation | Full mode | Degraded | Extra cost |
+|---|---|---|---|
+| Session startup on indexed project | ~2k tok | ~8k tok (agent re-reads files because L0/L1 isn't informative) | **+300%** |
+| "What does X do?" | ~400 tok | ~2000 tok (agent reads whole file) | **+400%** |
+| 10-session project total | ~100k tok | ~350k tok | **+250%** |
+
+**Detecting degraded mode:** `zc_recall_context()` and `zc_status()` now print a prominent ⚠️ banner at the top of their output when any dependency is unreachable — the agent sees it at every session start, with an exact fix command.
+
+### Quick setup (recommended, full mode)
+
+```bash
+# 1. Install Node 22+
+#    (required regardless of mode)
+
+# 2. Start the Docker stack  (Postgres + API + Ollama in one container each)
+cd SecureContext/docker
+./start.ps1         # Windows PowerShell
+# OR
+./start.sh          # macOS / Linux
+
+# 3. Pull both Ollama models (one for embeddings, one for summaries)
+docker exec securecontext-ollama ollama pull nomic-embed-text
+docker exec securecontext-ollama ollama pull qwen2.5-coder:14b     # needs ~9GB VRAM — adjust for your GPU
+
+# 4. Install the MCP plugin into Claude Code
+node install.mjs
+
+# 5. (Optional) Install the harness hooks for automatic enforcement
+#    See hooks/INSTALL.md
+```
+
+### GPU notes
+
+The Docker Ollama container needs GPU access to run `qwen2.5-coder:14b` at reasonable speeds (3-8s per file). The `docker/docker-compose.nvidia.yml` overlay enables this for NVIDIA GPUs:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d
+```
+
+Without GPU access, the 14b model runs on CPU and each summary takes 30+ seconds — the summarizer will time out and fall back to truncation. Either downgrade to `qwen2.5-coder:7b` (runs on CPU) or enable GPU.
+
+### Minimal local setup (degraded mode, zero Docker)
+
+```bash
+node install.mjs     # MCP plugin only — SC uses SQLite in ~/.claude/zc-ctx/
+```
+
+Works fine. Just know you'll spend more tokens on file reads because L0/L1 summaries will be truncation-based.
+
+---
+
 ## v0.10.0 — Harness Engineering
 
 The "harness" is a token-optimization layer built on top of the SC primitives. Its goal: make **Tier 1 (compressed knowledge)** the default answer for check/review questions, and reserve **Tier 2 (raw file reads)** for the moment an agent is actually editing something. See [`AGENT_HARNESS.md`](AGENT_HARNESS.md) for the full ruleset.

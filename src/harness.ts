@@ -541,5 +541,150 @@ export function checkAnswer(
   };
 }
 
+// ─── System Health (degradation awareness) ────────────────────────────────────
+
+export interface SystemHealth {
+  mode:              "full" | "degraded";
+  ollamaReachable:   boolean;
+  embeddingReady:    boolean;     // nomic-embed-text (or configured embed model) installed
+  summarizerReady:   boolean;     // a coder/chat model installed for semantic L0/L1
+  summarizerModel:   string | null;
+  httpApiReachable:  boolean | null;   // null if not configured (SQLite mode)
+  httpApiUrl:        string | null;
+  warnings:          string[];
+  fixes:             string[];    // actionable commands to restore full mode
+}
+
+/**
+ * Probe external dependencies and report what's healthy and what's degraded.
+ * Cached ~30s to avoid hitting Ollama/API on every zc_status call.
+ *
+ * Non-throwing — if any probe errors, that dependency is flagged unhealthy.
+ */
+let _healthCache: SystemHealth | null = null;
+let _healthCheckedAt = 0;
+const HEALTH_TTL_MS = 30_000;
+
+export async function getSystemHealth(): Promise<SystemHealth> {
+  const now = Date.now();
+  if (_healthCache && now - _healthCheckedAt < HEALTH_TTL_MS) return _healthCache;
+
+  const warnings: string[] = [];
+  const fixes:    string[] = [];
+
+  // Derive Ollama base from the configured URL (same as summarizer)
+  const ollamaBase = Config.OLLAMA_URL.replace(/\/api\/[^/]*\/?$/, "");
+
+  // ── Ollama reachability + model inventory ───────────────────────────────
+  let ollamaReachable = false;
+  let installed = new Set<string>();
+  try {
+    const res = await fetch(`${ollamaBase}/api/tags`, { signal: AbortSignal.timeout(2_000) });
+    if (res.ok) {
+      ollamaReachable = true;
+      const j = await res.json() as { models?: Array<{ name: string }> };
+      installed = new Set((j.models ?? []).map((m) => m.name));
+    }
+  } catch { /* stays false */ }
+
+  // Ollama treats "nomic-embed-text" and "nomic-embed-text:latest" as the
+  // same model. Normalize for both lookup directions.
+  const embedModel = Config.OLLAMA_MODEL;
+  const installedNormalized = new Set(
+    [...installed].flatMap((n) => [n, n.replace(/:latest$/, "")])
+  );
+  const embeddingReady = ollamaReachable &&
+    (installedNormalized.has(embedModel) || installedNormalized.has(`${embedModel}:latest`));
+
+  // Check for any coder/chat model (same preference list the summarizer probes)
+  const PREFERRED = [
+    "qwen2.5-coder:14b", "qwen2.5-coder:7b", "qwen2.5-coder:32b",
+    "deepseek-coder:14b", "deepseek-coder:6.7b",
+    "codellama:13b-instruct", "codellama:7b-instruct",
+    "starcoder2:15b", "starcoder2:7b",
+    "qwen2.5:14b", "qwen2.5:7b", "qwen2.5:3b",
+    "llama3.1:latest", "llama3.1:8b", "llama3.2:3b", "llama3.2:latest",
+  ];
+  let summarizerModel: string | null = null;
+  if (Config.SUMMARY_MODEL_OVERRIDE && installedNormalized.has(Config.SUMMARY_MODEL_OVERRIDE)) {
+    summarizerModel = Config.SUMMARY_MODEL_OVERRIDE;
+  } else {
+    for (const m of PREFERRED) if (installedNormalized.has(m) || installedNormalized.has(`${m}:latest`)) { summarizerModel = m; break; }
+  }
+  const summarizerReady = ollamaReachable && summarizerModel !== null && Config.SUMMARY_ENABLED;
+
+  if (!ollamaReachable) {
+    warnings.push(`Ollama unreachable at ${ollamaBase} — search falls back to BM25-only, summaries fall back to truncation`);
+    fixes.push(`Start Ollama: 'ollama serve' (native) OR 'docker compose up -d sc-ollama' (Docker stack)`);
+  } else {
+    if (!embeddingReady) {
+      warnings.push(`Embedding model '${embedModel}' not installed — no semantic search, pure BM25 keyword match only`);
+      fixes.push(`ollama pull ${embedModel}`);
+    }
+    if (!summarizerReady) {
+      warnings.push(`No coder/chat model installed — L0/L1 summaries fall back to first-N-char truncation (agents may re-Read files instead)`);
+      fixes.push(`ollama pull qwen2.5-coder:14b   (recommended sweet spot for 16GB+ VRAM)`);
+    }
+  }
+
+  // ── HTTP API reachability (only meaningful in Docker mode) ──────────────
+  const apiUrl = process.env.ZC_API_URL ?? null;
+  let httpApiReachable: boolean | null = null;
+  if (apiUrl) {
+    httpApiReachable = false;
+    try {
+      const res = await fetch(`${apiUrl.replace(/\/+$/, "")}/health`, { signal: AbortSignal.timeout(2_000) });
+      httpApiReachable = res.ok;
+    } catch { /* stays false */ }
+    if (!httpApiReachable) {
+      warnings.push(`HTTP API at ${apiUrl} unreachable — storage tools (zc_remember, zc_search, zc_broadcast) will fail`);
+      fixes.push(`docker compose up -d sc-api sc-postgres`);
+    }
+  }
+
+  const mode: "full" | "degraded" = warnings.length === 0 ? "full" : "degraded";
+
+  _healthCache = {
+    mode,
+    ollamaReachable,
+    embeddingReady,
+    summarizerReady,
+    summarizerModel,
+    httpApiReachable,
+    httpApiUrl: apiUrl,
+    warnings,
+    fixes,
+  };
+  _healthCheckedAt = now;
+  return _healthCache;
+}
+
+/**
+ * Format a SystemHealth as a short banner suitable for prepending to
+ * tool output (zc_status, zc_recall_context). Returns empty string in
+ * full-mode so happy paths stay noise-free.
+ */
+export function formatHealthBanner(h: SystemHealth): string {
+  if (h.mode === "full") return "";
+  const lines: string[] = [];
+  lines.push(`⚠️  SecureContext — DEGRADED MODE (${h.warnings.length} issue${h.warnings.length === 1 ? "" : "s"})`);
+  lines.push(`   Some v0.10.0 harness features are unavailable. Session will work but less efficiently.`);
+  lines.push(``);
+  for (const w of h.warnings) lines.push(`   • ${w}`);
+  if (h.fixes.length > 0) {
+    lines.push(``);
+    lines.push(`   Fix:`);
+    for (const f of h.fixes) lines.push(`     $ ${f}`);
+  }
+  lines.push(``);
+  return lines.join("\n");
+}
+
+/** Reset the health probe cache. Useful in tests. */
+export function resetHealthCache(): void {
+  _healthCache = null;
+  _healthCheckedAt = 0;
+}
+
 // ─── Small utility: DB path helper re-export (for tests) ─────────────────────
 export { dbPath as harnessDbPath };

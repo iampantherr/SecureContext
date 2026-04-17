@@ -50,6 +50,8 @@ import {
   setProjectCard,
   captureToolOutput,
   checkAnswer,
+  getSystemHealth,
+  formatHealthBanner,
   type ProjectCard,
 } from "./harness.js";
 import { ACTIVE_MODEL, checkOllamaAvailable } from "./embedder.js";
@@ -938,6 +940,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const parts: string[] = [];
 
+        // Section 0 (v0.10.0): Health banner — visible at the TOP of every
+        // session so degradation is impossible to miss. Empty in full mode.
+        const rcHealth = await getSystemHealth();
+        const rcBanner = formatHealthBanner(rcHealth);
+        if (rcBanner) parts.push(rcBanner);
+
         // Section 1: Working Memory (structured by priority — limit is project-aware)
         parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit));
 
@@ -1135,8 +1143,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             })()
           : `  Limit:  ${wmStats.max} facts`;
 
+        // System health banner (v0.10.0) — warn the agent if any dep is degraded
+        const health = await getSystemHealth();
+        const healthBanner = formatHealthBanner(health);
+
         const lines = [
+          ...(healthBanner ? [healthBanner] : []),
           `## SecureContext Status — v${Config.VERSION}`,
+          ``,
+          `**System Health:** ${health.mode === "full" ? "✓ full mode" : `⚠️ degraded (${health.warnings.length} issue${health.warnings.length === 1 ? "" : "s"})`}`,
+          `  Ollama:            ${health.ollamaReachable ? "✓ reachable" : "⚠️ unreachable"}`,
+          `  Embedding model:   ${health.embeddingReady ? `✓ ${ACTIVE_MODEL} ready` : `⚠️ missing`}`,
+          `  Summarizer model:  ${health.summarizerReady ? `✓ ${health.summarizerModel} ready` : "⚠️ no coder model (truncation fallback)"}`,
+          ...(health.httpApiReachable !== null
+            ? [`  HTTP API:          ${health.httpApiReachable ? `✓ ${health.httpApiUrl}` : `⚠️ ${health.httpApiUrl} unreachable`}`]
+            : [`  Storage mode:      local SQLite (ZC_API_URL not set)`]),
           ``,
           `**Knowledge Base**`,
           `  Total entries:    ${kbStats.totalEntries}`,
