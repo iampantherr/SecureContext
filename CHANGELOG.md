@@ -4,6 +4,25 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.10.1] — 2026-04-17 — One-command Docker setup helper
+
+### Added
+- **`scripts/setup-docker.mjs`** — interactive one-command installer that takes a fresh machine from zero to SC full mode:
+  - Verifies Docker + Compose are installed
+  - Auto-detects GPU (NVIDIA / AMD / CPU) and selects the matching compose overlay
+  - Pulls the Docker stack images (`sc-api`, `sc-postgres`, `sc-ollama`)
+  - Starts the stack with healthcheck polling
+  - Interactive model chooser with VRAM-aware recommendations (default: `qwen2.5-coder:14b`)
+  - Pulls `nomic-embed-text` + chosen coder model via the Docker Ollama's `ollama pull`
+  - Final health check reporting Full / Degraded mode
+  - Flags: `--model <name>` (non-interactive), `--gpu nvidia|amd|cpu` (override detection), `--no-start`, `--health-only`
+
+### Paired with (separate repo)
+- **A2A_dispatcher `start-agents.ps1`** — pre-flight health check verifying `securecontext-api`, `securecontext-postgres`, `securecontext-ollama` are healthy and both Ollama models are installed before launching agents. Interactive proceed/abort prompt in degraded mode; `-SkipHealthCheck` for CI.
+
+### Changed
+- Version: `0.10.0` → `0.10.1` (patch — no behavioral change to existing tools)
+
 ## [0.10.0] — 2026-04-17 — Harness Engineering: semantic summaries + project card + bash capture
 
 ### Added — Tier A (core harness primitives)
