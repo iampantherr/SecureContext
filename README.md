@@ -3,12 +3,17 @@
 > **Never lose context between Claude Code sessions again.**
 > Drop-in replacement for context-mode. MemGPT-style persistent memory, hybrid BM25+vector search, credential-isolated sandbox, A2A multi-agent broadcast channel, 87% fewer tokens. Zero cloud sync. MIT license.
 
-[![Tests](https://img.shields.io/badge/security%20tests-78%20PASS%20%7C%200%20FAIL%20%7C%206%20WARN-brightgreen)](security-tests/results.json)
-[![Unit Tests](https://img.shields.io/badge/unit%20tests-300%20passed-brightgreen)](src)
+[![Tests](https://img.shields.io/badge/security%20tests-91%20PASS%20%7C%200%20FAIL%20%7C%205%20WARN-brightgreen)](security-tests/results.json)
+[![Unit Tests](https://img.shields.io/badge/unit%20tests-449%20passed-brightgreen)](src)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
-[![Version](https://img.shields.io/badge/version-0.8.0-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
+
+---
+
+> **⚠️ v0.9.0 BREAKING CHANGE — RBAC + channel key are now required by default.**
+> Upgrading from v0.8.0? Every `zc_broadcast` now needs a `session_token` (from `zc_issue_token`) AND a registered channel key. See **[Migration to v0.9.0](#migration-to-v090)** for a two-step upgrade, or set `ZC_RBAC_ENFORCE=0` + `ZC_CHANNEL_KEY_REQUIRED=0` to restore pre-v0.9.0 behaviour on trusted single-user desktops.
 
 ---
 
@@ -320,7 +325,7 @@ Expected response:
 ```json
 {
   "status": "ok",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "store": "postgres",
   "ollamaAvailable": true,
   "searchMode": "hybrid (BM25 + vector)"
@@ -601,6 +606,50 @@ zc_broadcast(type="ASSIGN", agent_id="orchestrator",
 ---
 
 ## Changelog
+
+### v0.9.0 — RBAC Default-On & Channel-Key Enforcement (**BREAKING CHANGE**)
+
+**Migration required for existing users — see [Migration to v0.9.0](#migration-to-v090) below.**
+
+- **`RBAC_ENFORCE` now defaults to `true`** — every `zc_broadcast` requires a valid HMAC-signed `session_token` bound to an `agent_id` + `role`. The pre-v0.9.0 "no active sessions → no RBAC" advisory path is gone.
+- **`CHANNEL_KEY_REQUIRED` now defaults to `true`** — an unregistered project rejects all broadcasts until the operator calls `zc_broadcast(type='set_key', channel_key=...)`. The pre-v0.9.0 "open mode" is gone.
+- **`AGENT_ID_MISMATCH` spoofing gap closed** — the broadcast's `agent_id` must equal the token's bound `aid`. A worker with a valid STATUS-capable token can no longer post a broadcast carrying `agent_id='orchestrator'` and have the dispatcher route it as one (Chapter 11 capability confinement).
+- **Opt-out** — set `ZC_RBAC_ENFORCE=0` and/or `ZC_CHANNEL_KEY_REQUIRED=0` to restore pre-v0.9.0 behaviour for legacy setups. Not recommended in production.
+- **Why both at once** — locking the front door while leaving the back door open ("half-auth") is the common failure mode after a security upgrade. Flipping both defaults together eliminates that pattern.
+- **`zc_status`** shows `RBAC enforcement: ACTIVE (v0.9.0 default)` and `Channel key: REQUIRED (v0.9.0 default)`.
+- **12 new red-team tests** (T_R01–T_R12): positive controls, AGENT_ID_MISMATCH, missing/expired/revoked/tampered tokens, cross-project token rejection (`ph` claim mismatch), role privilege escalation (worker→ASSIGN/REJECT/REVISE), `ZC_RBAC_ENFORCE=0` opt-out verified via child process, `CHANNEL_KEY_REQUIRED` rejection on bare project.
+- **Total: 449 unit tests · 96 security attack vectors (91 pass, 0 fail, 5 warn)**
+
+#### Migration to v0.9.0
+
+If you were using SecureContext v0.8.0 or earlier, pick ONE of these paths:
+
+**Path A (recommended — upgrade):** register a channel key and issue tokens.
+```bash
+# 1. Register a channel key for each project (one-time per project)
+#    Use a long random secret — scrypt-protected at rest
+zc_broadcast(type='set_key', channel_key='<strong-secret-32+chars>')
+
+# 2. Issue a session token for each agent (lasts 24h by default)
+#    The dispatcher / start-agents.ps1 script will do this automatically
+zc_issue_token(agent_id='orch-1', role='orchestrator')
+# returns: "zcst.{payload}.{sig}"
+
+# 3. Pass BOTH on every broadcast
+zc_broadcast(type='ASSIGN', agent_id='orch-1', task='...', summary='...',
+             session_token='zcst.{payload}.{sig}', channel_key='<secret>')
+```
+
+**Path B (restore legacy):** set the opt-out env vars in your MCP config.
+```json
+"env": {
+  "ZC_RBAC_ENFORCE":         "0",
+  "ZC_CHANNEL_KEY_REQUIRED": "0"
+}
+```
+Valid for single-trusted-user desktop installs. **Do not use this in production or any setup where the MCP server is reachable over the network.**
+
+---
 
 ### v0.8.0 — Production Architecture (PostgreSQL + Docker + Smart Memory)
 

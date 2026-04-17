@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.8.0)
+# SecureContext — Architecture Reference (v0.9.0)
 
 ## Overview
 
@@ -115,7 +115,7 @@ No code change needed between modes. The `Store` interface is identical — all 
 All constants and tunables are centralized in a single `Config` object. Key settings are overridable via environment variables for power users — no source changes required.
 
 ```
-Config.VERSION              "0.8.0"
+Config.VERSION              "0.9.0"
 Config.DB_DIR               ~/.claude/zc-ctx/sessions/
 Config.GLOBAL_DIR           ~/.claude/zc-ctx/
 Config.WORKING_MEMORY_MAX   100 facts (dynamic: 100-250 by project complexity)
@@ -204,7 +204,7 @@ The entry point. Implements the MCP protocol over stdin/stdout using `@modelcont
 
 **Ollama availability warning:** `zc_recall_context` and `zc_status` call `checkOllamaAvailable()` on each invocation (TTL-cached, 30s). If Ollama is not reachable, the output includes a clear warning block with fix instructions. `zc_search` results include a BM25-only banner when no vector scores are present.
 
-**Version:** `0.8.0` — bumped on each release to trigger integrity re-baseline.
+**Version:** `0.9.0` — bumped on each release to trigger integrity re-baseline.
 
 ---
 
@@ -247,7 +247,7 @@ In Docker mode, `ZC_STORE=postgres` is set in `docker-compose.yml`. The MCP serv
 ```json
 {
   "status": "ok",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "store": "postgres",
   "ollamaAvailable": true,
   "ollamaUrl": "http://sc-ollama:11434",

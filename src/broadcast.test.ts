@@ -17,13 +17,22 @@
  *   - Return value fidelity: broadcastFact return matches what was stored (sanitized)
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { Config } from "./config.js";
+
+// vi.hoisted: opt out of v0.9.0 default-on channel-key + RBAC enforcement for
+// these tests. They exercise broadcast mechanics (sanitization, rate limit,
+// sharded channels) that are orthogonal to auth. Auth enforcement is covered
+// in rbac-broadcast.test.ts and security-tests/run-all.mjs (Category 9).
+vi.hoisted(() => {
+  process.env["ZC_CHANNEL_KEY_REQUIRED"] = "0";
+  process.env["ZC_RBAC_ENFORCE"]         = "0";
+});
 
 // Use a unique temp dir per test run — DB scoped by TEST_PATH hash
 const TEST_DB_DIR = mkdtempSync(join(tmpdir(), "zc-bc-test-"));

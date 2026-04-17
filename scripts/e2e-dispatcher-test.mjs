@@ -102,8 +102,8 @@ async function testHealth() {
   if (h.status === "ok") pass("status=ok");
   else fail("status=ok", `got: ${h.status}`);
 
-  if (h.version === "0.8.0") pass("version=0.8.0");
-  else fail("version=0.8.0", `got: ${h.version}`);
+  if (h.version === "0.9.0") pass("version=0.9.0");
+  else fail("version=0.9.0", `got: ${h.version}`);
 
   if (h.store === "postgres") pass("store=postgres (Docker mode)");
   else fail("store=postgres", `got: ${h.store}`);

@@ -177,7 +177,7 @@ if (MODE_DESKTOP || UNINSTALL) {
 // ─── Done ─────────────────────────────────────────────────────────────────────
 console.log();
 if (!UNINSTALL) {
-  console.log(`${GREEN}${BOLD}SecureContext v0.8.0 installed successfully.${RESET}`);
+  console.log(`${GREEN}${BOLD}SecureContext v0.9.0 installed successfully.${RESET}`);
   console.log();
 
   if (REMOTE_URL) {
@@ -188,7 +188,7 @@ if (!UNINSTALL) {
     console.log(`${DIM}Next steps:${RESET}`);
     console.log(`  1. Confirm the Docker stack is running:`);
     console.log(`       curl ${REMOTE_URL}/health`);
-    console.log(`       # Expected: {"status":"ok","version":"0.8.0"}`);
+    console.log(`       # Expected: {"status":"ok","version":"0.9.0"}`);
     console.log(`  2. Start a new Claude Code session`);
     console.log(`  3. Call: zc_recall_context()  — confirm remote mode is active`);
     console.log(`  4. Call: zc_status()           — verify PostgreSQL store is connected`);

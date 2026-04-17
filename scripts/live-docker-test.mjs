@@ -106,7 +106,7 @@ startSection("Stack health — confirms Docker + PostgreSQL");
 const health = await api("GET", "/health");
 assert("GET /health: 200",                health.status === 200);
 assert("GET /health: status=ok",          health.body.status === "ok");
-assert("GET /health: version=0.8.0",      health.body.version === "0.8.0",  health.body.version);
+assert("GET /health: version=0.9.0",      health.body.version === "0.9.0",  health.body.version);
 assert("GET /health: store=postgres",     health.body.store  === "postgres", health.body.store);
 assert("GET /health: ts present",         typeof health.body.ts === "string");
 

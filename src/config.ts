@@ -23,7 +23,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.8.0",
+  VERSION: "0.9.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -98,15 +98,24 @@ export const Config = {
   // Prevents DoS via broadcast spam causing context window overflow.
   BROADCAST_RATE_LIMIT_PER_MINUTE: 10,
 
-  // ── RBAC + Session Token (v0.8.0) ────────────────────────────────────────────
+  // ── RBAC + Session Token (v0.9.0) ────────────────────────────────────────────
   // Token TTL: 24 hours. Short enough to limit blast radius, long enough for a full work session.
   // Chapter 6 (session tokens): short-lived tickets reduce exposure window.
   SESSION_TOKEN_TTL_SECONDS: 24 * 60 * 60,  // 24h
 
-  // RBAC enforcement is opt-in: activates only when agent sessions are registered.
-  // Keeps backward compatibility — existing setups without sessions work unchanged.
-  // Chapter 14 RBAC: progressive security hardening without breaking changes.
-  RBAC_ENABLED_ENV: env["ZC_RBAC_ENABLED"] === "1",  // force-enable even without sessions
+  // RBAC enforcement — DEFAULT ON in v0.9.0 (BREAKING CHANGE from v0.8.0).
+  // Every zc_broadcast now requires a valid session_token bound to an agent_id + role.
+  // Opt-out: set ZC_RBAC_ENFORCE=0 to restore pre-v0.9.0 advisory behaviour.
+  // Chapter 14 RBAC: enforcement at the reference monitor, not advisory.
+  // See CHANGELOG.md v0.9.0 and README "Migration to v0.9.0" for upgrade steps.
+  RBAC_ENFORCE: env["ZC_RBAC_ENFORCE"] !== "0",
+
+  // Channel key enforcement — DEFAULT ON in v0.9.0 (BREAKING CHANGE from v0.8.0).
+  // verifyChannelKey() used to return true when no key was registered ("open mode").
+  // In v0.9.0 an unregistered project rejects broadcasts until the operator calls
+  // zc_broadcast(type='set_key', channel_key=...) or sets ZC_CHANNEL_KEY_REQUIRED=0.
+  // Chapter 11 (capabilities): a project is not writable without a capability.
+  CHANNEL_KEY_REQUIRED: env["ZC_CHANNEL_KEY_REQUIRED"] !== "0",
 
   // L0/L1/L2 content tier lengths
   // Tiered loading reduces token consumption by returning only as much as needed

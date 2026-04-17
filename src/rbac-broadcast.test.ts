@@ -1,30 +1,42 @@
 /**
- * Tests for RBAC enforcement in broadcastFact (v0.8.0)
+ * Tests for RBAC enforcement in broadcastFact (v0.9.0 — default-on)
  * rbac-broadcast.test.ts
  *
- * Tests:
- *   - Backward compat: no sessions → no RBAC enforcement
- *   - With sessions: session_token required
+ * v0.9.0 REMOVES "open mode" (no sessions = no RBAC). Enforcement is always on
+ * unless the operator sets ZC_RBAC_ENFORCE=0 — that opt-out path is covered in
+ * security-tests/run-all.mjs (Category 9) with a spawned child process.
+ *
+ * Tests here:
+ *   - RBAC is always enforced: no session_token → reject
  *   - Orchestrator token can ASSIGN
- *   - Developer token cannot ASSIGN (RBAC violation)
- *   - Expired token rejected
- *   - Revoked token rejected
+ *   - Worker role cannot ASSIGN
+ *   - Agent_id binding: broadcast agent_id must match token's bound aid (v0.9.0 new)
+ *   - Invalid / expired / revoked tokens rejected
  *   - Hash chain: sequential broadcasts form valid chain
  *   - Hash chain: manual DB row modification breaks chain
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 
-// Unique DB dir per suite
-const TEST_DB_DIR = mkdtempSync(join(tmpdir(), "zc-rbac-bc-test-"));
-
-// Important: set env BEFORE importing config/memory modules
-process.env["ZC_TEST_DB_DIR"] = TEST_DB_DIR;
+// vi.hoisted runs BEFORE any import is evaluated. This is the only reliable way
+// to set env vars that must be in place when config.ts's module-level snapshot
+// runs. These are RBAC-focused tests — channel-key enforcement is exercised
+// separately in security-tests/run-all.mjs (Category 9) via a spawned process.
+const { TEST_DB_DIR } = vi.hoisted(() => {
+  // node: specifiers are resolvable by require inside a hoisted block
+  const { mkdtempSync: mk } = require("node:fs");
+  const { tmpdir: td }      = require("node:os");
+  const { join: jn }        = require("node:path");
+  const dir = mk(jn(td(), "zc-rbac-bc-test-"));
+  process.env["ZC_TEST_DB_DIR"] = dir;
+  process.env["ZC_CHANNEL_KEY_REQUIRED"] = "0";
+  return { TEST_DB_DIR: dir };
+});
 
 import { broadcastFact, getBroadcastChainStatus, setChannelKey } from "./memory.js";
 import { issueToken, revokeToken } from "./access-control.js";
@@ -57,46 +69,39 @@ function openProjectDb(projectPath: string): DatabaseSync {
   return db;
 }
 
-// ── Backward compatibility (no sessions → no RBAC) ───────────────────────────
+// ── v0.9.0: RBAC is always enforced (no "open mode") ─────────────────────────
 
-describe("backward compatibility — no sessions registered", () => {
-  it("broadcastFact succeeds without session_token when no sessions exist", () => {
-    const projectPath = makeProjectPath(`open-${Date.now()}`);
-    // No issueToken called — no sessions in DB
-    const msg = broadcastFact(projectPath, "STATUS", "agent-legacy", {
-      task:    "legacy task",
-      summary: "working as before",
-    });
-    expect(msg.id).toBeGreaterThan(0);
-    expect(msg.type).toBe("STATUS");
+describe("RBAC default-on — enforcement cannot be bypassed by not registering sessions", () => {
+  it("broadcast without session_token is rejected even on a fresh project", () => {
+    const projectPath = makeProjectPath(`no-token-${Date.now()}`);
+    // No issueToken call — the old open-mode shortcut is gone in v0.9.0
+    expect(() => broadcastFact(projectPath, "STATUS", "agent-legacy", {
+      summary: "would have worked in v0.8.0",
+    })).toThrow(/session_token is required/i);
   });
 
-  it("broadcastFact with channel_key only (existing behavior) still works", () => {
-    const projectPath = makeProjectPath(`ck-only-${Date.now()}`);
-    // Set channel key — no RBAC sessions
+  it("broadcast with channel_key but no session_token is still rejected", () => {
+    const projectPath = makeProjectPath(`ck-no-token-${Date.now()}`);
     setChannelKey(projectPath, "testchannelkey1234567890");
-
-    const msg = broadcastFact(projectPath, "STATUS", "agent-ck", {
-      summary:     "channel key only",
+    expect(() => broadcastFact(projectPath, "STATUS", "agent-ck", {
+      summary:     "channel key alone is not enough anymore",
       channel_key: "testchannelkey1234567890",
-    });
-    expect(msg.id).toBeGreaterThan(0);
+    })).toThrow(/session_token is required/i);
   });
 });
 
-// ── RBAC enforcement (sessions registered) ───────────────────────────────────
+// ── RBAC enforcement (positive + RBAC-type rejection) ───────────────────────
 
-describe("RBAC enforcement — sessions registered", () => {
-  it("requires session_token when sessions are active", () => {
-    const projectPath = makeProjectPath(`rbac-active-${Date.now()}`);
+describe("RBAC enforcement — role-permission matrix", () => {
+  it("requires session_token (error message)", () => {
+    const projectPath = makeProjectPath(`rbac-required-${Date.now()}`);
     const db = openProjectDb(projectPath);
     issueToken(db, projectPath, "orch-1", "orchestrator");
     db.close();
 
-    // No session_token supplied — should throw
-    expect(() => broadcastFact(projectPath, "STATUS", "some-agent", {
+    expect(() => broadcastFact(projectPath, "STATUS", "orch-1", {
       summary: "no token",
-    })).toThrow(/session_token required/i);
+    })).toThrow(/session_token is required/i);
   });
 
   it("orchestrator token can broadcast ASSIGN", () => {
@@ -124,7 +129,7 @@ describe("RBAC enforcement — sessions registered", () => {
       task:          "trying to assign",
       summary:       "I am not allowed",
       session_token: token,
-    })).toThrow(/RBAC violation/i);
+    })).toThrow(/is not permitted to broadcast type/i);
   });
 
   it("developer token can broadcast STATUS", () => {
@@ -162,7 +167,7 @@ describe("RBAC enforcement — sessions registered", () => {
     expect(() => broadcastFact(projectPath, "STATUS", "some-agent", {
       summary:       "trying with bad token",
       session_token: "zcst.FAKE.FAKEHMAC",
-    })).toThrow(/invalid.*expired.*revoked/i);
+    })).toThrow(/invalid, expired, revoked/i);
   });
 
   it("expired token is rejected (with a still-active orchestrator session keeping RBAC alive)", () => {
@@ -183,7 +188,7 @@ describe("RBAC enforcement — sessions registered", () => {
     expect(() => broadcastFact(projectPath, "STATUS", "agent-exp", {
       summary:       "expired",
       session_token: token,
-    })).toThrow(/invalid.*expired.*revoked/i);
+    })).toThrow(/invalid, expired, revoked/i);
   });
 
   it("revoked token is rejected (with a still-active orchestrator session keeping RBAC alive)", () => {
@@ -204,7 +209,53 @@ describe("RBAC enforcement — sessions registered", () => {
     expect(() => broadcastFact(projectPath, "STATUS", "agent-rev", {
       summary:       "revoked",
       session_token: token,
-    })).toThrow(/invalid.*expired.*revoked/i);
+    })).toThrow(/invalid, expired, revoked/i);
+  });
+});
+
+// ── v0.9.0: agent_id binding (capability confinement) ───────────────────────
+
+describe("agent_id binding — a token is scoped to one agent", () => {
+  it("rejects broadcast when agent_id does not match token's bound aid", () => {
+    const projectPath = makeProjectPath(`agentid-mismatch-${Date.now()}`);
+    const db = openProjectDb(projectPath);
+    const workerToken = issueToken(db, projectPath, "developer-1", "developer");
+    db.close();
+
+    // developer-1's token used to post as orchestrator — the spoofing attempt
+    // the v0.9.0 binding closes. Role is still developer so STATUS would be
+    // allowed by the matrix, but the agent_id swap is caught first.
+    expect(() => broadcastFact(projectPath, "STATUS", "orchestrator", {
+      summary:       "spoofing orchestrator",
+      session_token: workerToken,
+    })).toThrow(/AGENT_ID_MISMATCH/);
+  });
+
+  it("rejects broadcast when agent_id is another worker's name (lateral spoofing)", () => {
+    const projectPath = makeProjectPath(`agentid-lateral-${Date.now()}`);
+    const db = openProjectDb(projectPath);
+    const workerToken = issueToken(db, projectPath, "developer-1", "developer");
+    issueToken(db, projectPath, "developer-2", "developer");
+    db.close();
+
+    expect(() => broadcastFact(projectPath, "STATUS", "developer-2", {
+      summary:       "developer-1 posing as developer-2",
+      session_token: workerToken,
+    })).toThrow(/AGENT_ID_MISMATCH/);
+  });
+
+  it("accepts broadcast when agent_id matches token's bound aid", () => {
+    const projectPath = makeProjectPath(`agentid-match-${Date.now()}`);
+    const db = openProjectDb(projectPath);
+    const token = issueToken(db, projectPath, "developer-1", "developer");
+    db.close();
+
+    const msg = broadcastFact(projectPath, "STATUS", "developer-1", {
+      summary:       "legitimate self-identification",
+      session_token: token,
+    });
+    expect(msg.id).toBeGreaterThan(0);
+    expect(msg.agent_id).toBe("developer-1");
   });
 });
 

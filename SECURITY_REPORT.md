@@ -1,7 +1,7 @@
 # SecureContext — Red Team Security Report
 
-> **Current version: 0.8.0 — 84 attack vectors · 78 PASS · 0 FAIL · 6 WARN**
-> See the **[v0.8.0 Store Abstraction & Docker API](#v080----store-abstraction--docker-api)**, **[v0.7.2 KB Injection Pre-filter](#v072----kb-injection-pre-filter)** and **[v0.7.1 Broadcast Channel Security Audit](#appendix----v071-broadcast-channel-security-audit-2026-03-29)** appendices for the latest findings.
+> **Current version: 0.9.0 — 96 attack vectors · 91 PASS · 0 FAIL · 5 WARN**
+> See the **[v0.9.0 RBAC Default-On & Channel-Key Enforcement](#v090----rbac-default-on--channel-key-enforcement-2026-04-17)**, **[v0.7.2 KB Injection Pre-filter](#v072----kb-injection-pre-filter)** and **[v0.7.1 Broadcast Channel Security Audit](#appendix----v071-broadcast-channel-security-audit-2026-03-29)** appendices for the latest findings.
 > The sections below document the v0.2.0 foundational red-team baseline (vulnerabilities found and fixed before initial release).
 
 ---
@@ -565,3 +565,72 @@ The following threat classes were identified in an external deep-dive analysis o
 5. Even if a poisoned chunk ranks high, it is prefixed with `[UNTRUSTED EXTERNAL CONTENT]` on retrieval
 
 **Accepted:** No specific mitigation planned. The hybrid search architecture provides a natural structural defense. This attack class is relevant for shared cloud vector databases with many adversarial contributors — it does not map to SecureContext's local, single-user, project-scoped deployment model.
+
+---
+
+## v0.9.0 — RBAC Default-On & Channel-Key Enforcement (2026-04-17)
+
+**Audit date:** 2026-04-17
+**Version audited:** 0.9.0
+**Tester:** Automated red-team suite, extended with 12 new attack vectors (T_R01–T_R12)
+**Score:** 96 attack vectors · **91 PASS · 0 FAIL · 5 WARN** (all WARNs are pre-existing documented limitations)
+
+### Threat Model Closed by v0.9.0
+
+Prior to v0.9.0, two security gaps existed in the broadcast reference monitor:
+
+**Gap 1 — Silent advisory RBAC.** `broadcastFact()` called `hasActiveSessions(db)` as a gate: if no sessions were ever issued in a project, RBAC was not enforced. This meant a fresh project (no active sessions) accepted unauthenticated broadcasts, and a legitimate operator's failure to issue tokens produced a silent open-mode failure rather than a loud rejection.
+
+**Gap 2 — Agent-ID spoofing under valid token.** The token carried an `aid` claim but `broadcastFact()` never checked `broadcast.agent_id === token.aid`. A worker holding a valid STATUS-capable token could post `broadcast({agent_id: "orchestrator", ...})` and the dispatcher would route the message as orchestrator traffic. This broke the Chapter 11 capability-confinement invariant: a token is a capability scoped to one agent.
+
+**Gap 3 — Open-mode channel.** `verifyChannelKey()` returned `true` when no key was registered, so a project with no `set_key` call was effectively unauthenticated end-to-end. Combined with Gap 1, the full-open path existed out of the box.
+
+### Mitigations Shipped
+
+1. **`Config.RBAC_ENFORCE` defaults to `true`** (opt-out via `ZC_RBAC_ENFORCE=0`). The `hasActiveSessions(db)` advisory gate is removed.
+2. **`Config.CHANNEL_KEY_REQUIRED` defaults to `true`** (opt-out via `ZC_CHANNEL_KEY_REQUIRED=0`). `verifyChannelKey()` throws on an unregistered project.
+3. **`AGENT_ID_MISMATCH` check** added at the reference monitor: `if (safeAgent !== tokenInfo.agentId) throw`.
+4. **Both defaults flipped together** to avoid the "half-auth" failure mode (locked front door, open back door).
+
+### New Attack Vectors (Category 9: T_R01–T_R12)
+
+| Test | Attack | Result |
+|---|---|---|
+| T_R01 | Positive control — orchestrator with valid token broadcasts ASSIGN | PASS |
+| T_R02 | Positive control — developer with valid token broadcasts STATUS | PASS |
+| T_R03 | Spoofed agent_id under valid worker token (Chapter 11 confinement) | PASS (AGENT_ID_MISMATCH) |
+| T_R04 | Missing `session_token` when RBAC enforced | PASS (rejected) |
+| T_R05 | Expired token (past `exp` + past `expires_at` in DB) | PASS (rejected) |
+| T_R06 | Revoked token (`revokeToken()` → `revoked=1`) | PASS (rejected) |
+| T_R07 | Tampered token (HMAC byte flip) — Chapter 11 unforgeability | PASS (rejected) |
+| T_R08 | Cross-project token (`ph` claim mismatch) — scoped capability | PASS (rejected) |
+| T_R09 | Worker posting ASSIGN (Chapter 14 separation of duty) | PASS (role denial) |
+| T_R10 | Worker posting REJECT + REVISE (orchestrator-only types) | PASS (both rejected) |
+| T_R11 | `ZC_RBAC_ENFORCE=0` opt-out restores legacy path (child proc) | PASS (opt-out works) |
+| T_R12 | `CHANNEL_KEY_REQUIRED` rejects bare-project broadcast | PASS (rejected) |
+
+### Test Methodology Notes
+
+- T_R11 runs in a **spawned child process** because `Config` is read from env at module load. This exercises the opt-out path cleanly without contaminating the parent process.
+- T_R05/T_R06 keep an additional orchestrator session active for the project so the RBAC gate stays engaged even in pre-v0.9.0 advisory mode (defense against regression if the enforcement flag is ever reverted).
+- T_R07 flips the last two hex characters of the HMAC signature — timing-safe comparison (`timingSafeEqual`) ensures the rejection doesn't leak which byte was wrong.
+
+### Coexistence with Legacy Tests
+
+The seven pre-v0.9.0 broadcast tests (T_B01–T_B07) were retooled to bootstrap a channel key + token, matching the v0.9.0 auth flow. T_B02 was re-focused from "open-mode spoofing documented as WARN" (impossible after v0.9.0) to "legitimate developer MERGE accepted" as a positive control complementing T_R09.
+
+### Known Limitations (Unchanged from v0.8.0)
+
+All 5 WARNs are pre-existing and documented above:
+- **T08** Sandbox filesystem isolation (by design — process isolation, not fs isolation)
+- **T09** Detached subprocess containment (known limitation — needs process-group kill)
+- **T17** javascript: URI — rejected but without an explicit guard message
+- **T32** Unicode lookalike header (`Αuthorization` with Greek alpha) — HTTP normalization treats as custom header; low risk
+- **T60** Concurrent sandbox env isolation — env var count varies slightly under parallel load
+
+### Operational Recommendations
+
+1. **Do not set `ZC_RBAC_ENFORCE=0` or `ZC_CHANNEL_KEY_REQUIRED=0` on any network-reachable deployment** (Docker stack, API server). The opt-outs exist only for trusted single-user desktop installs.
+2. **Rotate channel keys periodically** — `zc_broadcast(type='set_key', channel_key=<new>)` re-seeds the scrypt hash. Old tokens remain valid until expiry; issue fresh tokens after rotation to align the auth envelope.
+3. **Token TTL defaults to 24h** (`Config.SESSION_TOKEN_TTL_SECONDS`). Shorten for high-sensitivity setups by passing a smaller `ttlSeconds` to `issueToken()`.
+4. **Monitor `zc_status` output** — `RBAC enforcement: DISABLED` or `Channel key: optional` lines indicate an env opt-out is active and should be accounted for in the threat model.

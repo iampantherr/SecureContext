@@ -40,7 +40,6 @@ import { Config } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { indexContent } from "./knowledge.js";
 import {
-  hasActiveSessions,
   verifyToken,
   canBroadcast,
   ROLE_PERMISSIONS,
@@ -610,7 +609,19 @@ function verifyChannelKey(
     "SELECT value FROM project_meta WHERE key = 'zc_channel_key_hash'"
   ).get() as { value: string } | undefined;
 
-  if (!row || row.value.length === 0) return true; // OPEN MODE
+  // v0.9.0 BREAKING CHANGE: "open mode" (no registered key) is now rejected by default.
+  // Operators who genuinely want an unauthenticated project must set
+  // ZC_CHANNEL_KEY_REQUIRED=0 — explicit opt-out, not implicit default.
+  if (!row || row.value.length === 0) {
+    if (Config.CHANNEL_KEY_REQUIRED) {
+      throw new Error(
+        "Broadcast rejected: no channel key registered for this project. " +
+        "Call zc_broadcast(type='set_key', channel_key='<strong-secret>') to " +
+        "register one, or set ZC_CHANNEL_KEY_REQUIRED=0 to restore pre-v0.9.0 open mode."
+      );
+    }
+    return true; // opt-out: legacy open mode
+  }
 
   const stored = row.value;
 
@@ -757,28 +768,40 @@ export function broadcastFact(
     throw new Error("Broadcast rejected: invalid or missing channel key");
   }
 
-  // RBAC ENFORCEMENT: If sessions are registered (or force-enabled), validate session token and role
-  // Chapter 14 (RBAC): separation of duty enforced at the reference monitor
-  // Backward compat: if no sessions registered and RBAC not force-enabled, skip enforcement
+  // RBAC ENFORCEMENT (v0.9.0 — default ON): validate session token, role, and agent_id binding.
+  // Chapter 14 (RBAC): separation of duty enforced at the reference monitor.
+  // Chapter 11 (capabilities): agent_id on the broadcast must match the token's bound aid —
+  //   closes the spoofing gap where a worker with a valid STATUS-capable token could post
+  //   a broadcast carrying agent_id='orchestrator' and have the dispatcher route it as one.
+  // Opt-out: ZC_RBAC_ENFORCE=0 restores pre-v0.9.0 advisory-only behaviour for legacy setups.
   let sessionTokenId = "";
-  const sessionsActive = hasActiveSessions(db);
-  if (sessionsActive || Config.RBAC_ENABLED_ENV) {
+  if (Config.RBAC_ENFORCE) {
     if (!opts.session_token) {
       db.close();
       throw new Error(
-        "RBAC enforcement active: session_token required for broadcast. " +
-        "Call zc_issue_token to obtain a token, or register via zc_register_agent."
+        "RBAC: session_token is required for every broadcast in v0.9.0. " +
+        "Call zc_issue_token(agent_id, role) to obtain a token, then pass it as " +
+        "session_token= on zc_broadcast. Set ZC_RBAC_ENFORCE=0 to restore pre-v0.9.0 " +
+        "advisory mode (not recommended — see CHANGELOG.md)."
       );
     }
     const tokenInfo = verifyToken(db, opts.session_token, projectPath);
     if (!tokenInfo) {
       db.close();
-      throw new Error("Broadcast rejected: invalid, expired, or revoked session token");
+      throw new Error("RBAC: session token is invalid, expired, revoked, or bound to a different project.");
+    }
+    if (safeAgent !== tokenInfo.agentId) {
+      db.close();
+      throw new Error(
+        `RBAC: AGENT_ID_MISMATCH — broadcast agent_id='${safeAgent}' does not match ` +
+        `token's bound agent_id='${tokenInfo.agentId}'. A token is a capability scoped ` +
+        `to one agent; use that agent's own token or re-issue a token for '${safeAgent}'.`
+      );
     }
     if (!canBroadcast(tokenInfo.role, type)) {
       db.close();
       throw new Error(
-        `RBAC violation: role '${tokenInfo.role}' cannot broadcast type '${type}'. ` +
+        `RBAC: role '${tokenInfo.role}' is not permitted to broadcast type '${type}'. ` +
         `Allowed types for ${tokenInfo.role}: ${ROLE_PERMISSIONS[tokenInfo.role]?.join(", ")}`
       );
     }

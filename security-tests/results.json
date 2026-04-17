@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-03-29T18:22:04.260Z",
+  "timestamp": "2026-04-17T15:17:26.383Z",
   "summary": {
-    "total": 84,
-    "passed": 78,
+    "total": 96,
+    "passed": 91,
     "failed": 0,
-    "warned": 6,
+    "warned": 5,
     "skipped": 0
   },
   "results": [
@@ -29,7 +29,7 @@
       "name": "Infinite loop killed by 30s timeout",
       "status": "PASS",
       "expected": "timedOut=true",
-      "actual": "killed after 30.2s",
+      "actual": "killed after 30.1s",
       "notes": ""
     },
     {
@@ -77,7 +77,7 @@
       "name": "Background subprocess spawned from sandbox",
       "status": "WARN",
       "expected": "background processes contained",
-      "actual": "child PID 266640 may survive parent kill",
+      "actual": "child PID 40476 may survive parent kill",
       "notes": "KNOWN LIMITATION: spawned detached children not in process group. Fix: use process group kill in sandbox."
     },
     {
@@ -85,7 +85,7 @@
       "name": "Controlled subprocess spawning (50 background children) — parent exits cleanly",
       "status": "PASS",
       "expected": "parent returns quickly after spawning children",
-      "actual": "elapsed=90ms, exitCode=0",
+      "actual": "elapsed=102ms, exitCode=0",
       "notes": "Process tree kill (taskkill /T) handles remaining children on Windows"
     },
     {
@@ -421,7 +421,7 @@
       "name": "posttooluse hook does not modify itself when its own path is used",
       "status": "PASS",
       "expected": "file unchanged",
-      "actual": "6271 bytes unchanged",
+      "actual": "9452 bytes unchanged",
       "notes": ""
     },
     {
@@ -437,7 +437,7 @@
       "name": "Hook completes in <2s for normal input",
       "status": "PASS",
       "expected": "<2s",
-      "actual": "34ms",
+      "actual": "31ms",
       "notes": ""
     },
     {
@@ -525,7 +525,7 @@
       "name": "Session summary archived and searchable via KB",
       "status": "PASS",
       "expected": "SESSION_SUMMARY in results",
-      "actual": "found: [SESSION_SUMMARY] 2026-03-29",
+      "actual": "found: [SESSION_SUMMARY] 2026-04-17",
       "notes": ""
     },
     {
@@ -634,11 +634,11 @@
     },
     {
       "id": "T_B02",
-      "name": "Open mode: agent_id spoofing documented — MERGE written by worker appears in channel",
-      "status": "WARN",
-      "expected": "entry appears with rogue-worker agent_id (open mode limitation)",
-      "actual": "hasEntry=true. Use key-protected mode to prevent this.",
-      "notes": "KNOWN LIMITATION: In open mode, agent_id is self-reported. Use set_key for pipelines requiring identity."
+      "name": "Legitimate developer MERGE accepted under v0.9.0 RBAC (positive control)",
+      "status": "PASS",
+      "expected": "MERGE written by dev-merger",
+      "actual": "id=1 hasEntry=true",
+      "notes": ""
     },
     {
       "id": "T_B03",
@@ -653,7 +653,7 @@
       "name": "KDF: channel key stored as scrypt:v1: format (not SHA256)",
       "status": "PASS",
       "expected": "scrypt:v1:{N}:{r}:{p}:{salt}:{hash}",
-      "actual": "stored=scrypt:v1:32768:8:1:b8cff5a5f79d8da721f4...",
+      "actual": "stored=scrypt:v1:32768:8:1:397e04f0471c65728472...",
       "notes": ""
     },
     {
@@ -678,6 +678,102 @@
       "status": "PASS",
       "expected": "traversal stripped, safe paths kept",
       "actual": "returnFiles=[\"src/legit.ts\",\"valid/path/file.ts\"]",
+      "notes": ""
+    },
+    {
+      "id": "T_R01",
+      "name": "Legitimate orchestrator with valid token broadcasts ASSIGN",
+      "status": "PASS",
+      "expected": "broadcast accepted",
+      "actual": "id=1 type=ASSIGN",
+      "notes": ""
+    },
+    {
+      "id": "T_R02",
+      "name": "Legitimate developer with valid token broadcasts STATUS",
+      "status": "PASS",
+      "expected": "broadcast accepted",
+      "actual": "id=1",
+      "notes": ""
+    },
+    {
+      "id": "T_R03",
+      "name": "Spoofed agent_id rejected (AGENT_ID_MISMATCH)",
+      "status": "PASS",
+      "expected": "AGENT_ID_MISMATCH",
+      "actual": "RBAC: AGENT_ID_MISMATCH — broadcast agent_id='agent-VICTIM' does not match token's bound agent_id='agent-honest'. A token is a capability scoped to one agent; u",
+      "notes": ""
+    },
+    {
+      "id": "T_R04",
+      "name": "Missing session_token rejected under RBAC_ENFORCE=true",
+      "status": "PASS",
+      "expected": "session_token required",
+      "actual": "RBAC: session_token is required for every broadcast in v0.9.0. Call zc_issue_token(agent_id, role) to obtain a token, then pass it as sessio",
+      "notes": ""
+    },
+    {
+      "id": "T_R05",
+      "name": "Expired token rejected (invalid/expired/revoked)",
+      "status": "PASS",
+      "expected": "invalid/expired/revoked",
+      "actual": "RBAC: session token is invalid, expired, revoked, or bound to a different project.",
+      "notes": ""
+    },
+    {
+      "id": "T_R06",
+      "name": "Revoked token rejected (invalid/expired/revoked)",
+      "status": "PASS",
+      "expected": "revoked rejected",
+      "actual": "RBAC: session token is invalid, expired, revoked, or bound to a different project.",
+      "notes": ""
+    },
+    {
+      "id": "T_R07",
+      "name": "Tampered token (HMAC forgery) rejected",
+      "status": "PASS",
+      "expected": "timing-safe HMAC rejection",
+      "actual": "RBAC: session token is invalid, expired, revoked, or bound to a different project.",
+      "notes": ""
+    },
+    {
+      "id": "T_R08",
+      "name": "Cross-project token rejected (ph mismatch)",
+      "status": "PASS",
+      "expected": "ph claim mismatch rejection",
+      "actual": "RBAC: session token is invalid, expired, revoked, or bound to a different project.",
+      "notes": ""
+    },
+    {
+      "id": "T_R09",
+      "name": "Worker posting ASSIGN rejected (role privilege)",
+      "status": "PASS",
+      "expected": "role permission enforced",
+      "actual": "RBAC: role 'developer' is not permitted to broadcast type 'ASSIGN'. Allowed types for developer: STATUS, PROPOSED, DEPENDENCY, MERGE",
+      "notes": ""
+    },
+    {
+      "id": "T_R10",
+      "name": "Worker posting orchestrator-only types (REJECT, REVISE) rejected",
+      "status": "PASS",
+      "expected": "both rejected",
+      "actual": "REJECT:rejected | REVISE:rejected",
+      "notes": ""
+    },
+    {
+      "id": "T_R11",
+      "name": "ZC_RBAC_ENFORCE=0 opt-out restores legacy broadcasts (child proc)",
+      "status": "PASS",
+      "expected": "child broadcast accepted",
+      "actual": "id=1",
+      "notes": ""
+    },
+    {
+      "id": "T_R12",
+      "name": "CHANNEL_KEY_REQUIRED rejects broadcast on unregistered project",
+      "status": "PASS",
+      "expected": "channel-key gate fired",
+      "actual": "Broadcast rejected: no channel key registered for this project. Call zc_broadcast(type='set_key', channel_key='<strong-secret>') to register one, or set ZC_CHAN",
       "notes": ""
     }
   ]
