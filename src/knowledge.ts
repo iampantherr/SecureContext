@@ -182,20 +182,27 @@ async function storeEmbeddingAsync(
  *
  * @param sourceType    'external' | 'internal' — controls trust labeling in results
  * @param retentionTier 'external' | 'internal' | 'summary' — controls expiry duration
+ * @param precomputedL0 Optional semantic L0 summary (v0.10.0). If provided, overrides
+ *                      the default first-N-char truncation. Used by indexProject to
+ *                      inject Ollama-generated summaries without re-parsing content.
+ * @param precomputedL1 Optional semantic L1 summary. Same semantics as precomputedL0.
  */
 export function indexContent(
   projectPath: string,
   content: string,
   source: string,
   sourceType: "internal" | "external" = "internal",
-  retentionTier: RetentionTier = sourceType === "external" ? "external" : "internal"
+  retentionTier: RetentionTier = sourceType === "external" ? "external" : "internal",
+  precomputedL0?: string,
+  precomputedL1?: string
 ): void {
   const now = new Date().toISOString();
   const db = openDb(projectPath);
 
-  // L0/L1 summaries for tiered retrieval (reduces token consumption at L0/L1 depth)
-  const l0 = content.slice(0, Config.TIER_L0_CHARS).trim();
-  const l1 = content.slice(0, Config.TIER_L1_CHARS).trim();
+  // L0/L1 summaries for tiered retrieval (reduces token consumption at L0/L1 depth).
+  // Semantic summaries win when provided; otherwise fall back to truncation.
+  const l0 = (precomputedL0 ?? content.slice(0, Config.TIER_L0_CHARS)).trim();
+  const l1 = (precomputedL1 ?? content.slice(0, Config.TIER_L1_CHARS)).trim();
 
   db.prepare("DELETE FROM knowledge WHERE source = ?").run(source);
   db.prepare(

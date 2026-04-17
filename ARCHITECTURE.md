@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.9.0)
+# SecureContext — Architecture Reference (v0.10.0)
 
 ## Overview
 
@@ -26,8 +26,9 @@ SecureContext ships with two storage backends. The Docker Stack is the recommend
                     │                                                     │
                     │  ┌─────────────────────┐  ┌──────────────────────┐│
                     │  │  securecontext-api   │  │ securecontext-ollama ││
-                    │  │  (Fastify HTTP :3099)│  │ (nomic-embed-text)   ││
-                    │  │  store-postgres.ts   │  │ GPU-accelerated      ││
+                    │  │  (Fastify HTTP :3099)│  │ nomic-embed-text     ││
+                    │  │  store-postgres.ts   │  │ + qwen2.5-coder:14b  ││
+                    │  │                      │  │ (GPU-accelerated)    ││
                     │  └──────────┬──────────┘  └──────────────────────┘│
                     │             │ pg driver                             │
                     │  ┌──────────▼──────────────────────────────────┐  │
@@ -50,6 +51,21 @@ SecureContext ships with two storage backends. The Docker Stack is the recommend
 - `restart: unless-stopped` on all containers — automatically restart on system reboot
 - PostgreSQL advisory locks for correct concurrent broadcast writes
 - `ollamaAvailable` surfaced in `/health` endpoint — agents see search mode at startup
+
+**Ollama — two models, one container (v0.10.0):**
+
+The `securecontext-ollama` container hosts both:
+- `nomic-embed-text` (274 MB) — embeddings for semantic KB search
+- `qwen2.5-coder:14b` (9 GB) — semantic L0/L1 summaries for file indexing
+
+Both are served by the same Ollama process. They serve architecturally different roles (embedding models output vectors, chat models output text) and cannot substitute for each other. Pull both:
+
+```bash
+docker exec securecontext-ollama ollama pull nomic-embed-text
+docker exec securecontext-ollama ollama pull qwen2.5-coder:14b
+```
+
+VRAM: the chat model loads for indexing bursts and unloads 30s after the last request (`ZC_SUMMARY_KEEP_ALIVE=30s`). The embedding model is tiny enough to stay resident.
 
 ### Mode 2 — Local SQLite (Single Developer, No Docker)
 
@@ -460,7 +476,7 @@ Thin client for Ollama's `nomic-embed-text` model.
 
 **Return type:** `EmbeddingResult = { vector: Float32Array, modelName: string, dimensions: number }` — stores model identity alongside the vector so stale embeddings can be detected on model switch.
 
-**Hardcoded URL:** `http://127.0.0.1:11434` — never user-supplied. No SSRF risk.
+**Configurable URL:** `Config.OLLAMA_URL` (overridable via `ZC_OLLAMA_URL`). Defaults to `http://127.0.0.1:11434/api/embeddings`. Same base URL is reused by the v0.10.0 summarizer for `/api/generate` and `/api/tags`.
 
 **Availability cache:** First failed call sets `ollamaAvailable = false` with a 60-second TTL. Avoids hammering Ollama when it's not running.
 
@@ -471,6 +487,78 @@ Thin client for Ollama's `nomic-embed-text` model.
 cosine(a, b) = dot(a,b) / (|a| × |b|)
 ```
 Zero-magnitude guard prevents division by zero.
+
+---
+
+### 6b. Harness Layer (`src/harness.ts`, `src/summarizer.ts`) — v0.10.0
+
+The **harness** is a token-optimization layer sitting on top of the KB/memory primitives. It exists to convert SC from a *tool that's available* into a *tool that's the default* — measured ~80% reduction in context overhead on typical multi-session work.
+
+**Design principle (two-tier knowledge model):**
+- **Tier 1 — Knowledge layer** (in SC): file L0/L1 semantic summaries, project cards, decision ledger, tool-output archive. Queryable without touching disk.
+- **Tier 2 — Raw files** (on disk): expensive, current, only touched when editing.
+
+**Five MCP tools wire this in (`src/server.ts`):**
+
+| Tool | Backend | Token cost |
+|---|---|---|
+| `zc_index_project` | `harness.indexProject()` | ~0 (one-time setup) |
+| `zc_file_summary` | `harness.getFileSummary()` | ~400 tok (L0+L1) vs ~4000 (Read) |
+| `zc_project_card` | `harness.getProjectCard()` / `setProjectCard()` | ~500 tok vs ~8000 (ls+Read+Glob ritual) |
+| `zc_check` | `harness.checkAnswer()` + `searchKnowledge` | ~400 tok, with confidence scoring |
+| `zc_capture_output` | `harness.captureToolOutput()` | ~100 tok vs up to 40000 for a noisy bash output |
+
+**Semantic summarizer (`src/summarizer.ts`):**
+
+Generates L0 (≤100 char purpose) + L1 (≤1500 char detail) via a local Ollama coder model. Auto-probes installed models in order:
+
+```
+qwen2.5-coder:14b → 7b → 32b → deepseek-coder → codellama →
+starcoder2 → qwen2.5 (general) → llama3.1 → llama3.2 → (truncation fallback)
+```
+
+Architecturally:
+1. `selectSummaryModel()` queries `/api/tags` (cached 60s) to find the best installed model.
+2. `summarizeFile(path, content)` builds a structured prompt with `[BEGIN FILE CONTENT]` / `[END FILE CONTENT]` boundary markers (prompt-injection defense), sends to `/api/generate`, parses the `---L0--- ... ---L1---` response.
+3. `summarizeBatch(files)` uses bounded concurrency (`Config.SUMMARY_CONCURRENCY`, default 4) for large indexing jobs.
+
+**VRAM lifecycle:** Ollama's `keep_alive: "30s"` (default, overridable) keeps the model hot during an indexing burst (each request resets the timer) and unloads it 30 seconds after the batch ends. Zero VRAM occupation when idle.
+
+**Security posture:**
+- Egress restricted to `Config.OLLAMA_URL` base — same URL the embedder uses, configurable via `ZC_OLLAMA_URL`. No external network calls.
+- Prompt-injection scanner detects `ignore previous instructions`, `new system prompt`, etc. in file content. Summarization continues (so indexing of benign-but-pattern-matching files like `summarizer.ts` itself works), but the result is flagged `injectionDetected=true` for auditing.
+- Model allowlist (`ZC_SUMMARY_MODEL_ALLOWLIST`) restricts which models are acceptable — blocks misconfigured overrides.
+- Response validation: parser rejects malformed outputs; length caps on L0 (100 chars) / L1 (1500 chars).
+- Fail-safe: every failure path falls back to deterministic truncation. Indexing never blocks on LLM failure.
+
+**Three optional hook scripts (`hooks/`):**
+
+| Hook | Matcher | Effect |
+|---|---|---|
+| `preread-dedup.mjs` | `PreToolUse:Read` | Blocks duplicate Reads in one session. Backed by `session_read_log` table. Agent redirected to `zc_file_summary`. |
+| `postedit-reindex.mjs` | `PostToolUse:Edit\|Write\|MultiEdit` | After any edit, regenerates the file's L0/L1 (via `summarizeFile`) and clears its `session_read_log` entry. |
+| `postbash-capture.mjs` | `PostToolUse:Bash` | If stdout > 50 lines, archives to KB via `captureToolOutput` and replaces raw output in agent context with compact head+tail summary. |
+
+All three fail-safe: on any error, they fall through without blocking the agent. Opt-in install (see `hooks/INSTALL.md`).
+
+**Schema additions (migration 012):**
+```sql
+CREATE TABLE project_card (
+  id INTEGER PRIMARY KEY CHECK(id = 1),  -- singleton row
+  stack TEXT, layout TEXT, state TEXT, gotchas TEXT, hot_files TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE session_read_log (
+  session_id TEXT, path TEXT, read_at TEXT,
+  PRIMARY KEY (session_id, path)
+);
+
+CREATE TABLE tool_output_digest (
+  hash TEXT PRIMARY KEY, command TEXT, summary TEXT,
+  exit_code INTEGER, full_ref TEXT, created_at TEXT
+);
+```
 
 ---
 

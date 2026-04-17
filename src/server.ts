@@ -43,6 +43,15 @@ import {
 } from "./access-control.js";
 import { checkIntegrity, type IntegrityResult } from "./integrity.js";
 import { getCurrentSchemaVersion } from "./migrations.js";
+import {
+  indexProject,
+  getFileSummary,
+  getProjectCard,
+  setProjectCard,
+  captureToolOutput,
+  checkAnswer,
+  type ProjectCard,
+} from "./harness.js";
 import { ACTIVE_MODEL, checkOllamaAvailable } from "./embedder.js";
 
 const PROJECT_PATH = process.env["ZC_PROJECT_PATH"] || cwd();
@@ -498,6 +507,89 @@ const TOOLS: Tool[] = [
         session_token: { type: "string", description: "Session token (optional)" },
       },
       required: ["broadcast_id", "agent_id"],
+    },
+  },
+
+  // ── v0.10.0 Harness Engineering ─────────────────────────────────────────────
+  {
+    name: "zc_index_project",
+    description:
+      "Walk the current project and index every source file into the KB with an L0 (first 100-char purpose) + L1 (first 1500-char detail) summary. " +
+      "Run once per project after initial clone — afterward, agents call zc_file_summary(path) for 'check/review' questions instead of Read. " +
+      "Idempotent: re-running refreshes summaries for changed files. " +
+      "Excludes node_modules, dist, build, .git, coverage, .worktrees by default. " +
+      "This is the foundation of the v0.10.0 harness — Tier 1 (KB) becomes the default, Tier 2 (Read) the exception.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        excludes:   { type: "array", items: { type: "string" }, description: "Path prefixes to skip (overrides default)" },
+        extensions: { type: "array", items: { type: "string" }, description: "File extensions to index (e.g. '.ts', '.py')" },
+        max_bytes:  { type: "integer", minimum: 1024, description: "Max file size to read in bytes (default 262144)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "zc_file_summary",
+    description:
+      "Return the L0 (one-line purpose) + L1 (1500-char detail) summary for a single file — no Read required. " +
+      "The primary Tier-1 verb for check/review questions. ~400 tokens vs ~4000 for a full Read. " +
+      "Returns stale=true if the file on disk is newer than the indexed version (run zc_index_project to refresh, or the PostEdit hook will do it automatically).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path relative to project root (or absolute)" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "zc_project_card",
+    description:
+      "Return (or update) the per-project orientation card: stack + layout + state + gotchas + hot_files. " +
+      "Call once per session after zc_recall_context to replace the Read-CLAUDE.md / ls / Glob ritual. ~500 tokens vs ~8k. " +
+      "Pass any of stack/layout/state/gotchas/hot_files to UPDATE the card; omit them to READ it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        stack:     { type: "string", description: "e.g. 'Node 22 + TypeScript + SQLite + MCP'" },
+        layout:    { type: "string", description: "Top-level dirs with one-line purpose each" },
+        state:     { type: "string", description: "Current work state / sprint / pending" },
+        gotchas:   { type: "string", description: "Known pitfalls and constraints" },
+        hot_files: { type: "array", items: { type: "string" }, description: "Top-N frequently-edited paths" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "zc_check",
+    description:
+      "Memory-first answer wrapper: searches the KB for the question and returns top hits with a confidence score. " +
+      "Use this BEFORE reaching for Read/Grep — if the KB answer is high-confidence, skip the file read entirely. " +
+      "Confidence levels: high (use this), medium (corroborate), low (might miss details), none (Read required).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "Natural-language question" },
+        path:     { type: "string", description: "Optional: scope search to one source file" },
+      },
+      required: ["question"],
+    },
+  },
+  {
+    name: "zc_capture_output",
+    description:
+      "Store a long bash/tool output in the KB and return a compact summary (head + tail + omission marker). " +
+      "Called by the PostToolUse bash hook automatically; callable directly when an agent knows it ran a noisy command. " +
+      "Full output becomes FTS-searchable via source='tool_output/<hash>'. Dedup by sha256(cmd+stdout).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command:   { type: "string", description: "The command that was run" },
+        stdout:    { type: "string", description: "Full output" },
+        exit_code: { type: "integer", description: "Process exit code" },
+      },
+      required: ["command", "stdout", "exit_code"],
     },
   },
 ];
@@ -1217,6 +1309,119 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             text: acked
               ? `Broadcast #${broadcast_id} acknowledged by '${ackAgentId}'.`
               : `Broadcast #${broadcast_id} not found.`,
+          }],
+        };
+      }
+
+      // ── v0.10.0 Harness Engineering ──────────────────────────────────────────
+      case "zc_index_project": {
+        const { excludes, extensions, max_bytes } = args as {
+          excludes?: string[]; extensions?: string[]; max_bytes?: number;
+        };
+        const res = await indexProject(PROJECT_PATH, { excludes, extensions, maxBytes: max_bytes });
+        return {
+          content: [{
+            type: "text",
+            text: `Indexed ${res.filesIndexed} of ${res.filesScanned} files (${res.filesSkipped} skipped, ${(res.bytesRead / 1024).toFixed(1)} KB, ${res.elapsedMs}ms). ` +
+                  `Semantic summaries: ${res.semanticSummaries ? "ENABLED (Ollama)" : "DISABLED (truncation fallback — see logs)"}. ` +
+                  `Excluded prefixes: ${res.excluded.join(", ")}`,
+          }],
+        };
+      }
+
+      case "zc_file_summary": {
+        const { path: summaryPath } = args as { path: string };
+        const sum = getFileSummary(PROJECT_PATH, summaryPath);
+        if (!sum) {
+          return {
+            content: [{
+              type: "text",
+              text: `[not indexed] ${summaryPath}\nRun zc_index_project first, or Read the file directly if you're about to edit it.`,
+            }],
+          };
+        }
+        const staleFlag = sum.stale ? " [STALE — file newer than index]" : "";
+        return {
+          content: [{
+            type: "text",
+            text: `## ${sum.source}${staleFlag}\n` +
+                  `**indexed:** ${sum.indexedAt}\n\n` +
+                  `### L0 (purpose)\n${sum.l0 || "(empty)"}\n\n` +
+                  `### L1 (detail)\n${sum.l1 || "(empty)"}`,
+          }],
+        };
+      }
+
+      case "zc_project_card": {
+        const { stack, layout, state, gotchas, hot_files } = args as Partial<{
+          stack: string; layout: string; state: string; gotchas: string; hot_files: string[];
+        }>;
+        const isWrite = stack !== undefined || layout !== undefined || state !== undefined ||
+                        gotchas !== undefined || hot_files !== undefined;
+        let card: ProjectCard;
+        if (isWrite) {
+          card = setProjectCard(PROJECT_PATH, {
+            ...(stack    !== undefined && { stack    }),
+            ...(layout   !== undefined && { layout   }),
+            ...(state    !== undefined && { state    }),
+            ...(gotchas  !== undefined && { gotchas  }),
+            ...(hot_files !== undefined && { hotFiles: hot_files }),
+          });
+        } else {
+          card = getProjectCard(PROJECT_PATH);
+        }
+        if (!card.updatedAt) {
+          return {
+            content: [{
+              type: "text",
+              text: `No project card yet. Populate with zc_project_card({stack, layout, state, gotchas, hot_files}).`,
+            }],
+          };
+        }
+        return {
+          content: [{
+            type: "text",
+            text: `# Project Card (updated ${card.updatedAt})\n\n` +
+                  `**Stack:** ${card.stack || "—"}\n\n` +
+                  `**Layout:**\n${card.layout || "—"}\n\n` +
+                  `**State:** ${card.state || "—"}\n\n` +
+                  `**Gotchas:** ${card.gotchas || "—"}\n\n` +
+                  `**Hot files:** ${card.hotFiles.length ? card.hotFiles.join(", ") : "—"}`,
+          }],
+        };
+      }
+
+      case "zc_check": {
+        const { question, path: scopePath } = args as { question: string; path?: string };
+        const hits = await searchKnowledge(PROJECT_PATH, [question]);
+        const filtered = scopePath
+          ? hits.filter((h) => h.source.includes(scopePath))
+          : hits;
+        const result = checkAnswer(PROJECT_PATH, question, filtered.slice(0, 5));
+        return {
+          content: [{
+            type: "text",
+            text: `## Check: "${result.question}"\n` +
+                  `**answered:** ${result.answered} | **confidence:** ${result.confidence}\n\n` +
+                  (result.sources.length
+                    ? `**sources:** ${result.sources.join(", ")}\n\n${result.snippet}\n\n`
+                    : ``) +
+                  `**suggestion:** ${result.suggestion}`,
+          }],
+        };
+      }
+
+      case "zc_capture_output": {
+        const { command: capCmd, stdout: capOut, exit_code: capExit } = args as {
+          command: string; stdout: string; exit_code: number;
+        };
+        const cap = captureToolOutput(PROJECT_PATH, capCmd, capOut, capExit);
+        return {
+          content: [{
+            type: "text",
+            text: `Captured ${cap.lineCount} lines (hash=${cap.hash.slice(0,12)}, exit=${cap.exitCode}). ` +
+                  `Full output searchable via source='${cap.fullRef}'.\n\n` +
+                  `## Summary\n${cap.summary}`,
           }],
         };
       }

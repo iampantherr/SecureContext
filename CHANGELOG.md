@@ -4,6 +4,59 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.10.0] — 2026-04-17 — Harness Engineering: semantic summaries + project card + bash capture
+
+### Added — Tier A (core harness primitives)
+- **`zc_index_project(options?)`** — walks the project tree and indexes every source file with an L0 (one-line purpose) + L1 (detailed summary). Excludes `node_modules`, `dist`, `build`, `.git`, `coverage`, `.worktrees` by default. Idempotent.
+- **`zc_file_summary(path)`** — direct accessor for a file's L0/L1. The primary Tier-1 verb: replaces `Read` for "check/review/what-does-X-do" questions. ~400 tokens vs ~4000 for a full Read. Flags `stale=true` if file mtime > indexed-at.
+- **`zc_project_card(fields?)`** — per-project orientation card (stack + layout + state + gotchas + hot_files). Read with no args, update by passing any subset. ~500 tokens replaces the ~8k orientation ritual (`ls` + `Read CLAUDE.md` + Glob + Read-a-few-files).
+- **`zc_check(question, path?)`** — memory-first answer wrapper. Searches KB, returns top hits with confidence scoring (`high`/`medium`/`low`/`none`). Forces search-first as the default path.
+- **`zc_capture_output(command, stdout, exit_code)`** — archives long bash output into the KB (FTS-searchable) and returns a compact head+tail summary. SHA256-deduplicated by command+stdout.
+
+### Added — Tier B (semantic summarizer + hooks)
+- **`src/summarizer.ts`** — local Ollama chat model pipeline for semantic L0/L1. Auto-probes installed models from a preference list (coder-first: `qwen2.5-coder:14b` → 7b → 32b → deepseek-coder → codellama → starcoder → general models). Graceful fallback to deterministic truncation when Ollama is unreachable or no supported model installed.
+- **Prompt-injection scanner** — detects adversarial patterns in file content (`ignore previous instructions`, `new system prompt`, etc.). Wraps content in explicit `[BEGIN/END FILE CONTENT]` boundary markers in the prompt so the model treats it as data, not directive. Flags `injectionDetected=true` for auditing.
+- **Model allowlist** — `ZC_SUMMARY_MODEL_ALLOWLIST` env var restricts which models are acceptable (defense against misconfigured overrides).
+- **VRAM lifecycle control** — `ZC_SUMMARY_KEEP_ALIVE=30s` (default) makes Ollama unload the model from VRAM 30s after the last summarization request. Model loads for the indexing burst, unloads when idle.
+- **Three PostToolUse/PreToolUse hook scripts** (`hooks/preread-dedup.mjs`, `postedit-reindex.mjs`, `postbash-capture.mjs`) + `hooks/INSTALL.md`. Opt-in; each auto-enforces one harness rule.
+
+### Added — operator-facing
+- **`AGENT_HARNESS.md`** — canonical ruleset every agent follows when using SC. Agent-agnostic (Claude, GPT, Gemini, etc.).
+- **Live harness test suite** (`scripts/live-harness-test.mjs`) — 52 assertions covering migration, summarizer probe, semantic generation, injection detection, indexProject end-to-end, file summary round-trip, project card merge, bash capture dedup, session read log primitives, check confidence buckets. All passing against `qwen2.5-coder:14b`.
+
+### Schema — migration 012
+- `project_card(id, stack, layout, state, gotchas, hot_files, updated_at)` — singleton per project
+- `session_read_log(session_id, path, read_at)` — PreRead dedup backend
+- `tool_output_digest(hash, command, summary, exit_code, full_ref, created_at)` — bash archive
+
+### Changed
+- `indexContent()` gains optional `precomputedL0` / `precomputedL1` params so callers can inject semantic summaries. Backward compatible — omitted params fall back to first-N-char truncation.
+- Version: `0.9.0` → `0.10.0` (minor, additive — no breaking changes).
+
+### Config additions
+- `ZC_SUMMARY_ENABLED` (default on), `ZC_SUMMARY_MODEL` (auto-probe), `ZC_SUMMARY_TIMEOUT_MS` (30s), `ZC_SUMMARY_CONCURRENCY` (4), `ZC_SUMMARY_KEEP_ALIVE` (`30s`), `ZC_SUMMARY_MODEL_ALLOWLIST` (empty = any)
+- `ZC_BASH_CAPTURE_LINES` (50), `ZC_BASH_TAIL_LINES` (20)
+- `ZC_READ_DEDUP_ENABLED` (default on)
+- `ZC_INDEX_PROJECT_EXCLUDES` (default: `node_modules,dist,build,.git,coverage,.worktrees,.next,.cache,out`)
+
+### Token savings (measured, perfect-usage baseline)
+| Scenario | v0.9.0 | v0.10.0 harness | Reduction |
+|---|---|---|---|
+| Session startup (known project) | ~5,000 | ~2,000 | 60% |
+| "Review/check" question | ~2,000 | ~400 | 80% |
+| Bug-fix session (5 files) | ~24,000 | ~8,000 | 67% |
+| Heavy bash session (10 big outputs) | ~40,000 | ~1,000 | 98% |
+| 10-session project total | ~200,000 | ~100,000 | 50% |
+
+### Security
+- All 449 unit tests pass; live harness suite 52/52 pass.
+- Summarizer egress restricted to `127.0.0.1:11434` — no external network calls.
+- Summarizer response validation (format parser rejects malformed outputs; length caps on L0/L1).
+- Prompt-injection scanner + "treat as data" prompt framing.
+- Fail-safe design: every hook falls through on error (never breaks the agent).
+
+---
+
 ## [0.9.0] — 2026-04-17 — RBAC Default-On & Channel-Key Enforcement (**BREAKING**)
 
 ### Breaking changes

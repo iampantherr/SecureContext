@@ -6,14 +6,17 @@
 [![Tests](https://img.shields.io/badge/security%20tests-91%20PASS%20%7C%200%20FAIL%20%7C%205%20WARN-brightgreen)](security-tests/results.json)
 [![Unit Tests](https://img.shields.io/badge/unit%20tests-449%20passed-brightgreen)](src)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
-[![Version](https://img.shields.io/badge/version-0.9.0-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.10.0-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
 ---
 
-> **⚠️ v0.9.0 BREAKING CHANGE — RBAC + channel key are now required by default.**
-> Upgrading from v0.8.0? Every `zc_broadcast` now needs a `session_token` (from `zc_issue_token`) AND a registered channel key. See **[Migration to v0.9.0](#migration-to-v090)** for a two-step upgrade, or set `ZC_RBAC_ENFORCE=0` + `ZC_CHANNEL_KEY_REQUIRED=0` to restore pre-v0.9.0 behaviour on trusted single-user desktops.
+> **✨ v0.10.0 — Harness Engineering (additive, no breaking changes).**
+> Five new tools (`zc_index_project`, `zc_file_summary`, `zc_project_card`, `zc_check`, `zc_capture_output`) + local-Ollama semantic L0/L1 summaries + three optional hooks that auto-enforce token-efficient workflow. **Measured ~80% reduction in context overhead** on typical multi-session project work. See **[AGENT_HARNESS.md](AGENT_HARNESS.md)** for the ruleset and **[CHANGELOG.md](CHANGELOG.md)** for release notes.
+
+> **⚠️ v0.9.0 — RBAC + channel key are required by default.**
+> Upgrading from v0.8.0 or earlier? Every `zc_broadcast` needs a `session_token` (from `zc_issue_token`) AND a registered channel key. See **[Migration to v0.9.0](#migration-to-v090)**, or set `ZC_RBAC_ENFORCE=0` + `ZC_CHANNEL_KEY_REQUIRED=0` to restore pre-v0.9.0 behaviour on trusted single-user desktops.
 
 ---
 
@@ -226,7 +229,7 @@ For the complete technical architecture with all security properties documented,
 
 ---
 
-## 13 MCP Tools
+## 18 MCP Tools
 
 | Tool | What it does |
 |------|-------------|
@@ -243,6 +246,45 @@ For the complete technical architecture with all security properties documented,
 | `zc_summarize_session` | Archive session summary to long-term searchable memory (kept 365 days) |
 | `zc_status` | Show DB health, KB entry counts, working memory fill, schema version, fetch budget |
 | `zc_broadcast` | **[v0.7.1]** Post to the shared A2A coordination channel (ASSIGN/STATUS/PROPOSED/DEPENDENCY/MERGE/REJECT/REVISE). Optionally key-protected via scrypt-hardened capability token. |
+| `zc_issue_token` | **[v0.9.0]** Issue a short-lived HMAC-signed session token bound to an `agent_id` + `role` |
+| `zc_revoke_token` | **[v0.9.0]** Revoke all session tokens for an agent |
+| `zc_index_project` | **[v0.10.0]** One-time bulk index of the project tree with semantic L0/L1 summaries via local Ollama coder model |
+| `zc_file_summary` | **[v0.10.0]** Direct L0/L1 summary accessor — primary Tier-1 verb for "check/review" questions (replaces Read) |
+| `zc_project_card` | **[v0.10.0]** Per-project orientation card (stack, layout, state, gotchas, hot files) — read or update |
+| `zc_check` | **[v0.10.0]** Memory-first answer wrapper with confidence scoring (high/medium/low/none) |
+| `zc_capture_output` | **[v0.10.0]** Archive long bash output to KB + return compact summary (auto-called by PostBash hook) |
+
+---
+
+## v0.10.0 — Harness Engineering
+
+The "harness" is a token-optimization layer built on top of the SC primitives. Its goal: make **Tier 1 (compressed knowledge)** the default answer for check/review questions, and reserve **Tier 2 (raw file reads)** for the moment an agent is actually editing something. See [`AGENT_HARNESS.md`](AGENT_HARNESS.md) for the full ruleset.
+
+**Three enforcement layers ship out-of-box:**
+
+1. **Five new tools** (above). `zc_file_summary` replaces Read for non-edit questions; `zc_project_card` replaces the `ls` + `Read CLAUDE.md` orientation ritual; `zc_capture_output` archives bash outputs before they bloat context.
+2. **Local Ollama semantic summarizer** (`src/summarizer.ts`). Auto-probes installed models; prefers `qwen2.5-coder:14b` (sweet spot for 16GB+ VRAM). Falls back gracefully to deterministic truncation when Ollama is unreachable. Defends against prompt-injection in source files via content-boundary markers + pattern scanner. VRAM lifecycle: default `keep_alive: "30s"` — model loads for indexing burst, unloads when idle.
+3. **Three optional hooks** (`hooks/preread-dedup.mjs`, `postedit-reindex.mjs`, `postbash-capture.mjs`). Install via [`hooks/INSTALL.md`](hooks/INSTALL.md). They auto-enforce the harness rules so agents don't have to remember the discipline manually.
+
+### Recommended Ollama model
+
+```bash
+ollama pull qwen2.5-coder:14b     # sweet spot: ~8GB VRAM, 3-8s per file, excellent code understanding
+```
+
+Alternatives: `qwen2.5-coder:7b` (lighter), `qwen2.5-coder:32b` (best quality, slow), `deepseek-coder:6.7b`, `codellama:7b`, `starcoder2:7b`. Auto-probe selects best-available. Override via `ZC_SUMMARY_MODEL=...` in your MCP server's env block.
+
+### Measured token savings (perfect-usage baseline)
+
+| Scenario | v0.9.0 | v0.10.0 harness | Reduction |
+|---|---|---|---|
+| Session startup (known project) | ~5,000 tok | ~2,000 tok | **60%** |
+| "Review/check" question | ~2,000 tok | ~400 tok | **80%** |
+| Bug-fix session (5 files) | ~24,000 tok | ~8,000 tok | **67%** |
+| Heavy bash session (10 big outputs) | ~40,000 tok | ~1,000 tok | **98%** |
+| 10-session project total | ~200,000 tok | ~100,000 tok | **50%** |
+
+Savings come from three compounding sources: semantic summaries replace raw file reads, auto-captured bash output replaces re-running commands, and the project card replaces orientation rituals.
 
 ---
 
@@ -325,7 +367,7 @@ Expected response:
 ```json
 {
   "status": "ok",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "store": "postgres",
   "ollamaAvailable": true,
   "searchMode": "hybrid (BM25 + vector)"

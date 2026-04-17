@@ -260,6 +260,63 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 12,
+    description: "v0.10.0 Harness Engineering: project_card, session_read_log, tool_output_digest",
+    up: (db) => {
+      // ── project_card ─────────────────────────────────────────────────────────
+      // Per-project "card" — the 500-token orientation summary returned by
+      // zc_project_card(). Singleton row (CHECK(id=1)): each project DB describes
+      // ITS OWN project. Fields are opaque TEXT so the agent/operator controls
+      // what goes in. hot_files is a JSON array of top-N frequently-edited paths.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_card (
+          id          INTEGER PRIMARY KEY CHECK(id = 1),
+          stack       TEXT    NOT NULL DEFAULT '',
+          layout      TEXT    NOT NULL DEFAULT '',
+          state       TEXT    NOT NULL DEFAULT '',
+          gotchas     TEXT    NOT NULL DEFAULT '',
+          hot_files   TEXT    NOT NULL DEFAULT '[]',
+          updated_at  TEXT    NOT NULL
+        );
+      `);
+
+      // ── session_read_log ─────────────────────────────────────────────────────
+      // Per-session file-read log. Powers the PreToolUse Read dedup hook:
+      // before a Read fires, the hook queries this table — if the path is
+      // already present for the current session, block and force the agent
+      // to use zc_file_summary / zc_search instead. Session boundary = a
+      // SessionStart event, which wipes rows for the previous session_id.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_read_log (
+          session_id  TEXT NOT NULL,
+          path        TEXT NOT NULL,
+          read_at     TEXT NOT NULL,
+          PRIMARY KEY (session_id, path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_srl_session ON session_read_log(session_id);
+      `);
+
+      // ── tool_output_digest ───────────────────────────────────────────────────
+      // Bash-output archive. PostToolUse bash hook summarizes long outputs and
+      // stores them here (plus a full-content row in `knowledge` for FTS).
+      // hash = sha256(cmd + stdout) — dedup identical re-runs.
+      // summary kept compact for injection back into agent context.
+      // full_ref = the `source` key in the knowledge table (FTS-searchable).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tool_output_digest (
+          hash        TEXT    PRIMARY KEY,
+          command     TEXT    NOT NULL,
+          summary     TEXT    NOT NULL,
+          exit_code   INTEGER NOT NULL,
+          full_ref    TEXT    NOT NULL,
+          created_at  TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tod_cmd ON tool_output_digest(command, created_at DESC);
+      `);
+    },
+  },
+
 ];
 
 /**

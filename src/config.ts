@@ -14,6 +14,20 @@
  *   ZC_STALE_DAYS_SUMMARY  — Days before session summaries expire (default: 365)
  *   ZC_RBAC_ENABLED        — "1" to force-enable RBAC even without registered sessions
  *   ZC_CHAIN_DISABLED      — "1" to disable hash chain (not recommended, audit use only)
+ *
+ *   ── v0.10.0 Harness Engineering ──
+ *   ZC_BASH_CAPTURE_LINES  — Line threshold above which bash output is auto-captured to KB (default: 50)
+ *   ZC_BASH_TAIL_LINES     — Lines from end of output to include in the compact summary (default: 20)
+ *   ZC_READ_DEDUP_ENABLED  — "0" to disable per-session Read dedup guard (default: enabled)
+ *   ZC_INDEX_PROJECT_EXCLUDES — Comma-separated glob patterns excluded from zc_index_project
+ *                               (default: node_modules,dist,build,.git,coverage,.worktrees)
+ *   ZC_SUMMARY_ENABLED     — "0" to force deterministic truncation summaries (default: enabled if Ollama reachable)
+ *   ZC_SUMMARY_MODEL       — Force a specific Ollama chat model (default: auto-probe coder preferred)
+ *   ZC_SUMMARY_TIMEOUT_MS  — Per-file summarization timeout (default: 30000)
+ *   ZC_SUMMARY_CONCURRENCY — Concurrent summarization requests during indexProject (default: 4)
+ *   ZC_SUMMARY_KEEP_ALIVE  — Ollama keep_alive — how long to keep model in VRAM after last request
+ *                            (default: "30s"; use "0" to unload immediately, "-1" to keep forever)
+ *   ZC_SUMMARY_MODEL_ALLOWLIST — Comma-separated model name allowlist (default: empty = any installed model OK)
  */
 
 import { homedir } from "node:os";
@@ -23,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.9.0",
+  VERSION: "0.10.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -125,4 +139,75 @@ export const Config = {
   // Hash chain enabled by default for all new broadcasts (Chapter 13 Biba integrity)
   // Set ZC_CHAIN_DISABLED=1 to disable (not recommended — disables tamper detection)
   CHAIN_ENABLED: env["ZC_CHAIN_DISABLED"] !== "1",
+
+  // ── v0.10.0 Harness Engineering ──────────────────────────────────────────
+  // Bash output auto-capture threshold. When a bash tool output exceeds this
+  // line count, the PostToolUse hook pushes the full output into KB and
+  // replaces it in agent context with a compact summary.
+  // Empirically, 50 lines ≈ 400 tokens — above that, savings compound fast.
+  BASH_CAPTURE_LINES: parseInt(env["ZC_BASH_CAPTURE_LINES"] ?? "50", 10),
+
+  // Lines preserved in the compact summary (head + tail slice).
+  // 20 tail lines = ~160 tokens, enough for an error message + stack trace.
+  BASH_TAIL_LINES:   parseInt(env["ZC_BASH_TAIL_LINES"] ?? "20", 10),
+
+  // Per-session Read dedup. Blocks re-Read of a path already Read this session
+  // unless the agent just wrote to it (or passes force=true).
+  READ_DEDUP_ENABLED: env["ZC_READ_DEDUP_ENABLED"] !== "0",
+
+  // Default exclusions for zc_index_project walker. Comma-separated glob-like
+  // path prefixes. Override with ZC_INDEX_PROJECT_EXCLUDES.
+  INDEX_PROJECT_EXCLUDES: (env["ZC_INDEX_PROJECT_EXCLUDES"] ??
+    "node_modules,dist,build,.git,coverage,.worktrees,.next,.cache,out").split(","),
+
+  // Max file size (bytes) the project indexer will read. Skips binaries/lockfiles.
+  INDEX_MAX_FILE_BYTES: 256 * 1024,  // 256 KB
+
+  // Source-code extensions the project indexer will summarize.
+  INDEX_FILE_EXTENSIONS: [
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+    ".py", ".rs", ".go", ".java", ".kt", ".scala",
+    ".rb", ".php", ".cs", ".cpp", ".c", ".h", ".hpp",
+    ".sh", ".ps1", ".psm1",
+    ".md", ".mdx", ".txt",
+    ".json", ".yaml", ".yml", ".toml",
+    ".sql", ".graphql", ".proto",
+  ],
+
+  // ── Semantic Summaries (Ollama chat) ─────────────────────────────────────
+  // When enabled, indexProject uses a local Ollama chat model (code-specialized
+  // preferred) to generate L0/L1 summaries instead of first-N-char truncation.
+  // Falls back to truncation if Ollama is unreachable or no suitable model
+  // is installed. See src/summarizer.ts PREFERRED_MODELS for the probe order.
+  SUMMARY_ENABLED:        env["ZC_SUMMARY_ENABLED"] !== "0",
+
+  // User override — if set, bypass the auto-probe and use this model exclusively.
+  // Empty string means "use auto-probe".
+  SUMMARY_MODEL_OVERRIDE: env["ZC_SUMMARY_MODEL"] ?? "",
+
+  // Per-file timeout. 30s comfortably fits a 7B coder model on CPU;
+  // raise if using a 32B model or if you see frequent timeouts.
+  SUMMARY_TIMEOUT_MS:     parseInt(env["ZC_SUMMARY_TIMEOUT_MS"] ?? "30000", 10),
+
+  // Max file chars sent to the model. Larger files are truncated for
+  // summarization only (the full file remains in KB FTS). 8000 chars
+  // ≈ 2000 tokens — safe for any 4k-context model.
+  SUMMARY_MAX_INPUT_CHARS: parseInt(env["ZC_SUMMARY_MAX_INPUT_CHARS"] ?? "8000", 10),
+
+  // Concurrent summarization requests during indexProject. 4 is comfortable
+  // for a 14B coder on 16GB+ VRAM (RTX 4070/4080/4090/5090 all handle it).
+  // Drop to 2 for 8GB cards, or raise to 6-8 on a dedicated inference box.
+  SUMMARY_CONCURRENCY:     parseInt(env["ZC_SUMMARY_CONCURRENCY"] ?? "4", 10),
+
+  // VRAM lifecycle: how long Ollama keeps the model loaded after the last
+  // request. "30s" = model warms up on first index call, stays hot through
+  // the batch (each request resets the timer), unloads shortly after the
+  // batch finishes. Set "0" to unload immediately, "-1" to keep forever.
+  SUMMARY_KEEP_ALIVE:      env["ZC_SUMMARY_KEEP_ALIVE"] ?? "30s",
+
+  // Optional allowlist. When set, ONLY these model names are acceptable —
+  // blocks misconfigured ZC_SUMMARY_MODEL or a malicious override from
+  // pointing the summarizer at an untrusted model.
+  SUMMARY_MODEL_ALLOWLIST: ((env["ZC_SUMMARY_MODEL_ALLOWLIST"] ?? "")
+    .split(",").map((s) => s.trim()).filter(Boolean)) as string[],
 } as const;
