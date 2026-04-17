@@ -50,7 +50,7 @@ cleanTestDb(PROJ_RC);
 cleanTestDb(PROJ_TA);
 cleanTestDb("C:/Users/Amit/AI_projects/CleanCheck");
 
-console.log("\n=== LIVE v0.8.0 TEST SUITE — RBAC + HASH CHAIN + PARALLEL PROJECTS ===\n");
+console.log("\n=== LIVE v0.9.0 TEST SUITE — RBAC + HASH CHAIN + PARALLEL PROJECTS ===\n");
 
 // --- 1. Token issuance & format ---
 console.log("--- Test 1: Token issuance & format (Ch.6 Session Tokens) ---");

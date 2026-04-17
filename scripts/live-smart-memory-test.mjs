@@ -1,5 +1,5 @@
 /**
- * Live Smart Working Memory test — v0.8.0
+ * Live Smart Working Memory test — v0.9.0
  * Verifies that working memory limits scale dynamically with project complexity.
  *
  * Run: node scripts/live-smart-memory-test.mjs
