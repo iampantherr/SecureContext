@@ -43,6 +43,11 @@ import {
 } from "./access-control.js";
 import { checkIntegrity, type IntegrityResult } from "./integrity.js";
 import { getCurrentSchemaVersion } from "./migrations.js";
+// Sprint 1 Phase B: telemetry interception
+import { recordToolCall, newCallId, formatCostHeader } from "./telemetry.js";
+import { computeCost } from "./pricing.js";
+import { logger, newTraceId } from "./logger.js";
+import { randomUUID } from "node:crypto";
 import {
   indexProject,
   getFileSummary,
@@ -594,6 +599,30 @@ const TOOLS: Tool[] = [
       required: ["command", "stdout", "exit_code"],
     },
   },
+  {
+    name: "zc_logs",
+    description:
+      "Query structured telemetry logs from the harness (Sprint 1 v0.11.0). " +
+      "Components: telemetry, outcomes, learnings-mirror, skills, mutations, budget, compaction, " +
+      "tasks, ownership, routing, retrieval. Returns newest-first. When ZC_AGENT_ID env is set, " +
+      "results are agent-scoped (only entries matching this agent_id or system entries). " +
+      "Use this to diagnose cost spikes, trace outcome resolution, or correlate events across " +
+      "components via trace_id. Logs are ON THE LOCAL DISK — this tool is local-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        component:     { type: "string", description: "One of: telemetry, outcomes, learnings-mirror, skills, mutations, budget, compaction, tasks, ownership, routing, retrieval" },
+        since_date:    { type: "string", description: "Inclusive ISO date YYYY-MM-DD (default: today)" },
+        until_date:    { type: "string", description: "Inclusive ISO date YYYY-MM-DD (default: today)" },
+        min_level:     { type: "string", enum: ["DEBUG", "INFO", "WARN", "ERROR"], description: "Minimum severity (default: INFO)" },
+        event_contains: { type: "string", description: "Substring to match (case-insensitive) against event name" },
+        trace_id:      { type: "string", description: "Exact trace_id match (for cross-log correlation)" },
+        agent_id:      { type: "string", description: "Filter by agent_id (falls back to ZC_AGENT_ID env)" },
+        limit:         { type: "integer", minimum: 1, maximum: 5000, description: "Max rows (default: 200)" },
+      },
+      required: ["component"],
+    },
+  },
 ];
 
 // ─── Server setup ──────────────────────────────────────────────────────────────
@@ -740,8 +769,15 @@ async function _handleRemoteTool(
   }
 }
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+/**
+ * Inner tool dispatcher. Implements all tool logic. Wrapped by the outer
+ * setRequestHandler below which adds Sprint 1 telemetry capture + cost
+ * header injection.
+ */
+async function dispatchToolCall(
+  name: string,
+  args: Record<string, unknown> | undefined,
+): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
 
   // ── HTTP client mode ───────────────────────────────────────────────────────
   // When ZC_API_URL is configured, proxy storage-touching tools to the API
@@ -1447,6 +1483,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "zc_logs": {
+        const { readLogs } = await import("./logger.js");
+        const lArgs = args as {
+          component: string;
+          since_date?: string;
+          until_date?: string;
+          min_level?: "DEBUG" | "INFO" | "WARN" | "ERROR";
+          event_contains?: string;
+          trace_id?: string;
+          agent_id?: string;
+          limit?: number;
+        };
+        // Agent-scope: fall back to ZC_AGENT_ID env when not supplied.
+        // When neither is set, no agent-scoping (system/admin view).
+        const effectiveAgentId = lArgs.agent_id ?? process.env.ZC_AGENT_ID ?? undefined;
+        const entries = readLogs({
+          component:      lArgs.component,
+          sinceDate:      lArgs.since_date,
+          untilDate:      lArgs.until_date,
+          minLevel:       lArgs.min_level,
+          eventContains:  lArgs.event_contains,
+          traceId:        lArgs.trace_id,
+          agentId:        effectiveAgentId,
+          limit:          lArgs.limit,
+        });
+
+        if (entries.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `No log entries found for component='${lArgs.component}' with the given filters.`,
+            }],
+          };
+        }
+
+        const header =
+          `## ${lArgs.component} (${entries.length} entries, newest first` +
+          (effectiveAgentId ? `, scoped to agent_id='${effectiveAgentId}'` : ``) +
+          `)\n`;
+        const body = entries.map((e) => {
+          const ctx = e.context ? ` ${JSON.stringify(e.context)}` : "";
+          const trace = e.trace_id ? ` [${e.trace_id}]` : "";
+          return `${e.ts} ${e.level.padEnd(5)} ${e.event}${trace}${ctx}`;
+        }).join("\n");
+
+        return { content: [{ type: "text", text: header + body }] };
+      }
+
       default:
         return {
           content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -1460,6 +1544,117 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+}  // end dispatchToolCall
+
+// ─── Sprint 1 Phase B: Tool dispatch wrapper with telemetry ─────────────────
+// Wraps every MCP tool call with:
+//   - Per-call telemetry (cost, latency, status) into the tool_calls table
+//     via src/telemetry.ts (hash-chained for tamper detection)
+//   - [cost: ...] header line prepended to every response (so the agent
+//     learns its own cost in the live loop, per §6.5)
+//   - Cross-log trace_id for correlation across telemetry/outcomes/etc
+
+// MCP server-side session UUID. Generated once per process start; identifies
+// "this MCP server instance" for grouping all calls into the same session.
+const MCP_SESSION_ID = `mcp-${randomUUID().slice(0, 12)}`;
+
+// Resolve the agent_id + model from env (set by start-agents.ps1 launchers).
+// Defaults to "default"/"unknown" for ad-hoc / non-A2A use.
+const AGENT_ID    = process.env.ZC_AGENT_ID    || "default";
+const AGENT_MODEL = process.env.ZC_AGENT_MODEL || "unknown";
+
+/** Classify an error for telemetry's error_class taxonomy. */
+function classifyError(e: unknown): "transient" | "permission" | "logic" | "unknown" {
+  const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  if (msg.includes("timeout") || msg.includes("etimedout") || msg.includes("econnrefused")) return "transient";
+  if (msg.includes("permission") || msg.includes("denied") || msg.includes("forbidden") ||
+      msg.includes("unauthorized") || msg.includes("rbac")) return "permission";
+  if (msg.includes("invalid") || msg.includes("required") || msg.includes("expected") ||
+      msg.includes("must be")) return "logic";
+  return "unknown";
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+  const argsObj = (args ?? {}) as Record<string, unknown>;
+
+  const callId  = newCallId();
+  const traceId = newTraceId("call");
+  const t0      = Date.now();
+
+  let status: "ok" | "error" = "ok";
+  let errorClass: "transient" | "permission" | "logic" | "unknown" | undefined;
+  let result:  Awaited<ReturnType<typeof dispatchToolCall>>;
+
+  try {
+    result = await dispatchToolCall(name, argsObj);
+    if (result.isError) {
+      status = "error";
+      errorClass = "logic";
+    }
+  } catch (e) {
+    status = "error";
+    errorClass = classifyError(e);
+    // Re-throw so MCP transport returns the error to the caller
+    // (telemetry write happens in the finally block below)
+    const inputChars  = JSON.stringify(argsObj).length;
+    recordToolCall({
+      callId,
+      sessionId:   MCP_SESSION_ID,
+      agentId:     AGENT_ID,
+      projectPath: PROJECT_PATH,
+      toolName:    name,
+      model:       AGENT_MODEL,
+      inputChars,
+      outputChars: 0,
+      latencyMs:   Date.now() - t0,
+      status,
+      errorClass,
+      traceId,
+    });
+    throw e;
+  }
+
+  // ── Append cost header to response ───────────────────────────────────────
+  // (the agent reads this header to learn its own cost in real time)
+  const inputChars  = JSON.stringify(argsObj).length;
+  const outputText  = result.content.map((c) => c.text ?? "").join("\n");
+  const outputChars = outputText.length;
+
+  const inputTokens  = Math.ceil(inputChars  / 4);
+  const outputTokens = Math.ceil(outputChars / 4);
+  const cost         = computeCost(AGENT_MODEL, inputTokens, outputTokens);
+  const header       = formatCostHeader({
+    inputTokens,
+    outputTokens,
+    cost,
+    latencyMs: Date.now() - t0,
+  });
+
+  // Inject header as the FIRST line of the FIRST text content block
+  if (result.content.length > 0 && result.content[0].type === "text") {
+    result.content[0].text = `${header}\n${result.content[0].text}`;
+  } else {
+    result.content.unshift({ type: "text", text: header });
+  }
+
+  // ── Record telemetry (fire-and-forget; never throws; never blocks return) ──
+  recordToolCall({
+    callId,
+    sessionId:   MCP_SESSION_ID,
+    agentId:     AGENT_ID,
+    projectPath: PROJECT_PATH,
+    toolName:    name,
+    model:       AGENT_MODEL,
+    inputChars,
+    outputChars,
+    latencyMs:   Date.now() - t0,
+    status,
+    errorClass,
+    traceId,
+  });
+
+  return result;
 });
 
 function formatSandboxResult(result: {

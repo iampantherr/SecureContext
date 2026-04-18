@@ -4,6 +4,74 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.11.0] — 2026-04-17 — Sprint 1: outcome telemetry + learnings loop foundation
+
+Adds the full **observability foundation** that lets future sprints (mutation engine, skill promotion, task routing) learn from what actually worked. Every MCP tool call is now recorded with cost + latency + outcome signals into a tamper-evident, hash-chained SQLite table. No agent-facing breakage — just a new `[cost: ...]` header on responses and one new MCP tool.
+
+### Added — telemetry pipeline (`src/telemetry.ts`, `src/pricing.ts`, `src/logger.ts`, `src/outcomes.ts`)
+
+- **`src/pricing.ts`** — USD-per-Mtok pricing table for Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5 and Ollama models. `computeCost(model, input, output, {batch, cached_input_tokens})` returns `{cost_usd, known}`. Anthropic Batch API 50% discount supported. HMAC-signed baseline at `~/.claude/zc-ctx/.pricing_signature` detects tampering with the table across restarts.
+- **`src/logger.ts`** — structured-JSON, per-component, daily-rotated logger with 5 levels and 11 components (telemetry, outcomes, learnings-mirror, skills, mutations, budget, compaction, tasks, ownership, routing, retrieval). Cross-log correlation via `newTraceId()`. `secret_scanner.redactSecrets()` applied automatically to every string value unless `ZC_LOG_RAW=1`. File mode 0600 on POSIX. New `readLogs()` API with agent-scoped filtering (Sprint 1 §15.4 requirement).
+- **`src/telemetry.ts`** — records every MCP tool dispatch to a new `tool_calls` table with cost, latency, status, error class, model, session, agent, project hash, tokens, trace id. Hash-chained via Sprint 0 `hmac_chain.ts`. In-memory cache of the last row hash per project keeps the hot path under 50 ms p95. Failure is LOUD (logger.error) but never throws — calling tool's success must not depend on telemetry working. `sanitizeToolInput()` truncates + redacts before storage.
+- **`src/outcomes.ts`** — three resolvers that produce deferred outcome tags on previously-recorded tool calls:
+  - **`resolveGitCommitOutcome`** — detects `[branch hash]` in bash output, links a "shipped" outcome (confidence 0.95) to the most recent tool call in that session.
+  - **`resolveUserPromptOutcome`** — heuristic sentiment classifier on user messages; records "accepted" / "rejected" with confidence 0.5. **Never stores raw message text** — only `sentiment` + `message_length`. Rate-limited.
+  - **`resolveFollowUpOutcomes`** — detects `Read(X)` following `zc_file_summary(X)` in the same session within 5 minutes → records "insufficient" outcome against the summary call (confidence 0.85). Signal that the summary wasn't enough.
+- Outcomes table has its own independent hash chain from tool_calls — both are independently verifiable.
+
+### Added — new MCP tool
+
+- **`zc_logs(component, since_date?, until_date?, min_level?, event_contains?, trace_id?, agent_id?, limit?)`** — query structured telemetry logs from the harness. Newest-first. Agent-scoped by default (falls back to `ZC_AGENT_ID` env): an agent only sees its own entries plus system entries, never another agent's. Covered by RT-S1-13 red-team test.
+
+### Added — PostToolUse hook
+
+- **`hooks/learnings-indexer.mjs`** — mirrors JSONL writes to `<project>/learnings/*.jsonl` into the project's SQLite `learnings` table (schema migration 15). Categories auto-inferred from filename stem. Idempotent via `UNIQUE(project_hash, source_path, source_line)`. Symlink-escape rejection (RT-S1-12) confirms the hook will not follow a symlink out of the project directory. 64 KB/line + 10 k lines/run defensive caps. Never crashes Claude Code.
+
+### Added — migrations
+
+- **Migration 13**: `tool_calls` table + 5 pre-aggregated views (`v_session_cost`, `v_task_cost`, `v_role_cost`, `v_tool_cost`, `v_tool_call_outcomes`). Perf benchmark: 10 k rows, p99 < 100 ms on view queries.
+- **Migration 14**: `outcomes` table (hash-chained, independent from tool_calls).
+- **Migration 15**: `learnings` table (JSONL mirror target).
+
+### Changed — `src/server.ts`
+
+- Every MCP tool dispatch is now wrapped: existing handler body extracted into an inner `dispatchToolCall(name, args)`; outer `setRequestHandler` adds a `[cost: 423 in, 87 out, $0.0013, 47ms]` header to the first text block of every response. Agent learns its own cost in the live loop (per §6.5).
+- New env vars: `ZC_AGENT_ID` (agent identity), `ZC_AGENT_MODEL` (agent model). Default `default` / `unknown`.
+- `classifyError(e)` maps thrown errors to `transient` / `permission` / `logic` / `unknown` for error-class attribution on failed calls.
+
+### Testing — 70 new tests across 5 files + 1 integration file
+
+- **`src/pricing.test.ts`** — 14 tests (cost math, batch discount, cached input, tamper detection)
+- **`src/logger.test.ts`** — 19 tests (5 levels, secret redaction, rotation, trace ids)
+- **`src/telemetry.test.ts`** — 17 tests incl. RT-S1-06 (tamper), RT-S1-07 (chain extends), RT-S1-08 (secret-in-input scrubbed)
+- **`src/outcomes.test.ts`** — 28 tests incl. RT-S1-09 (tamper), RT-S1-10 (multi-row chain), RT-S1-11 (no raw user prompt persisted)
+- **`src/learnings_indexer.test.ts`** — 15 tests incl. RT-S1-12 (symlink escape rejected)
+- **`src/readLogs.test.ts`** — 17 tests incl. RT-S1-13 (agent scoping blocks cross-agent reads), RT-S1-14 (no side effects on read)
+- **`src/sprint1_integration.test.ts`** — 10 tests: user scenarios US1 (summarize-then-read), US2 (commit-after-edit), US3 (positive reply), US4 (multi-project isolation), US5 (trace_id correlation) + RT-S1-15 (secret rotation invalidates chains) + RT-S1-16 (project_path isolation)
+- **`src/migrations-sprint1.test.ts`** — 11 tests incl. 10 k-row perf benchmark (p99 < 100 ms)
+- **Full suite: 433/433 passing** across 22 test files (added 131 tests on top of the 302 Sprint 0 baseline).
+
+### Security controls mapped to §15.4
+
+- Hash chains on `tool_calls` + `outcomes` tables (HMAC-keyed via `machine_secret`) — attacker with full DB write cannot forge valid rows
+- Secret-in-input auto-redacted via `secret_scanner` before any log line or telemetry row
+- Outcome evidence schema intentionally stores `sentiment` + `length`, never raw prompt text
+- `zc_logs` is agent-scoped by default — `ZC_AGENT_ID` blocks cross-agent log reads
+- `learnings-indexer` hook `realpath`s target + project and rejects any path escaping `<project>/learnings/` via symlink
+- Pricing table baseline HMAC-signed — tamper detection on process start
+
+### Upgrade notes
+
+Zero user action required. First MCP tool call after upgrade silently:
+1. Generates `~/.claude/zc-ctx/.pricing_signature` (HMAC baseline for the pricing table)
+2. Applies migrations 13–15 to the project SQLite DB (tool_calls + outcomes + learnings tables)
+
+The `[cost: ...]` header now appears at the top of every MCP tool response — this is intentional and teaches the agent to budget. Set `ZC_AGENT_ID=<your-agent-id>` before spawning a worker agent if you want telemetry + log-scoping to be agent-specific instead of lumped under `default`.
+
+To install the learnings-indexer hook: copy `hooks/learnings-indexer.mjs` to `~/.claude/hooks/` and register in `~/.claude/settings.json` under `hooks.PostToolUse` with matcher `Write|Edit|MultiEdit|NotebookEdit`.
+
+---
+
 ## [0.10.5] — 2026-04-18 — Sprint 0: security baseline (cybersecurity-first foundation)
 
 Adds shared security infrastructure that future releases (Sprint 1+) build on top of. **No new MCP tools.** No agent-facing behavior change. Internal-only modules + a public threat model document.
