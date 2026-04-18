@@ -26,14 +26,15 @@ Any question that starts with *check*, *verify*, *review*, *remind me*, *what do
 
 ---
 
-## Session lifecycle — the 4-step opening
+## Session lifecycle — the 3-step opening (v0.10.2+)
 
 Every session, in order:
 
 1. **`zc_recall_context()`** — restore working memory (up to 100 facts), recent events, status.
 2. **`zc_project_card()`** — get the 500-token orientation card (stack, layout, state, gotchas, hot files).
 3. **`zc_search([relevant_queries])`** — find prior work on the current topic before exploring.
-4. *(First-time projects only)* **`zc_index_project()`** — bulk-index every source file with semantic L0/L1 summaries. Run once per project; the PostEdit hook keeps it fresh after that.
+
+**Indexing is automatic in v0.10.2+.** A SessionStart hook (`session-start-index-check.ps1`) detects unindexed projects and spawns the background indexer. You don't need to call `zc_index_project()` manually. If the health banner shows `mode=onboarding` or `indexing in progress: X/Y files`, just let it run — your work is not blocked. `zc_file_summary` may return `not indexed` for files not yet processed; fall back to Read for those. By the time you're 3-4 messages in, the KB is fully populated.
 
 Do not `ls`, `Glob`, or `Read CLAUDE.md` to orient. Steps 1–2 replace all of that at ~1/20th the token cost.
 

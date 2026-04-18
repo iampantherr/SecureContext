@@ -228,10 +228,17 @@ export const MIGRATIONS: Migration[] = [
 
   {
     id: 11,
-    description: "Expand broadcasts type CHECK to include LAUNCH_ROLE and RETIRE_ROLE for on-demand agent spawning",
+    description: "Expand broadcasts type CHECK to include LAUNCH_ROLE and RETIRE_ROLE for on-demand agent spawning (COALESCE-safe)",
     up: (db) => {
       // SQLite cannot ALTER a CHECK constraint — must recreate the table.
       // Copy data, drop old, create new with expanded CHECK, restore data.
+      //
+      // v0.10.3 fix: pre-v0.7.0 broadcasts tables had no NOT NULL constraints,
+      // so existing rows can contain NULLs in columns that ARE NOT NULL in the
+      // new schema. A naive `INSERT INTO broadcasts_new SELECT * FROM broadcasts`
+      // fails with "NOT NULL constraint failed: broadcasts_new.task" on any DB
+      // with legacy rows. Use explicit column list + COALESCE to coerce NULLs
+      // to the new-schema defaults.
       db.exec(`
         CREATE TABLE IF NOT EXISTS broadcasts_new (
           id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,7 +258,27 @@ export const MIGRATIONS: Migration[] = [
           row_hash         TEXT    NOT NULL DEFAULT '',
           acked_at         TEXT
         );
-        INSERT INTO broadcasts_new SELECT * FROM broadcasts;
+        INSERT INTO broadcasts_new (
+          id, type, agent_id, task, files, state, summary, depends_on, reason,
+          importance, created_at, session_token_id, prev_hash, row_hash, acked_at
+        )
+        SELECT
+          id,
+          COALESCE(type,             'STATUS'),
+          COALESCE(agent_id,         'default'),
+          COALESCE(task,             ''),
+          COALESCE(files,            '[]'),
+          COALESCE(state,            ''),
+          COALESCE(summary,          ''),
+          COALESCE(depends_on,       '[]'),
+          COALESCE(reason,           ''),
+          COALESCE(importance,       3),
+          COALESCE(created_at,       strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          COALESCE(session_token_id, ''),
+          COALESCE(prev_hash,        'genesis'),
+          COALESCE(row_hash,         ''),
+          acked_at
+        FROM broadcasts;
         DROP TABLE broadcasts;
         ALTER TABLE broadcasts_new RENAME TO broadcasts;
         CREATE INDEX IF NOT EXISTS idx_bc_type  ON broadcasts(type);

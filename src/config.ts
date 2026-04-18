@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.10.2",
+  VERSION: "0.10.3",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -158,7 +158,16 @@ export const Config = {
   // Default exclusions for zc_index_project walker. Comma-separated glob-like
   // path prefixes. Override with ZC_INDEX_PROJECT_EXCLUDES.
   INDEX_PROJECT_EXCLUDES: (env["ZC_INDEX_PROJECT_EXCLUDES"] ??
-    "node_modules,dist,build,.git,coverage,.worktrees,.next,.cache,out").split(","),
+    // Build/cache artefacts
+    "node_modules,dist,build,coverage,.next,.cache,out,target,vendor," +
+    // Version control
+    ".git,.hg,.svn,.worktrees," +
+    // Per-editor / per-agent scratch — not real source
+    ".claude,.cursor,.idea,.vscode,.agent-prompts,.gstack," +
+    // Virtual environments
+    ".venv,venv,__pycache__," +
+    // Logs
+    "logs,tmp").split(","),
 
   // Max file size (bytes) the project indexer will read. Skips binaries/lockfiles.
   INDEX_MAX_FILE_BYTES: 256 * 1024,  // 256 KB

@@ -67,6 +67,28 @@ try {
 # ─── Decision tree ───────────────────────────────────────────────────────────
 
 switch ($status.state) {
+    'error' {
+        # Migration failure / corrupt DB / etc. — surface it so the agent knows
+        # the harness isn't fully functional for this project.
+        @"
+<system-reminder>
+[zc-ctx] SessionStart indexing probe hit an error: $($status.error)
+
+This usually means the SQLite DB for this project is at an old schema that
+can't be migrated automatically. Safe workarounds:
+  - Run 'node SecureContext/scripts/setup-docker.mjs --health-only' to
+    diagnose.
+  - If the error mentions 'NOT NULL constraint', upgrade SC to v0.10.3+
+    (which fixes migration 11's legacy-NULL handling).
+  - Or delete the corrupt DB at ~/.claude/zc-ctx/sessions/<hash>.db and
+    let SC recreate it fresh.
+
+Agent work can still proceed — harness auto-indexing is disabled for this
+project only. Other MCP tools still work.
+</system-reminder>
+"@ | Write-Output
+        exit 0
+    }
     'indexed' {
         # Nothing to do. Silent no-op. Full mode is available.
         exit 0
@@ -91,6 +113,24 @@ that haven't been processed yet, in which case fall back to Read.
         exit 0
     }
     'not-indexed' {
+        # Read the MCP env from ~/.claude/settings.json so the background
+        # indexer inherits ZC_OLLAMA_URL, ZC_SUMMARY_MODEL, etc. Without this,
+        # the indexer would fall back to truncation even when Ollama is
+        # reachable via the Docker port (11435).
+        $mcpEnv = @{}
+        $settingsPath = Join-Path $HOME ".claude\settings.json"
+        if (Test-Path $settingsPath) {
+            try {
+                $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+                $zcCtxNode = $settings.mcpServers.PSObject.Properties['zc-ctx'].Value
+                if ($zcCtxNode -and $zcCtxNode.env) {
+                    foreach ($prop in $zcCtxNode.env.PSObject.Properties) {
+                        $mcpEnv[$prop.Name] = $prop.Value
+                    }
+                }
+            } catch {}
+        }
+
         # Spawn background indexer, detached. Do not block session start.
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName               = 'node'
@@ -99,6 +139,14 @@ that haven't been processed yet, in which case fall back to Read.
         $psi.CreateNoWindow         = $true
         $psi.RedirectStandardOutput = $false
         $psi.RedirectStandardError  = $false
+        # Inherit current env first
+        foreach ($de in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
+            $psi.EnvironmentVariables[$de.Key] = [string]$de.Value
+        }
+        # Then overlay MCP env (ZC_OLLAMA_URL, ZC_SUMMARY_MODEL, ZC_SUMMARY_KEEP_ALIVE, etc.)
+        foreach ($key in $mcpEnv.Keys) {
+            $psi.EnvironmentVariables[$key] = [string]$mcpEnv[$key]
+        }
         try {
             [System.Diagnostics.Process]::Start($psi) | Out-Null
         } catch {

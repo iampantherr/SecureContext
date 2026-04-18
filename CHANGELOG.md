@@ -4,6 +4,48 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.10.3] — 2026-04-17 — Bug fixes: legacy migration + env propagation + excludes
+
+Two bugs that silently broke v0.10.2 auto-indexing on real projects, found during live E2E testing with `Test_Agent_Coordination`:
+
+### Fixed
+
+**1. Migration 11 NULL crash on legacy broadcasts DBs.**
+Pre-v0.7.0 broadcasts table had no NOT NULL constraints, so existing rows had NULLs in `task`, `files`, `summary`, etc. Migration 11's naive `INSERT INTO broadcasts_new SELECT * FROM broadcasts` crashed with `NOT NULL constraint failed: broadcasts_new.task` on any DB migrated from pre-v0.7.0 — which meant every v0.10.0+ harness tool threw on open for those projects. Fixed by replacing the naive SELECT with an explicit column list + `COALESCE(col, default)` for each NOT NULL column.
+
+**2. Background indexer didn't inherit ZC_OLLAMA_URL from MCP env.**
+`session-start-index-check.ps1` spawned `background-index.mjs` with only the PowerShell process env. `ZC_OLLAMA_URL` lives in `~/.claude/settings.json` under the MCP server's env block, not in the shell env. So the spawned indexer defaulted to `http://127.0.0.1:11434/api/embeddings` (native Ollama, not the Docker Ollama on port 11435). When native Ollama was down, every file fell back to truncation summaries — defeating the whole purpose. Fixed by reading the MCP env from `settings.json` in the hook and passing it through `ProcessStartInfo.EnvironmentVariables`.
+
+**3. Default excludes were too narrow — picked up per-editor dotfolders.**
+Old list: `node_modules,dist,build,.git,coverage,.worktrees,.next,.cache,out`. Missed `.claude/` (skills, settings), `.cursor/`, `.idea/`, `.vscode/`, `.agent-prompts/`, `.gstack/`, `.venv/`, `venv/`, `__pycache__/`, `vendor/`, `target/`, `logs/`, `tmp/`. On `Test_Agent_Coordination` the old list indexed 308 files (mostly editor config + agent prompt scratch); new list indexes 26 real source files. Override via `ZC_INDEX_PROJECT_EXCLUDES`.
+
+### Added
+
+- **`probe-indexing-status.mjs`** now handles migration errors gracefully — returns `{state: "error", error: msg}` instead of crashing the hook. The PowerShell hook prints a helpful diagnostic reminder when this happens.
+
+### Live-verified
+
+Real run on `Test_Agent_Coordination` (8 legacy broadcasts from April 6, pre-v0.10.0 schema):
+1. Hook fires → migration 11+12 apply cleanly (NULLs coalesced)
+2. Background indexer runs → **26 files semantically summarized via qwen2.5-coder:14b on GPU**
+3. Sample L0s:
+   - `a.txt` → *"Prints 'hello A' to the console."*
+   - `index.js` → *"This file logs the number of tasks from a JSON file."*
+   - `reports/security-review.md` → *"Security review of `src/search.js` highlighting critical vulnerabilities in task search feature."*
+4. All 8 legacy broadcasts preserved after migration.
+
+### Migration
+
+Zero user action required. Just `git pull` and rebuild:
+```bash
+cd SecureContext
+git pull origin main
+npm run build
+cp hooks/session-start-index-check.ps1 ~/.claude/hooks/
+```
+
+The migration 11 fix is transparent — DBs that already applied migration 11 (before it was buggy) are unaffected; DBs that haven't applied it yet use the new COALESCE version.
+
 ## [0.10.2] — 2026-04-17 — Auto-indexing on session start + banner upgrade
 
 Addresses the "existing project, first time" onboarding friction from v0.10.0: scenario 2 (user installs SC on a half-built project) no longer requires the agent to explicitly call `zc_index_project()`. A SessionStart hook detects unindexed projects and triggers indexing in the background automatically.
