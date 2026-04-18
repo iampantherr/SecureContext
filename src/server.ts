@@ -670,6 +670,36 @@ const TOOLS: Tool[] = [
       required: ["node"],
     },
   },
+
+  // ── v0.14.0 community detection (Louvain over SC's KB) ────────────────
+  {
+    name: "zc_kb_cluster",
+    description:
+      "Run Louvain community detection over the project's knowledge base. " +
+      "Identifies clusters of related sources by graph topology (no embeddings). " +
+      "For 'what's the architecture of this project' questions, this surfaces higher-order " +
+      "structure (e.g. 'auth cluster', 'data layer cluster') that pure top-k similarity misses. " +
+      "Persists results to kb_communities table for fast subsequent lookups via zc_kb_community_for.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "zc_kb_community_for",
+    description:
+      "Look up the community of a single KB source plus its community-mates. " +
+      "Use for 'what's related to X' questions where X is a known KB source path. " +
+      "Run zc_kb_cluster first to populate community assignments.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "KB source identifier (e.g. 'file:src/auth.ts')" },
+      },
+      required: ["source"],
+    },
+  },
 ];
 
 // ─── Server setup ──────────────────────────────────────────────────────────────
@@ -1607,6 +1637,66 @@ async function dispatchToolCall(
           return { content: [{ type: "text", text: r.hint ?? r.error ?? "graphify call failed" }], isError: !r.hint };
         }
         return { content: [{ type: "text", text: `## Neighbors of: ${node}\n\`\`\`json\n${JSON.stringify(r.data, null, 2)}\n\`\`\`` }] };
+      }
+
+      // ── v0.14.0 community detection ─────────────────────────────────
+      case "zc_kb_cluster": {
+        const { detectCommunities, storeCommunities } = await import("./indexing/community.js");
+        const { DatabaseSync: DSC } = await import("node:sqlite");
+        const { mkdirSync: mkdC } = await import("node:fs");
+        const { join: pjoinC } = await import("node:path");
+        const { createHash: chC } = await import("node:crypto");
+        mkdC(Config.DB_DIR, { recursive: true });
+        const dbFileC = pjoinC(Config.DB_DIR, `${chC("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const cdb = new DSC(dbFileC);
+        cdb.exec("PRAGMA journal_mode = WAL");
+        const result = detectCommunities(cdb);
+        if (result.totalSources > 0) storeCommunities(cdb, result);
+        cdb.close();
+
+        const lines: string[] = [];
+        lines.push(`## KB Community Detection (Louvain) — v0.14.0`);
+        lines.push(``);
+        lines.push(`Sources: ${result.totalSources}  Edges: ${result.totalEdges}  Communities: ${result.communityCount}  Modularity: ${result.modularity.toFixed(3)}`);
+        lines.push(`Computed in ${result.elapsedMs}ms.`);
+        lines.push(``);
+        lines.push(`### Top communities`);
+        for (const c of result.communities.slice(0, 8)) {
+          lines.push(`- **community ${c.id}** (${c.size} sources): ${c.sampleSources.slice(0, 3).join(", ")}${c.sampleSources.length > 3 ? ", ..." : ""}`);
+        }
+        lines.push(``);
+        lines.push(`Use \`zc_kb_community_for(source)\` to look up a specific source's community-mates.`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_kb_community_for": {
+        const { source } = args as { source: string };
+        const { getCommunityForSource } = await import("./indexing/community.js");
+        const { DatabaseSync: DSC2 } = await import("node:sqlite");
+        const { mkdirSync: mkdC2 } = await import("node:fs");
+        const { join: pjoinC2 } = await import("node:path");
+        const { createHash: chC2 } = await import("node:crypto");
+        mkdC2(Config.DB_DIR, { recursive: true });
+        const dbFileC2 = pjoinC2(Config.DB_DIR, `${chC2("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const cdb2 = new DSC2(dbFileC2);
+        const info = getCommunityForSource(cdb2, source);
+        cdb2.close();
+
+        if (info.communityId === null) {
+          return { content: [{ type: "text", text: `Source '${source}' not found in kb_communities. Run \`zc_kb_cluster\` first to compute community assignments.` }] };
+        }
+        const lines: string[] = [];
+        lines.push(`## Community of: ${source}`);
+        lines.push(`Community ID: ${info.communityId}  |  Size: ${info.communitySize}`);
+        if (info.mates.length > 0) {
+          lines.push(``);
+          lines.push(`### Community-mates (${info.mates.length})`);
+          for (const m of info.mates.slice(0, 30)) lines.push(`- ${m}`);
+          if (info.mates.length > 30) lines.push(`... and ${info.mates.length - 30} more`);
+        } else {
+          lines.push(`This source is in a singleton community.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
       default:

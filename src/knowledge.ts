@@ -187,6 +187,8 @@ async function storeEmbeddingAsync(
  *                      inject Ollama-generated summaries without re-parsing content.
  * @param precomputedL1 Optional semantic L1 summary. Same semantics as precomputedL0.
  */
+export type Provenance = "EXTRACTED" | "INFERRED" | "AMBIGUOUS" | "UNKNOWN";
+
 export function indexContent(
   projectPath: string,
   content: string,
@@ -194,7 +196,8 @@ export function indexContent(
   sourceType: "internal" | "external" = "internal",
   retentionTier: RetentionTier = sourceType === "external" ? "external" : "internal",
   precomputedL0?: string,
-  precomputedL1?: string
+  precomputedL1?: string,
+  provenance: Provenance = "INFERRED"  // v0.14.0 — default INFERRED unless caller asserts otherwise
 ): void {
   const now = new Date().toISOString();
   const db = openDb(projectPath);
@@ -204,6 +207,16 @@ export function indexContent(
   const l0 = (precomputedL0 ?? content.slice(0, Config.TIER_L0_CHARS)).trim();
   const l1 = (precomputedL1 ?? content.slice(0, Config.TIER_L1_CHARS)).trim();
 
+  // v0.14.0 provenance defaulting:
+  //   - EXTRACTED  → caller asserted it (e.g. AST extractor in indexProject)
+  //   - INFERRED   → LLM-summarized OR truncation fallback (default for unknown source)
+  //   - AMBIGUOUS  → caller flagged multiple plausible readings
+  //   - UNKNOWN    → only for legacy data; never set by current callers
+  // If precomputed summaries are absent (truncation fallback), force INFERRED
+  // unless the caller explicitly knows better.
+  const safeProv: Provenance = (["EXTRACTED", "INFERRED", "AMBIGUOUS", "UNKNOWN"] as const).includes(provenance)
+    ? provenance : "INFERRED";
+
   db.prepare("DELETE FROM knowledge WHERE source = ?").run(source);
   db.prepare(
     "INSERT INTO knowledge(source, content, created_at) VALUES (?, ?, ?)"
@@ -211,15 +224,22 @@ export function indexContent(
 
   try {
     db.prepare(
-      `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at, l0_summary, l1_summary)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(source, sourceType, retentionTier, now, l0, l1);
+      `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at, l0_summary, l1_summary, provenance)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(source, sourceType, retentionTier, now, l0, l1, safeProv);
   } catch {
-    // Fallback for DBs without l0/l1 columns yet (pre-migration)
-    db.prepare(
-      `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at)
-       VALUES (?, ?, ?, ?)`
-    ).run(source, sourceType, retentionTier, now);
+    // Fallback for DBs without l0/l1 OR provenance columns yet (pre-migration)
+    try {
+      db.prepare(
+        `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at, l0_summary, l1_summary)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(source, sourceType, retentionTier, now, l0, l1);
+    } catch {
+      db.prepare(
+        `INSERT OR REPLACE INTO source_meta(source, source_type, retention_tier, created_at)
+         VALUES (?, ?, ?, ?)`
+      ).run(source, sourceType, retentionTier, now);
+    }
   }
 
   db.close();

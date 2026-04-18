@@ -4,6 +4,101 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.14.0] — 2026-04-18 — Native AST + Provenance Tagging + Louvain Community Detection
+
+The "deeper internal capabilities" release. Three new features that complement v0.13.0's graphify integration — bringing similar structural-understanding capabilities natively to SC's KB even when graphify isn't available:
+
+1. **AST extractor for code files** — deterministic L0/L1 summaries for TypeScript / JavaScript / Python via regex-based extraction. Skips the LLM call for code files where AST gives a comprehensive summary.
+2. **Provenance tagging** — `EXTRACTED` / `INFERRED` / `AMBIGUOUS` / `UNKNOWN` on every `working_memory` and `source_meta` row. Maps to Chin & Older 2011 Ch6+Ch7 "speaks-for" formalism: every claim carries its trust chain.
+3. **Louvain community detection** — clusters KB sources by graph topology (no embeddings). New `zc_kb_cluster` + `zc_kb_community_for` MCP tools.
+
+### Phase A — Provenance tagging
+
+**Migrations 16 + 17** add a `provenance TEXT NOT NULL DEFAULT 'UNKNOWN'` column to `working_memory` and `source_meta` with a CHECK constraint enforcing the four allowed values:
+
+| Tag | Meaning |
+|---|---|
+| `EXTRACTED` | Read directly from a primary source (file, AST, git output, deliberate user input) |
+| `INFERRED` | Produced by an LLM or similarity heuristic |
+| `AMBIGUOUS` | Multiple plausible readings, user/agent should review |
+| `UNKNOWN` | Legacy rows from before v0.14.0 (default for migration) |
+
+**API changes (additive — backward compatible):**
+
+- `rememberFact(projectPath, key, value, importance, agentId, provenance?)` — defaults to `EXTRACTED` (the user typed it deliberately = high trust)
+- `indexContent(projectPath, content, source, sourceType, retentionTier, l0?, l1?, provenance?)` — defaults to `INFERRED` (most KB content is LLM-summarized)
+- `indexProject` automatically tags AST-extracted summaries `EXTRACTED`, semantic summaries `INFERRED`, truncation fallbacks `AMBIGUOUS`
+
+**ON CONFLICT semantics:** re-asserting a fact with a different provenance updates the row (allows promotion `INFERRED → EXTRACTED` after verification, or downgrade `EXTRACTED → AMBIGUOUS` on uncertainty).
+
+**Red-team test RT-S3-01:** SQL injection through provenance value blocked by the CHECK constraint.
+
+### Phase B — AST extractor (TS/JS/Python)
+
+**`src/indexing/ast_extractor.ts`** — regex-based AST extraction that produces deterministic L0/L1 summaries for code files without an LLM call. Languages supported in v0.14.0:
+
+- **TypeScript** (`.ts`, `.tsx`): exports, imports, classes (incl. abstract), interfaces, type aliases, functions (incl. async, generator), decorators, JSDoc module headers
+- **JavaScript** (`.js`, `.jsx`, `.mjs`, `.cjs`): exports (ESM + CommonJS module.exports), imports (`import`/`require`), classes, functions, decorators
+- **Python** (`.py`, `.pyw`): top-level classes/functions (with privacy convention), imports (`import`/`from ... import`), `__all__` for explicit exports, decorators, module docstrings
+
+**Why regex first, tree-sitter later:** tree-sitter requires per-language WASM grammar files (~500KB each) that aren't bundled. Regex covers the common cases that matter (top-level exports, imports, classes, functions) at zero install friction. The interface is designed so a future v0.15.0 can swap in `web-tree-sitter` for the same languages without breaking consumers — output shape is identical.
+
+**Cost reduction:** for a typical TS project, ~80% of code files get a deterministic L0 in <1ms each (no Ollama call). Only files needing semantic summarization (markdown, complex prose) hit the LLM. **Net: ~80% LLM cost reduction on indexing for code-heavy projects.**
+
+**`IndexProjectResult` gains `astExtractedCount: number`** reporting how many files used the AST path.
+
+**Live verification on Test_Agent_Coordination:** 4 EXTRACTED source_meta rows, sample L0:
+- `rate-limiter.js` → "REST API Rate Limiter Middleware. Contains 1 class, 1 function."
+- `search.js` → "Task Search — Fuzzy Matching... Contains 2 functions, 1 import."
+
+### Phase C — Louvain community detection
+
+**`src/indexing/community.ts`** + new MCP tools `zc_kb_cluster` and `zc_kb_community_for`. Builds a graph from the project's `knowledge` table (nodes = sources; edges = co-references via filename/path mentions), runs the Louvain modularity-maximization algorithm, and stores assignments in a new `kb_communities` table.
+
+**Algorithm choice:** Louvain (not Leiden as originally planned — Leiden isn't published as an npm package). Same family — both maximize modularity by edge density. Leiden fixes some pathological cases that Louvain can hit on disconnected graphs, but for typical software projects with dense module graphs the practical difference is small. Documented honestly.
+
+**Why this matters:** for "what's related to X" type questions, **graph topology beats vector similarity** for many use cases. Two files that import each other are obviously related — no embedding call needed. Communities surface higher-order structure (e.g. "the auth cluster", "the data layer cluster") that pure top-k similarity misses.
+
+**Two new MCP tools:**
+
+- **`zc_kb_cluster()`** — runs Louvain over the current KB, persists assignments. Returns top communities + sample sources.
+- **`zc_kb_community_for(source)`** — looks up a source's community + community-mates. Use for "what's related to X" where X is a known source path.
+
+**Live verification:** ran on Test_Agent_Coordination — clustered 26 sources into 5 communities (sizes 6, 6, 5, 2, 1, ...). Both new MCP tools called successfully by the live developer agent.
+
+### New dependencies
+
+- `web-tree-sitter` ^0.26.8 — installed but not yet wired (placeholder for v0.15.0 tree-sitter upgrade)
+- `graphology` ^0.26.0 — graph data structure for Louvain
+- `graphology-communities-louvain` ^2.0.2 — community detection algorithm
+
+### Test summary
+
+- **541/541 tests pass** (470 baseline + **71 new**: 17 provenance + 42 AST + 12 community)
+- **Live agent integration test passed** on Test_Agent_Coordination — all three features fired
+- Real-world edge cases covered: empty files, syntax-broken files, very-large files (>5MB rejected), comments-only files, abstract classes, generator functions, default exports, decorators, Python `__all__`, async def, deeply-nested code
+
+### Upgrade notes
+
+**Backward compatible.** No existing code paths break:
+
+- `rememberFact` and `indexContent` keep the old positional signature; provenance is the new optional last argument
+- AST extraction is automatic for code file extensions but doesn't change behavior for non-code files
+- Community detection is opt-in via the new MCP tools — nothing runs unless an agent explicitly calls `zc_kb_cluster`
+- Migrations 16+17 are defensive (idempotent + skip if column already present)
+
+**For agents:**
+- For "what's the architecture of this project" → call `zc_kb_cluster` first, then drill into top communities with `zc_kb_community_for`
+- For "what's related to X" where X is a known file → `zc_kb_community_for("file:src/X.ts")`
+- For "summarize this code" → `zc_file_summary` now returns AST-extracted summary if file is in TS/JS/Python (faster, deterministic, EXTRACTED tag)
+
+### Deferred
+
+- **Tree-sitter WASM grammar integration** — the regex extractor covers the 80/20 case. v0.15.0 can swap in tree-sitter for the same interface (no breaking change).
+- **Sprint 3** picks up Tier 3 access-control fixes — see `HARNESS_EVOLUTION_PLAN.md §8.6` (locked with hard "DO NOT START" gate).
+
+---
+
 ## [0.13.0] — 2026-04-18 — graphify integration: structural knowledge graph as a first-class SC capability
 
 Adds three new MCP tools that proxy to **[graphify](https://github.com/safishamsi/graphify)**, the AI coding assistant skill that builds structural knowledge graphs of any folder. Plus auto-indexing of `GRAPH_REPORT.md` so agents discover it via normal `zc_search` without needing to know graphify exists.

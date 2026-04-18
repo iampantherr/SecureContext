@@ -237,29 +237,41 @@ function ensureAgentIdColumn(db: DatabaseSync): void {
  *
  * @param agentId  Optional agent namespace for parallel multi-agent use (default: "default")
  */
+export type Provenance = "EXTRACTED" | "INFERRED" | "AMBIGUOUS" | "UNKNOWN";
+
 export function rememberFact(
   projectPath: string,
   key: string,
   value: string,
   importance: number = 3,
-  agentId: string = "default"
+  agentId: string = "default",
+  provenance: Provenance = "EXTRACTED"
 ): void {
   const safeKey   = sanitize(key,     100);
   const safeValue = sanitize(value,   500);
   const safeImp   = Math.max(1, Math.min(5, Math.round(importance)));
   const safeAgent = sanitize(agentId,  64);
+  // v0.14.0: provenance flag (Chin & Older 2011 Ch6+Ch7 — every claim
+  // carries its trust chain). Default EXTRACTED for direct user input
+  // (the agent typed it deliberately = high trust).
+  const safeProv: Provenance = (["EXTRACTED", "INFERRED", "AMBIGUOUS", "UNKNOWN"] as const).includes(provenance)
+    ? provenance : "UNKNOWN";
   const now       = new Date().toISOString();
 
   const db = openDb(projectPath);
   ensureAgentIdColumn(db);
 
+  // ON CONFLICT path: also update provenance (caller may be re-asserting
+  // a fact with different epistemic status, e.g. promoting INFERRED → EXTRACTED).
   db.prepare(`
-    INSERT INTO working_memory(key, value, importance, agent_id, created_at) VALUES (?, ?, ?, ?, ?)
+    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(key, agent_id) DO UPDATE SET
       value      = excluded.value,
       importance = excluded.importance,
-      created_at = excluded.created_at
-  `).run(safeKey, safeValue, safeImp, safeAgent, now);
+      created_at = excluded.created_at,
+      provenance = excluded.provenance
+  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv);
 
   // Evict if over limit — evict lowest importance + oldest first (MemGPT eviction policy)
   // Limit is dynamically sized based on project complexity (see getWorkingMemoryLimits)

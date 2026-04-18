@@ -32,6 +32,7 @@ import { createHash } from "node:crypto";
 import { Config } from "./config.js";
 import { openDb, indexContent, dbPath } from "./knowledge.js";
 import { summarizeFile, selectSummaryModel } from "./summarizer.js";
+import { detectLanguage, extractAst } from "./indexing/ast_extractor.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,7 @@ export interface IndexProjectResult {
   semanticModel:        string | null;
   semanticCount:        number;     // files that got a semantic summary
   truncationCount:      number;     // files that fell back to truncation
+  astExtractedCount:    number;     // v0.14.0: files L0/L1'd by AST extractor (no LLM call needed)
   graphReportIndexed:   boolean;    // v0.13.0: graphify-out/GRAPH_REPORT.md auto-indexed
 }
 
@@ -166,6 +168,7 @@ export async function indexProject(
   let bytesRead       = 0;
   let semanticCount   = 0;
   let truncationCount = 0;
+  let astExtractedCount = 0;     // v0.14.0: files L0/L1'd by AST extractor
   let semanticModel: string | null = null;
 
   const concurrency = Math.max(1, Config.SUMMARY_CONCURRENCY);
@@ -178,27 +181,49 @@ export async function indexProject(
       const c = queue.shift();
       if (!c) return;
 
-      // Summarize (semantic via Ollama, or deterministic truncation fallback)
-      let sum;
-      try {
-        sum = await summarizeFile(c.relPath, c.content);
-      } catch {
-        // Summarization should never throw (summarizeFile returns truncation on
-        // error), but belt-and-suspenders:
-        sum = { l0: c.content.slice(0, Config.TIER_L0_CHARS).trim(),
-                l1: c.content.slice(0, Config.TIER_L1_CHARS).trim(),
-                source: "truncation" as const };
+      // v0.14.0: AST pre-pass for code files (zero-cost, deterministic).
+      // If extraction succeeds and produces a non-trivial summary, use it
+      // and tag with provenance="EXTRACTED". Otherwise fall through to
+      // semantic (LLM) summarization with provenance="INFERRED".
+      const lang = detectLanguage(c.relPath);
+      let astResult = null;
+      if (lang) {
+        astResult = extractAst(c.content, lang);
+      }
+
+      let sum: { l0: string; l1: string; source: "semantic" | "truncation" | "ast"; modelUsed?: string };
+      let provenance: "EXTRACTED" | "INFERRED" | "AMBIGUOUS" = "INFERRED";
+
+      if (astResult && astResult.stats.exportCount + astResult.stats.classCount + astResult.stats.functionCount > 0) {
+        // AST extraction is comprehensive enough — skip the LLM
+        sum = { l0: astResult.l0, l1: astResult.l1, source: "ast" };
+        provenance = "EXTRACTED";
+        astExtractedCount += 1;
+      } else {
+        // Fall through to semantic summarizer (LLM via Ollama, or truncation)
+        try {
+          sum = await summarizeFile(c.relPath, c.content);
+        } catch {
+          sum = { l0: c.content.slice(0, Config.TIER_L0_CHARS).trim(),
+                  l1: c.content.slice(0, Config.TIER_L1_CHARS).trim(),
+                  source: "truncation" as const };
+        }
+        // Truncation is the weakest signal — tag AMBIGUOUS so downstream
+        // consumers can downweight (per Chin & Older 2011 Ch6+Ch7).
+        provenance = sum.source === "semantic" ? "INFERRED" : "AMBIGUOUS";
       }
 
       // Immediately persist to KB (no waiting for the whole batch)
       const source = `file:${c.relPath}`;
       try {
-        indexContent(projectPath, c.content, source, "internal", "internal", sum.l0, sum.l1);
+        indexContent(projectPath, c.content, source, "internal", "internal", sum.l0, sum.l1, provenance);
         bytesRead    += c.bytes;
         filesIndexed += 1;
         if (sum.source === "semantic") {
           semanticCount += 1;
           if (!semanticModel && sum.modelUsed) semanticModel = sum.modelUsed;
+        } else if (sum.source === "ast") {
+          // already counted above
         } else {
           truncationCount += 1;
         }
@@ -256,6 +281,7 @@ export async function indexProject(
     semanticModel,
     semanticCount,
     truncationCount,
+    astExtractedCount,
     graphReportIndexed,
   };
 }

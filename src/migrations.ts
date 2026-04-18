@@ -525,6 +525,67 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  // ── v0.14.0 migrations ────────────────────────────────────────────────
+
+  {
+    id: 16,
+    description: "v0.14.0: provenance column on working_memory (EXTRACTED|INFERRED|AMBIGUOUS|UNKNOWN)",
+    up: (db) => {
+      // Per Chin & Older 2011 Ch6 + Ch7 ('speaks-for' formalism): every claim
+      // should carry its trust chain. Provenance flags the source's epistemic
+      // status so downstream consumers can downweight INFERRED facts when
+      // stakes are high (e.g. mutation engine ranking).
+      //
+      // Values:
+      //   EXTRACTED  — read directly from a primary source (file, AST, git)
+      //   INFERRED   — produced by an LLM or similarity heuristic
+      //   AMBIGUOUS  — multiple plausible readings, user/agent should review
+      //   UNKNOWN    — legacy rows from before v0.14.0 (default for migration)
+      //
+      // Stored as TEXT with a CHECK constraint so insert errors fail loud.
+      // Defensive: idempotent — if provenance already exists (re-migration
+      // attempt), no-op.
+      const tbl = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='working_memory'`
+      ).get();
+      if (!tbl) return;
+      const cols = db.prepare(`PRAGMA table_info(working_memory)`).all() as Array<{ name: string }>;
+      if (cols.some((c) => c.name === "provenance")) return;
+      db.exec(`
+        ALTER TABLE working_memory ADD COLUMN provenance TEXT NOT NULL DEFAULT 'UNKNOWN'
+          CHECK (provenance IN ('EXTRACTED', 'INFERRED', 'AMBIGUOUS', 'UNKNOWN'));
+        CREATE INDEX IF NOT EXISTS idx_wm_provenance ON working_memory(provenance, created_at);
+      `);
+    },
+  },
+
+  {
+    id: 17,
+    description: "v0.14.0: provenance column on source_meta (file-summary trust tier)",
+    up: (db) => {
+      // source_meta holds L0/L1 file summaries. AST-extracted summaries
+      // (Phase B) should be tagged EXTRACTED — they're deterministic.
+      // LLM-summarized files are INFERRED. Truncated-only fallback is
+      // AMBIGUOUS (no semantic interpretation, just a slice).
+      //
+      // Defensive: source_meta may not exist on legacy fixtures that
+      // skipped migration 1. In that case, no-op — the column will be
+      // added when source_meta is eventually created.
+      const tbl = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='source_meta'`
+      ).get();
+      if (!tbl) return;
+      // Don't re-ALTER if column already present (idempotent)
+      const cols = db.prepare(`PRAGMA table_info(source_meta)`).all() as Array<{ name: string }>;
+      if (cols.some((c) => c.name === "provenance")) return;
+      db.exec(`
+        ALTER TABLE source_meta ADD COLUMN provenance TEXT NOT NULL DEFAULT 'UNKNOWN'
+          CHECK (provenance IN ('EXTRACTED', 'INFERRED', 'AMBIGUOUS', 'UNKNOWN'));
+        CREATE INDEX IF NOT EXISTS idx_src_provenance ON source_meta(provenance);
+      `);
+    },
+  },
+
 ];
 
 /**
