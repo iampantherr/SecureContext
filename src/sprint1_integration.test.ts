@@ -88,20 +88,20 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── US1: summarize then read ────────────────────────────────────────────
 
-  it("[US1] agent summarizes a file then reads it → follow_up outcome ties to summary", () => {
+  it("[US1] agent summarizes a file then reads it → follow_up outcome ties to summary", async () => {
     const summaryCallId = newCallId();
-    recordToolCall({
+    await recordToolCall({
       callId: summaryCallId, sessionId: "us1", agentId: "agent-x", projectPath: projectA,
       toolName: "zc_file_summary", model: "claude-sonnet-4-6",
       inputTokens: 300, outputTokens: 100, latencyMs: 40, status: "ok",
     });
     // Next tool call in the same session: Read of the same file
-    recordToolCall({
+    await recordToolCall({
       callId: newCallId(), sessionId: "us1", agentId: "agent-x", projectPath: projectA,
       toolName: "Read", model: "claude-sonnet-4-6",
       inputTokens: 50, outputTokens: 2000, latencyMs: 15, status: "ok",
     });
-    const outcomes = resolveFollowUpOutcomes({
+    const outcomes = await resolveFollowUpOutcomes({
       projectPath: projectA, sessionId: "us1",
       newToolName: "Read", newToolInput: { file_path: "/tmp/my.ts" },
     });
@@ -113,21 +113,21 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── US2: commit after edit ──────────────────────────────────────────────
 
-  it("[US2] agent commits after edit → git_commit resolver links shipped outcome to last tool_call", () => {
+  it("[US2] agent commits after edit → git_commit resolver links shipped outcome to last tool_call", async () => {
     const editCallId = newCallId();
-    recordToolCall({
+    await recordToolCall({
       callId: editCallId, sessionId: "us2", agentId: "agent-y", projectPath: projectA,
       toolName: "Edit", model: "claude-sonnet-4-6",
       inputTokens: 200, outputTokens: 30, latencyMs: 20, status: "ok",
     });
     // Following Bash tool call (git commit)
-    recordToolCall({
+    await recordToolCall({
       callId: newCallId(), sessionId: "us2", agentId: "agent-y", projectPath: projectA,
       toolName: "Bash", model: "claude-sonnet-4-6",
       inputTokens: 50, outputTokens: 50, latencyMs: 100, status: "ok",
     });
 
-    const outcome = resolveGitCommitOutcome({
+    const outcome = await resolveGitCommitOutcome({
       projectPath: projectA, sessionId: "us2",
       bashOutput: "[feat/abc def1234] Implement feature\n 2 files changed, 15 insertions(+)",
     });
@@ -140,14 +140,14 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── US3: positive user response ─────────────────────────────────────────
 
-  it("[US3] user replies positively → user_prompt resolver records accepted outcome", () => {
+  it("[US3] user replies positively → user_prompt resolver records accepted outcome", async () => {
     const cid = newCallId();
-    recordToolCall({
+    await recordToolCall({
       callId: cid, sessionId: "us3", agentId: "agent-z", projectPath: projectA,
       toolName: "Bash", model: "claude-sonnet-4-6",
       inputTokens: 10, outputTokens: 5, latencyMs: 8, status: "ok",
     });
-    const outcome = resolveUserPromptOutcome({
+    const outcome = await resolveUserPromptOutcome({
       projectPath: projectA, sessionId: "us3",
       userMessage: "perfect, works great, thanks!",
     });
@@ -162,24 +162,24 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── US4: multi-project isolation ────────────────────────────────────────
 
-  it("[US4] tool_calls + outcomes do not leak between different projects", () => {
+  it("[US4] tool_calls + outcomes do not leak between different projects", async () => {
     for (let i = 0; i < 5; i++) {
-      recordToolCall({
+      await recordToolCall({
         callId: `a-${i}`, sessionId: "sA", agentId: "a", projectPath: projectA,
         toolName: "Read", model: "claude-sonnet-4-6",
         inputTokens: 10, outputTokens: 5, latencyMs: 5, status: "ok",
       });
-      recordToolCall({
+      await recordToolCall({
         callId: `b-${i}`, sessionId: "sB", agentId: "b", projectPath: projectB,
         toolName: "Edit", model: "claude-sonnet-4-6",
         inputTokens: 10, outputTokens: 5, latencyMs: 5, status: "ok",
       });
     }
-    recordOutcome({
+    await recordOutcome({
       projectPath: projectA, refType: "tool_call", refId: "a-0",
       outcomeKind: "accepted", signalSource: "user_prompt",
     });
-    recordOutcome({
+    await recordOutcome({
       projectPath: projectB, refType: "tool_call", refId: "b-0",
       outcomeKind: "shipped", signalSource: "git_commit",
     });
@@ -214,9 +214,9 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── Integration: cost annotation matches pricing table ─────────────────
 
-  it("cost stored in tool_calls row equals computeCost() exactly", () => {
+  it("cost stored in tool_calls row equals computeCost() exactly", async () => {
     const cid = newCallId();
-    const r = recordToolCall({
+    const r = await recordToolCall({
       callId: cid, sessionId: "ci", agentId: "a", projectPath: projectA,
       toolName: "zc_search", model: "claude-sonnet-4-6",
       inputTokens: 1000, outputTokens: 500, latencyMs: 30, status: "ok",
@@ -227,13 +227,13 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── Integration: outcomes chain survives parallel projects ──────────────
 
-  it("outcomes chain integrity holds concurrently across projects", () => {
+  it("outcomes chain integrity holds concurrently across projects", async () => {
     for (let i = 0; i < 10; i++) {
-      recordOutcome({
+      await recordOutcome({
         projectPath: projectA, refType: "tool_call", refId: `a-${i}`,
         outcomeKind: "accepted", signalSource: "user_prompt",
       });
-      recordOutcome({
+      await recordOutcome({
         projectPath: projectB, refType: "tool_call", refId: `b-${i}`,
         outcomeKind: "shipped", signalSource: "git_commit",
       });
@@ -246,15 +246,15 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── Red-team ────────────────────────────────────────────────────────────
 
-  it("[RT-S1-15] rotating machine_secret invalidates ALL existing tool_call + outcome chains", () => {
+  it("[RT-S1-15] rotating machine_secret invalidates ALL existing tool_call + outcome chains", async () => {
     // Record some entries under secret S1
     for (let i = 0; i < 3; i++) {
-      recordToolCall({
+      await recordToolCall({
         callId: `c-${i}`, sessionId: "sec", agentId: "a", projectPath: projectA,
         toolName: "Read", model: "claude-sonnet-4-6",
         inputTokens: 10, outputTokens: 5, latencyMs: 5, status: "ok",
       });
-      recordOutcome({
+      await recordOutcome({
         projectPath: projectA, refType: "tool_call", refId: `c-${i}`,
         outcomeKind: "accepted", signalSource: "user_prompt",
       });
@@ -275,9 +275,9 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
     expect(outResult.ok).toBe(false);
   });
 
-  it("[RT-S1-16] different empty-ish project_paths hash to different DBs", () => {
+  it("[RT-S1-16] different empty-ish project_paths hash to different DBs", async () => {
     // Reject pathological empty string by confirming different strings → different DBs
-    recordToolCall({
+    await recordToolCall({
       callId: "only",
       sessionId: "s",
       agentId: "a",
@@ -295,12 +295,12 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── Regression sanity ──────────────────────────────────────────────────
 
-  it("full E2E: telemetry → outcome → log — all components cooperate", () => {
+  it("full E2E: telemetry → outcome → log — all components cooperate", async () => {
     const cid = newCallId();
     const trace = newTraceId("e2e");
 
     // 1. Record a tool call
-    const call = recordToolCall({
+    const call = await recordToolCall({
       callId: cid, sessionId: "e2e", agentId: "agent-e2e", projectPath: projectA,
       toolName: "Edit", model: "claude-sonnet-4-6",
       inputTokens: 500, outputTokens: 50, latencyMs: 42, status: "ok", traceId: trace,
@@ -309,7 +309,7 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
     expect(call!.trace_id).toBe(trace);
 
     // 2. User says "thanks!" → resolveUserPromptOutcome fires
-    const outcome = resolveUserPromptOutcome({
+    const outcome = await resolveUserPromptOutcome({
       projectPath: projectA, sessionId: "e2e",
       userMessage: "thanks, works perfectly",
     });

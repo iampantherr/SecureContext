@@ -57,9 +57,10 @@ import { logger, newTraceId } from "./logger.js";
 import { computeCost, type CostCalculation } from "./pricing.js";
 import { redactSecrets, scanForSecrets } from "./security/secret_scanner.js";
 import { auditLog } from "./security/audit_log.js";
-import { hmacRowHash, getLastHashFromRows, canonicalize, GENESIS, verifyHmacChain, type ChainableRow } from "./security/hmac_chain.js";
-import { getMachineSecret } from "./security/machine_secret.js";
+import { canonicalize, type ChainableRow } from "./security/hmac_chain.js";
 import { runMigrations } from "./migrations.js";
+import { ChainedTableSqlite } from "./security/chained_table_sqlite.js";
+import { verifyChainRows } from "./security/chained_table.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -111,8 +112,11 @@ export interface ToolCallRecord extends ChainableRow {
 
 // ─── State ─────────────────────────────────────────────────────────────────
 
-/** In-memory cache: project_hash → last row_hash. Avoids per-call table scan. */
-const _lastHashCache = new Map<string, string>();
+// v0.12.0 note: the per-process _lastHashCache from v0.11.0 was removed.
+// With BEGIN IMMEDIATE in ChainedTableSqlite the SELECT happens inside the
+// write transaction (sub-millisecond) and the cache was per-process so it
+// didn't help across multiple agents anyway. Removing it eliminates the
+// cache-staleness bug that the v0.11.0 fix had to work around.
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
@@ -128,8 +132,13 @@ export function newCallId(): string {
 /**
  * Record a tool call to the tool_calls table. Never throws. Loud failure via
  * logger.error if persistence fails.
+ *
+ * v0.12.0: Now async (Option 4 from Sprint 2 prep design). The SQLite path
+ * is still synchronous internally — the async wrapper allows future Postgres
+ * backends without API change. Per-agent HMAC subkey (Tier 1 fix) is applied
+ * via ChainedTableSqlite + computeChainHash from chained_table.ts.
  */
-export function recordToolCall(input: ToolCallInput): ToolCallRecord | null {
+export async function recordToolCall(input: ToolCallInput): Promise<ToolCallRecord | null> {
   const trace = input.traceId ?? newTraceId("call");
   try {
     const projectHash = sha256ProjectHash(input.projectPath);
@@ -144,25 +153,18 @@ export function recordToolCall(input: ToolCallInput): ToolCallRecord | null {
       cached_input_tokens: cachedTokens,
     });
 
-    // Open DB + ensure schema
     const db = openProjectDb(input.projectPath);
     try {
-      // CRITICAL: BEGIN IMMEDIATE acquires the SQLite write lock BEFORE the
-      // SELECT-prev-hash, so the SELECT + INSERT pair is atomic with respect
-      // to other writer processes. Without this, two concurrent agents can
-      // read the same prev_hash and both INSERT rows linking to it →
-      // chain integrity breaks (RT-S1-17 stress test caught this on
-      // ≥2 concurrent writers per project DB).
-      //
-      // The cache is invalidated up-front because under contention the
-      // cached value may be stale (another writer extended the chain since
-      // we last looked). Force a fresh DB read inside the transaction.
-      _lastHashCache.delete(projectHash);
-      db.exec("BEGIN IMMEDIATE");
-      // Compute hash chain link
-      const prevHash = getLastHashForProject(db, projectHash);
+      const chain = new ChainedTableSqlite(db, {
+        tableName:   "tool_calls",
+        scopeWhere:  "project_hash = ?",
+        scopeParams: [projectHash],
+      });
+
+      // Stamp ts here so the canonicalization (which includes ts) and the
+      // INSERT (which writes the same ts) match exactly.
       const ts = new Date().toISOString();
-      const canonical = buildCanonical({
+      const canonicalFields = buildCanonicalFields({
         callId: input.callId,
         sessionId: input.sessionId,
         agentId: input.agentId,
@@ -176,36 +178,32 @@ export function recordToolCall(input: ToolCallInput): ToolCallRecord | null {
         status: input.status,
         ts,
       });
-      const rowHash = hmacRowHash(getMachineSecret(), prevHash, canonical);
 
-      // Insert
-      db.prepare(`
-        INSERT INTO tool_calls (
-          call_id, session_id, agent_id, project_hash,
-          task_id, skill_id,
-          tool_name, model,
-          input_tokens, output_tokens, cached_tokens,
-          cost_usd, cost_known,
-          latency_ms, status, error_class,
-          ts, prev_hash, row_hash, trace_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        input.callId, input.sessionId, input.agentId, projectHash,
-        input.taskId ?? null, input.skillId ?? null,
-        input.toolName, input.model,
-        inputTokens, outputTokens, cachedTokens,
-        cost.cost_usd, cost.known ? 1 : 0,
-        input.latencyMs, input.status, input.errorClass ?? null,
-        ts, prevHash, rowHash, trace
+      await chain.appendChainedWith(
+        { agentId: input.agentId, projectHash, canonicalFields },
+        ({ prevHash, rowHash, db: txnDb }) => {
+          txnDb.prepare(`
+            INSERT INTO tool_calls (
+              call_id, session_id, agent_id, project_hash,
+              task_id, skill_id,
+              tool_name, model,
+              input_tokens, output_tokens, cached_tokens,
+              cost_usd, cost_known,
+              latency_ms, status, error_class,
+              ts, prev_hash, row_hash, trace_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            input.callId, input.sessionId, input.agentId, projectHash,
+            input.taskId ?? null, input.skillId ?? null,
+            input.toolName, input.model,
+            inputTokens, outputTokens, cachedTokens,
+            cost.cost_usd, cost.known ? 1 : 0,
+            input.latencyMs, input.status, input.errorClass ?? null,
+            ts, prevHash, rowHash, trace
+          );
+        }
       );
 
-      // Update cache
-      // COMMIT releases the write lock, allowing waiting writers to proceed.
-      db.exec("COMMIT");
-
-      _lastHashCache.set(projectHash, rowHash);
-
-      // Emit DEBUG telemetry log entry (cheap; can be filtered out via ZC_LOG_LEVEL)
       logger.debug("telemetry", "tool_call_recorded", {
         call_id: input.callId,
         tool_name: input.toolName,
@@ -216,10 +214,6 @@ export function recordToolCall(input: ToolCallInput): ToolCallRecord | null {
       }, trace);
 
       return readToolCall(db, input.callId);
-    } catch (innerErr) {
-      // Roll back the IMMEDIATE transaction so other writers aren't blocked.
-      try { db.exec("ROLLBACK"); } catch {}
-      throw innerErr;
     } finally {
       db.close();
     }
@@ -282,7 +276,11 @@ export function verifyToolCallChain(projectPath: string): {
       ORDER BY id ASC
     `).all(projectHash) as unknown as Array<ToolCallRecord & { call_id: string }>;
 
-    return verifyHmacChain(getMachineSecret(), rows, (row) => buildCanonical({
+    // v0.12.0: per-agent HMAC subkey verification (Tier 1).
+    // verifyChainRows expects each row to expose its own agentIdForVerify
+    // so the verifier can derive the correct per-agent HMAC subkey.
+    const rowsForVerify = rows.map((r) => ({ ...r, agentIdForVerify: r.agent_id }));
+    return verifyChainRows(rowsForVerify, (row) => canonicalize(buildCanonicalFields({
       callId: row.call_id,
       sessionId: row.session_id,
       agentId: row.agent_id,
@@ -295,7 +293,7 @@ export function verifyToolCallChain(projectPath: string): {
       latencyMs: row.latency_ms,
       status: row.status,
       ts: row.ts,
-    }));
+    })));
   } finally {
     db.close();
   }
@@ -314,9 +312,10 @@ export function getToolCall(projectPath: string, callId: string): ToolCallRecord
   }
 }
 
-/** Test-only: clear in-memory caches. */
+/** Test-only: no-op kept for backward compat with tests written against v0.11.0
+ * (the cache it cleared was removed in v0.12.0 — see top-of-file note). */
 export function _resetTelemetryCacheForTesting(): void {
-  _lastHashCache.clear();
+  // noop in v0.12.0+
 }
 
 /**
@@ -352,24 +351,11 @@ function openProjectDb(projectPath: string): DatabaseSync {
   return db;
 }
 
-function getLastHashForProject(db: DatabaseSync, projectHash: string): string {
-  // Cached: avoid table scan for hot calls
-  const cached = _lastHashCache.get(projectHash);
-  if (cached !== undefined) return cached;
-
-  // Cold: scan once
-  const row = db.prepare(`
-    SELECT row_hash FROM tool_calls
-    WHERE project_hash = ? AND row_hash != ''
-    ORDER BY id DESC LIMIT 1
-  `).get(projectHash) as { row_hash: string } | undefined;
-
-  const hash = row?.row_hash || GENESIS;
-  _lastHashCache.set(projectHash, hash);
-  return hash;
-}
-
-function buildCanonical(input: {
+/**
+ * Build the canonical-fields array hashed into the chain. Returns an array
+ * (not a string) so it can flow into the ChainedTable interface unchanged.
+ */
+function buildCanonicalFields(input: {
   callId: string;
   sessionId: string;
   agentId: string;
@@ -382,8 +368,8 @@ function buildCanonical(input: {
   latencyMs: number;
   status: string;
   ts: string;
-}): string {
-  return canonicalize([
+}): Array<string | number> {
+  return [
     input.callId,
     input.sessionId,
     input.agentId,
@@ -392,11 +378,11 @@ function buildCanonical(input: {
     input.model,
     input.inputTokens,
     input.outputTokens,
-    input.cost.toFixed(8),  // fixed precision for chain consistency
+    input.cost.toFixed(8),
     input.latencyMs,
     input.status,
     input.ts,
-  ]);
+  ];
 }
 
 function readToolCall(db: DatabaseSync, callId: string): ToolCallRecord | null {

@@ -63,13 +63,13 @@ function cleanMachineSecret(): void {
 }
 
 /** Seed a tool_call so outcome resolvers have something to reference. */
-function seedToolCall(opts: {
+async function seedToolCall(opts: {
   projectPath: string;
   sessionId:   string;
   toolName?:   string;
-}): string {
+}): Promise<string> {
   const callId = newCallId();
-  recordToolCall({
+  await recordToolCall({
     callId,
     sessionId: opts.sessionId,
     agentId:   "agent-x",
@@ -106,11 +106,11 @@ afterEach(() => {
 
 describe("outcomes", () => {
 
-  // ── recordOutcome (unit) ────────────────────────────────────────────────
+  // ── await recordOutcome(unit) ────────────────────────────────────────────────
 
-  it("recordOutcome persists an outcome row with expected shape", () => {
-    const callId = seedToolCall({ projectPath: testProject, sessionId: "s1" });
-    const r = recordOutcome({
+  it("recordOutcome persists an outcome row with expected shape", async () => {
+    const callId = await seedToolCall({ projectPath: testProject, sessionId: "s1" });
+    const r = await recordOutcome({
       projectPath:  testProject,
       refType:      "tool_call",
       refId:        callId,
@@ -130,8 +130,8 @@ describe("outcomes", () => {
     expect(r!.prev_hash).toMatch(/^(genesis|[0-9a-f]{64})$/);
   });
 
-  it("recordOutcome defaults confidence to 1.0 when not provided", () => {
-    const r = recordOutcome({
+  it("recordOutcome defaults confidence to 1.0 when not provided", async () => {
+    const r = await recordOutcome({
       projectPath:  testProject,
       refType:      "tool_call",
       refId:        "anyref",
@@ -142,8 +142,8 @@ describe("outcomes", () => {
     expect(r!.confidence).toBe(1.0);
   });
 
-  it("recordOutcome stores null evidence when not provided", () => {
-    const r = recordOutcome({
+  it("recordOutcome stores null evidence when not provided", async () => {
+    const r = await recordOutcome({
       projectPath:  testProject,
       refType:      "tool_call",
       refId:        "anyref",
@@ -153,8 +153,8 @@ describe("outcomes", () => {
     expect(r!.evidence).toBeNull();
   });
 
-  it("recordOutcome stores scoreDelta when provided", () => {
-    const r = recordOutcome({
+  it("recordOutcome stores scoreDelta when provided", async () => {
+    const r = await recordOutcome({
       projectPath:  testProject,
       refType:      "tool_call",
       refId:        "anyref",
@@ -165,10 +165,10 @@ describe("outcomes", () => {
     expect(r!.score_delta).toBeCloseTo(0.2, 6);
   });
 
-  it("recordOutcome never throws on bad input — returns null", () => {
+  it("recordOutcome never throws on bad input — returns null", async () => {
     // outcome_kind NOT NULL but we force a path that trips the DB -
     // pass null-ish field via cast; must not throw
-    const r = recordOutcome({
+    const r = await recordOutcome({
       projectPath:  testProject,
       refType:      "tool_call",
       refId:        null as unknown as string,   // force DB failure
@@ -181,13 +181,13 @@ describe("outcomes", () => {
 
   // ── resolveGitCommitOutcome ─────────────────────────────────────────────
 
-  it("resolveGitCommitOutcome records shipped outcome when commit hash detected", () => {
-    const callId = seedToolCall({
+  it("resolveGitCommitOutcome records shipped outcome when commit hash detected", async () => {
+    const callId = await seedToolCall({
       projectPath: testProject,
       sessionId: "s-git",
       toolName: "Bash",
     });
-    const r = resolveGitCommitOutcome({
+    const r = await resolveGitCommitOutcome({
       projectPath: testProject,
       sessionId:   "s-git",
       bashOutput:  "[main abc1234] Fix typo\n 1 file changed",
@@ -204,9 +204,9 @@ describe("outcomes", () => {
     expect(evidence.session_id).toBe("s-git");
   });
 
-  it("resolveGitCommitOutcome returns null when no commit pattern in output", () => {
+  it("resolveGitCommitOutcome returns null when no commit pattern in output", async () => {
     seedToolCall({ projectPath: testProject, sessionId: "s-none" });
-    const r = resolveGitCommitOutcome({
+    const r = await resolveGitCommitOutcome({
       projectPath: testProject,
       sessionId:   "s-none",
       bashOutput:  "nothing to commit, working tree clean",
@@ -214,9 +214,9 @@ describe("outcomes", () => {
     expect(r).toBeNull();
   });
 
-  it("resolveGitCommitOutcome returns null when no recent tool_call in session", () => {
+  it("resolveGitCommitOutcome returns null when no recent tool_call in session", async () => {
     // Valid commit output but no prior tool_call in this session
-    const r = resolveGitCommitOutcome({
+    const r = await resolveGitCommitOutcome({
       projectPath: testProject,
       sessionId:   "s-orphan",
       bashOutput:  "[feat/x deadbeef] Add feature",
@@ -224,9 +224,9 @@ describe("outcomes", () => {
     expect(r).toBeNull();
   });
 
-  it("resolveGitCommitOutcome handles full 40-char git hash", () => {
+  it("resolveGitCommitOutcome handles full 40-char git hash", async () => {
     seedToolCall({ projectPath: testProject, sessionId: "s-40", toolName: "Bash" });
-    const r = resolveGitCommitOutcome({
+    const r = await resolveGitCommitOutcome({
       projectPath: testProject,
       sessionId:   "s-40",
       bashOutput:  "[release-1.0 abcdef1234567890abcdef1234567890abcdef12] Release v1.0",
@@ -238,9 +238,9 @@ describe("outcomes", () => {
 
   // ── resolveUserPromptOutcome ────────────────────────────────────────────
 
-  it("resolveUserPromptOutcome records accepted for positive sentiment", () => {
-    const callId = seedToolCall({ projectPath: testProject, sessionId: "s-pos" });
-    const r = resolveUserPromptOutcome({
+  it("resolveUserPromptOutcome records accepted for positive sentiment", async () => {
+    const callId = await seedToolCall({ projectPath: testProject, sessionId: "s-pos" });
+    const r = await resolveUserPromptOutcome({
       projectPath: testProject,
       sessionId:   "s-pos",
       userMessage: "thanks, that works perfectly",
@@ -251,9 +251,9 @@ describe("outcomes", () => {
     expect(r!.confidence).toBeCloseTo(0.5, 2);
   });
 
-  it("resolveUserPromptOutcome records rejected for negative sentiment", () => {
+  it("resolveUserPromptOutcome records rejected for negative sentiment", async () => {
     seedToolCall({ projectPath: testProject, sessionId: "s-neg" });
-    const r = resolveUserPromptOutcome({
+    const r = await resolveUserPromptOutcome({
       projectPath: testProject,
       sessionId:   "s-neg",
       userMessage: "no, that's wrong — revert it",
@@ -262,9 +262,9 @@ describe("outcomes", () => {
     expect(r!.outcome_kind).toBe("rejected");
   });
 
-  it("resolveUserPromptOutcome returns null for neutral sentiment", () => {
+  it("resolveUserPromptOutcome returns null for neutral sentiment", async () => {
     seedToolCall({ projectPath: testProject, sessionId: "s-neu" });
-    const r = resolveUserPromptOutcome({
+    const r = await resolveUserPromptOutcome({
       projectPath: testProject,
       sessionId:   "s-neu",
       userMessage: "can you also add a test for edge cases",
@@ -272,9 +272,9 @@ describe("outcomes", () => {
     expect(r).toBeNull();
   });
 
-  it("resolveUserPromptOutcome returns null for empty message", () => {
+  it("resolveUserPromptOutcome returns null for empty message", async () => {
     seedToolCall({ projectPath: testProject, sessionId: "s-empty" });
-    const r = resolveUserPromptOutcome({
+    const r = await resolveUserPromptOutcome({
       projectPath: testProject,
       sessionId:   "s-empty",
       userMessage: "",
@@ -282,9 +282,9 @@ describe("outcomes", () => {
     expect(r).toBeNull();
   });
 
-  it("resolveUserPromptOutcome returns null when positive AND negative tokens present", () => {
+  it("resolveUserPromptOutcome returns null when positive AND negative tokens present", async () => {
     seedToolCall({ projectPath: testProject, sessionId: "s-mix" });
-    const r = resolveUserPromptOutcome({
+    const r = await resolveUserPromptOutcome({
       projectPath: testProject,
       sessionId:   "s-mix",
       userMessage: "thanks but no, this is wrong",
@@ -292,10 +292,10 @@ describe("outcomes", () => {
     expect(r).toBeNull();
   });
 
-  it("[RT-S1-11] resolveUserPromptOutcome NEVER persists raw user message text", () => {
+  it("[RT-S1-11] resolveUserPromptOutcome NEVER persists raw user message text", async () => {
     seedToolCall({ projectPath: testProject, sessionId: "s-priv" });
     const secret = "my-API-KEY-is-sk-proj-abc123xyz-do-not-leak";
-    const r = resolveUserPromptOutcome({
+    const r = await resolveUserPromptOutcome({
       projectPath: testProject,
       sessionId:   "s-priv",
       userMessage: `thanks! ${secret}`,
@@ -313,10 +313,10 @@ describe("outcomes", () => {
 
   // ── resolveFollowUpOutcomes ─────────────────────────────────────────────
 
-  it("resolveFollowUpOutcomes detects Read after zc_file_summary within window", () => {
+  it("resolveFollowUpOutcomes detects Read after zc_file_summary within window", async () => {
     // Seed a zc_file_summary tool_call
     const summaryCallId = newCallId();
-    recordToolCall({
+    await recordToolCall({
       callId: summaryCallId,
       sessionId: "s-fu",
       agentId: "a",
@@ -329,7 +329,7 @@ describe("outcomes", () => {
       status: "ok",
     });
 
-    const outcomes = resolveFollowUpOutcomes({
+    const outcomes = await resolveFollowUpOutcomes({
       projectPath: testProject,
       sessionId:   "s-fu",
       newToolName: "Read",
@@ -347,8 +347,8 @@ describe("outcomes", () => {
     expect(evidence).toHaveProperty("delay_seconds");
   });
 
-  it("resolveFollowUpOutcomes returns [] when new tool is not Read", () => {
-    recordToolCall({
+  it("resolveFollowUpOutcomes returns [] when new tool is not Read", async () => {
+    await recordToolCall({
       callId: newCallId(),
       sessionId: "s-fu2",
       agentId: "a",
@@ -360,7 +360,7 @@ describe("outcomes", () => {
       latencyMs: 20,
       status: "ok",
     });
-    const outcomes = resolveFollowUpOutcomes({
+    const outcomes = await resolveFollowUpOutcomes({
       projectPath: testProject,
       sessionId:   "s-fu2",
       newToolName: "Bash",
@@ -369,8 +369,8 @@ describe("outcomes", () => {
     expect(outcomes).toHaveLength(0);
   });
 
-  it("resolveFollowUpOutcomes returns [] when no file_path in input", () => {
-    const outcomes = resolveFollowUpOutcomes({
+  it("resolveFollowUpOutcomes returns [] when no file_path in input", async () => {
+    const outcomes = await resolveFollowUpOutcomes({
       projectPath: testProject,
       sessionId:   "s-fu3",
       newToolName: "Read",
@@ -379,8 +379,8 @@ describe("outcomes", () => {
     expect(outcomes).toHaveLength(0);
   });
 
-  it("resolveFollowUpOutcomes accepts both file_path and path keys", () => {
-    recordToolCall({
+  it("resolveFollowUpOutcomes accepts both file_path and path keys", async () => {
+    await recordToolCall({
       callId: newCallId(),
       sessionId: "s-fu4",
       agentId: "a",
@@ -392,7 +392,7 @@ describe("outcomes", () => {
       latencyMs: 20,
       status: "ok",
     });
-    const outcomes = resolveFollowUpOutcomes({
+    const outcomes = await resolveFollowUpOutcomes({
       projectPath: testProject,
       sessionId:   "s-fu4",
       newToolName: "Read",
@@ -401,10 +401,10 @@ describe("outcomes", () => {
     expect(outcomes).toHaveLength(1);
   });
 
-  it("resolveFollowUpOutcomes returns [] when no prior zc_file_summary in session", () => {
+  it("resolveFollowUpOutcomes returns [] when no prior zc_file_summary in session", async () => {
     // Seed only a non-summary call
     seedToolCall({ projectPath: testProject, sessionId: "s-fu5", toolName: "Bash" });
-    const outcomes = resolveFollowUpOutcomes({
+    const outcomes = await resolveFollowUpOutcomes({
       projectPath: testProject,
       sessionId:   "s-fu5",
       newToolName: "Read",
@@ -415,16 +415,16 @@ describe("outcomes", () => {
 
   // ── getOutcomesForToolCall ──────────────────────────────────────────────
 
-  it("getOutcomesForToolCall returns outcomes in insertion order", () => {
-    const callId = seedToolCall({ projectPath: testProject, sessionId: "s-get" });
-    recordOutcome({
+  it("getOutcomesForToolCall returns outcomes in insertion order", async () => {
+    const callId = await seedToolCall({ projectPath: testProject, sessionId: "s-get" });
+    await recordOutcome({
       projectPath: testProject,
       refType: "tool_call",
       refId: callId,
       outcomeKind: "accepted",
       signalSource: "user_prompt",
     });
-    recordOutcome({
+    await recordOutcome({
       projectPath: testProject,
       refType: "tool_call",
       refId: callId,
@@ -444,9 +444,9 @@ describe("outcomes", () => {
 
   // ── Integration: chain integrity ────────────────────────────────────────
 
-  it("[RT-S1-10] chain extends correctly across many outcomes", () => {
+  it("[RT-S1-10] chain extends correctly across many outcomes", async () => {
     for (let i = 0; i < 20; i++) {
-      recordOutcome({
+      await recordOutcome({
         projectPath: testProject,
         refType:     "tool_call",
         refId:       `call-${i}`,
@@ -461,9 +461,9 @@ describe("outcomes", () => {
     expect(result.totalRows).toBe(20);
   });
 
-  it("[RT-S1-09] tampered outcomes row detected by chain verification", () => {
+  it("[RT-S1-09] tampered outcomes row detected by chain verification", async () => {
     for (let i = 0; i < 5; i++) {
-      recordOutcome({
+      await recordOutcome({
         projectPath: testProject,
         refType:     "tool_call",
         refId:       `c-${i}`,
@@ -492,12 +492,12 @@ describe("outcomes", () => {
     expect(result.totalRows).toBe(0);
   });
 
-  it("chain integrity holds when outcomes are interleaved with tool_calls", () => {
+  it("chain integrity holds when outcomes are interleaved with tool_calls", async () => {
     // Record 10 tool_calls with interleaved outcomes — outcomes chain
     // is independent of tool_calls chain; both must verify independently.
     for (let i = 0; i < 10; i++) {
-      const cid = seedToolCall({ projectPath: testProject, sessionId: `s-${i}` });
-      recordOutcome({
+      const cid = await seedToolCall({ projectPath: testProject, sessionId: `s-${i}` });
+      await recordOutcome({
         projectPath: testProject,
         refType:     "tool_call",
         refId:       cid,
@@ -511,10 +511,10 @@ describe("outcomes", () => {
 
   // ── Integration: resolvers write hash-chained rows ──────────────────────
 
-  it("all three resolvers produce verifiable chained outcomes", () => {
+  it("all three resolvers produce verifiable chained outcomes", async () => {
     // git_commit resolver
     seedToolCall({ projectPath: testProject, sessionId: "s-mix-git", toolName: "Bash" });
-    resolveGitCommitOutcome({
+    await resolveGitCommitOutcome({
       projectPath: testProject,
       sessionId:   "s-mix-git",
       bashOutput:  "[main abc1234] Ship feature",
@@ -522,14 +522,14 @@ describe("outcomes", () => {
 
     // user_prompt resolver
     seedToolCall({ projectPath: testProject, sessionId: "s-mix-up" });
-    resolveUserPromptOutcome({
+    await resolveUserPromptOutcome({
       projectPath: testProject,
       sessionId:   "s-mix-up",
       userMessage: "works great, thanks!",
     });
 
     // follow_up resolver
-    recordToolCall({
+    await recordToolCall({
       callId: newCallId(),
       sessionId: "s-mix-fu",
       agentId: "a",
@@ -538,7 +538,7 @@ describe("outcomes", () => {
       model: "claude-sonnet-4-6",
       inputTokens: 100, outputTokens: 50, latencyMs: 20, status: "ok",
     });
-    resolveFollowUpOutcomes({
+    await resolveFollowUpOutcomes({
       projectPath: testProject,
       sessionId:   "s-mix-fu",
       newToolName: "Read",
@@ -552,9 +552,9 @@ describe("outcomes", () => {
 
   // ── Performance ─────────────────────────────────────────────────────────
 
-  it("[PERF] recordOutcome p95 latency < 50ms", () => {
+  it("[PERF] recordOutcome p95 latency < 50ms", async () => {
     // Warm DB
-    recordOutcome({
+    await recordOutcome({
       projectPath: testProject,
       refType: "tool_call",
       refId: "warm",
@@ -565,7 +565,7 @@ describe("outcomes", () => {
     const samples: number[] = [];
     for (let i = 0; i < 100; i++) {
       const t0 = Date.now();
-      recordOutcome({
+      await recordOutcome({
         projectPath: testProject,
         refType: "tool_call",
         refId: `perf-${i}`,

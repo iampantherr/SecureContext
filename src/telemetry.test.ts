@@ -85,9 +85,9 @@ describe("telemetry", () => {
     expect(a).not.toBe(b);
   });
 
-  it("recordToolCall persists a row with cost computed from pricing table", () => {
+  it("recordToolCall persists a row with cost computed from pricing table", async () => {
     const callId = newCallId();
-    const r = recordToolCall({
+    const r = await recordToolCall({
       callId,
       sessionId: "sess-1",
       agentId: "agent-x",
@@ -110,8 +110,8 @@ describe("telemetry", () => {
     expect(r!.status).toBe("ok");
   });
 
-  it("recordToolCall stores cost_known=0 for unknown model", () => {
-    const r = recordToolCall({
+  it("recordToolCall stores cost_known=0 for unknown model", async () => {
+    const r = await recordToolCall({
       callId: newCallId(),
       sessionId: "sess-1",
       agentId: "agent-x",
@@ -128,8 +128,8 @@ describe("telemetry", () => {
     expect(r!.cost_usd).toBe(0);
   });
 
-  it("recordToolCall estimates tokens from chars when tokens not provided (chars/4)", () => {
-    const r = recordToolCall({
+  it("recordToolCall estimates tokens from chars when tokens not provided (chars/4)", async () => {
+    const r = await recordToolCall({
       callId: newCallId(),
       sessionId: "sess-1",
       agentId: "a",
@@ -145,8 +145,8 @@ describe("telemetry", () => {
     expect(r!.output_tokens).toBe(200);
   });
 
-  it("recordToolCall handles status=error + errorClass", () => {
-    const r = recordToolCall({
+  it("recordToolCall handles status=error + errorClass", async () => {
+    const r = await recordToolCall({
       callId: newCallId(),
       sessionId: "sess-1",
       agentId: "a",
@@ -163,8 +163,8 @@ describe("telemetry", () => {
     expect(r!.error_class).toBe("permission");
   });
 
-  it("recordToolCall applies batch discount when batch=true", () => {
-    const r = recordToolCall({
+  it("recordToolCall applies batch discount when batch=true", async () => {
+    const r = await recordToolCall({
       callId: newCallId(),
       sessionId: "sess-1",
       agentId: "a",
@@ -228,9 +228,9 @@ describe("telemetry", () => {
 
   // ── Integration: chain integrity ─────────────────────────────────────────
 
-  it("[RT-S1-07] chain extends correctly across multiple calls", () => {
+  it("[RT-S1-07] chain extends correctly across multiple calls", async () => {
     for (let i = 0; i < 10; i++) {
-      recordToolCall({
+      await recordToolCall({
         callId: `c-${i}`,
         sessionId: "sess-chain",
         agentId: "a",
@@ -248,9 +248,9 @@ describe("telemetry", () => {
     expect(result.totalRows).toBe(10);
   });
 
-  it("[RT-S1-06] tampered tool_calls row detected by chain verification", () => {
+  it("[RT-S1-06] tampered tool_calls row detected by chain verification", async () => {
     for (let i = 0; i < 5; i++) {
-      recordToolCall({
+      await recordToolCall({
         callId: `c-${i}`,
         sessionId: "sess-tamper",
         agentId: "a",
@@ -289,10 +289,10 @@ describe("telemetry", () => {
 
   // ── Failure-mode ─────────────────────────────────────────────────────────
 
-  it("returns null + logs error on bad project path (no throw)", () => {
+  it("returns null + logs error on bad project path (no throw)", async () => {
     // null projectPath → openProjectDb throws → recordToolCall catches
     // and returns null
-    const r = recordToolCall({
+    const r = await recordToolCall({
       callId: newCallId(),
       sessionId: "sess",
       agentId: "a",
@@ -311,10 +311,10 @@ describe("telemetry", () => {
 
   // ── Performance ─────────────────────────────────────────────────────────
 
-  it("[PERF] recordToolCall overhead < 50ms p95 (loose budget for first-call DB init)", () => {
+  it("[PERF] recordToolCall overhead < 50ms p95 (loose budget for first-call DB init)", async () => {
     // First call includes DB open + migration + chain bootstrap (cold)
     const cold = Date.now();
-    recordToolCall({
+    await recordToolCall({
       callId: newCallId(),
       sessionId: "sess-perf",
       agentId: "a",
@@ -333,7 +333,7 @@ describe("telemetry", () => {
     const samples: number[] = [];
     for (let i = 0; i < 100; i++) {
       const t0 = Date.now();
-      recordToolCall({
+      await recordToolCall({
         callId: newCallId(),
         sessionId: "sess-perf",
         agentId: "a",
@@ -354,9 +354,9 @@ describe("telemetry", () => {
 
   // ── getToolCall ─────────────────────────────────────────────────────────
 
-  it("getToolCall retrieves a previously recorded row", () => {
+  it("getToolCall retrieves a previously recorded row", async () => {
     const cid = newCallId();
-    recordToolCall({
+    await recordToolCall({
       callId: cid,
       sessionId: "s",
       agentId: "a",

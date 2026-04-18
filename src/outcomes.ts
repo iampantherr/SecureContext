@@ -44,14 +44,12 @@ import { mkdirSync, existsSync } from "node:fs";
 import { logger } from "./logger.js";
 import { auditLog } from "./security/audit_log.js";
 import {
-  hmacRowHash,
   canonicalize,
-  GENESIS,
-  verifyHmacChain,
   type ChainableRow,
 } from "./security/hmac_chain.js";
-import { getMachineSecret } from "./security/machine_secret.js";
 import { runMigrations } from "./migrations.js";
+import { ChainedTableSqlite } from "./security/chained_table_sqlite.js";
+import { verifyChainRows } from "./security/chained_table.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -99,9 +97,8 @@ export interface OutcomeRecord extends ChainableRow {
  * Record an outcome for a previously-recorded action.
  * Never throws; loud failure via logger.
  */
-export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
+export async function recordOutcome(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
   try {
-    const projectHash = sha256ProjectHash(input.projectPath);
     const db = openProjectDb(input.projectPath);
     try {
       const outcomeId  = `out-${randomUUID().slice(0, 12)}`;
@@ -109,13 +106,17 @@ export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
       const confidence = input.confidence ?? 1.0;
       const evidenceJson = input.evidence ? JSON.stringify(input.evidence, sortedReplacer) : null;
 
-      // CRITICAL: same race fix as telemetry.recordToolCall.
-      // BEGIN IMMEDIATE serializes concurrent writers so SELECT-prev-hash
-      // and INSERT happen atomically. Multiple agents firing resolvers on
-      // the same project DB would otherwise race and break the chain.
-      db.exec("BEGIN IMMEDIATE");
-      const prevHash = getLastOutcomeHash(db);
-      const canonical = buildCanonical({
+      // v0.12.0: ChainedTableSqlite handles BEGIN IMMEDIATE atomicity + Tier 1
+      // per-agent HMAC subkey. The outcomes table has a single chain per DB
+      // (no project-hash filter — the DB itself is per-project).
+      const chain = new ChainedTableSqlite(db, { tableName: "outcomes" });
+
+      // The "agent" for outcome rows is implied by the action being resolved.
+      // For now we use a constant "outcomes-resolver" identity — Sprint 3
+      // will refine to attribute per-resolver runs to the calling agent.
+      const writerAgentId = "outcomes-resolver";
+
+      const canonicalFields = buildCanonicalFields({
         outcomeId,
         refType: input.refType,
         refId: input.refId,
@@ -126,22 +127,23 @@ export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
         evidence: evidenceJson,
         resolvedAt,
       });
-      const rowHash = hmacRowHash(getMachineSecret(), prevHash, canonical);
 
-      db.prepare(`
-        INSERT INTO outcomes (
-          outcome_id, ref_type, ref_id, outcome_kind,
-          signal_source, confidence, score_delta, evidence, resolved_at,
-          prev_hash, row_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        outcomeId, input.refType, input.refId, input.outcomeKind,
-        input.signalSource, confidence, input.scoreDelta ?? null, evidenceJson, resolvedAt,
-        prevHash, rowHash
+      await chain.appendChainedWith(
+        { agentId: writerAgentId, projectHash: sha256ProjectHash(input.projectPath), canonicalFields },
+        ({ prevHash, rowHash, db: txnDb }) => {
+          txnDb.prepare(`
+            INSERT INTO outcomes (
+              outcome_id, ref_type, ref_id, outcome_kind,
+              signal_source, confidence, score_delta, evidence, resolved_at,
+              prev_hash, row_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            outcomeId, input.refType, input.refId, input.outcomeKind,
+            input.signalSource, confidence, input.scoreDelta ?? null, evidenceJson, resolvedAt,
+            prevHash, rowHash
+          );
+        }
       );
-
-      // Release the IMMEDIATE lock so other writers can proceed.
-      db.exec("COMMIT");
 
       logger.info("outcomes", "outcome_recorded", {
         outcome_id: outcomeId,
@@ -153,9 +155,6 @@ export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
       });
 
       return readOutcome(db, outcomeId);
-    } catch (innerErr) {
-      try { db.exec("ROLLBACK"); } catch {}
-      throw innerErr;
     } finally {
       db.close();
     }
@@ -179,11 +178,11 @@ export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
  *
  * Returns the recorded outcome, or null if no commit detected.
  */
-export function resolveGitCommitOutcome(input: {
+export async function resolveGitCommitOutcome(input: {
   projectPath: string;
   sessionId:   string;
   bashOutput:  string;
-}): OutcomeRecord | null {
+}): Promise<OutcomeRecord | null> {
   // Match `[branch hash] message` (git commit's standard output format)
   // e.g. `[main abc123ef] Fix typo`
   const m = input.bashOutput.match(/\[(\S+)\s+([0-9a-f]{7,40})\]/);
@@ -203,7 +202,7 @@ export function resolveGitCommitOutcome(input: {
     return null;
   }
 
-  return recordOutcome({
+  return await recordOutcome({
     projectPath:   input.projectPath,
     refType:       "tool_call",
     refId:         recentCall.call_id,
@@ -228,18 +227,18 @@ export function resolveGitCommitOutcome(input: {
  *
  * Confidence is intentionally low (0.5) since this is a weak inferred signal.
  */
-export function resolveUserPromptOutcome(input: {
+export async function resolveUserPromptOutcome(input: {
   projectPath: string;
   sessionId:   string;
   userMessage: string;
-}): OutcomeRecord | null {
+}): Promise<OutcomeRecord | null> {
   const sentiment = classifySentiment(input.userMessage);
   if (sentiment === "neutral") return null;
 
   const recentCall = getMostRecentToolCallForSession(input.projectPath, input.sessionId);
   if (!recentCall) return null;
 
-  return recordOutcome({
+  return await recordOutcome({
     projectPath:   input.projectPath,
     refType:       "tool_call",
     refId:         recentCall.call_id,
@@ -262,13 +261,13 @@ export function resolveUserPromptOutcome(input: {
  *
  * Returns array of outcomes recorded (typically 0 or 1).
  */
-export function resolveFollowUpOutcomes(input: {
+export async function resolveFollowUpOutcomes(input: {
   projectPath:    string;
   sessionId:      string;
   newToolName:    string;
   newToolInput:   Record<string, unknown> | undefined;
   windowMinutes?: number;
-}): OutcomeRecord[] {
+}): Promise<OutcomeRecord[]> {
   // Only Read tool calls trigger this resolver
   if (input.newToolName !== "Read") return [];
   const filePath = (input.newToolInput?.file_path ?? input.newToolInput?.path) as string | undefined;
@@ -278,7 +277,7 @@ export function resolveFollowUpOutcomes(input: {
   const recentSummary = findRecentFileSummary(input.projectPath, input.sessionId, filePath, windowMs);
   if (!recentSummary) return [];
 
-  const outcome = recordOutcome({
+  const outcome = await recordOutcome({
     projectPath:   input.projectPath,
     refType:       "tool_call",
     refId:         recentSummary.call_id,
@@ -317,7 +316,10 @@ export function verifyOutcomesChain(projectPath: string): {
       FROM outcomes
       ORDER BY id ASC
     `).all() as unknown as OutcomeRecord[];
-    return verifyHmacChain(getMachineSecret(), rows, (row) => buildCanonical({
+    // v0.12.0 Tier 1: outcomes are written by the "outcomes-resolver" identity
+    // (see recordOutcome). Verifier derives the matching subkey to validate.
+    const rowsForVerify = rows.map((r) => ({ ...r, agentIdForVerify: "outcomes-resolver" }));
+    return verifyChainRows(rowsForVerify, (row) => canonicalize(buildCanonicalFields({
       outcomeId:    row.outcome_id,
       refType:      row.ref_type,
       refId:        row.ref_id,
@@ -327,7 +329,7 @@ export function verifyOutcomesChain(projectPath: string): {
       scoreDelta:   row.score_delta,
       evidence:     row.evidence,
       resolvedAt:   row.resolved_at,
-    }));
+    })));
   } finally {
     db.close();
   }
@@ -388,15 +390,6 @@ function openProjectDb(projectPath: string): DatabaseSync {
   return db;
 }
 
-function getLastOutcomeHash(db: DatabaseSync): string {
-  const row = db.prepare(`
-    SELECT row_hash FROM outcomes
-    WHERE row_hash != ''
-    ORDER BY id DESC LIMIT 1
-  `).get() as { row_hash: string } | undefined;
-  return row?.row_hash || GENESIS;
-}
-
 function getMostRecentToolCallForSession(
   projectPath: string,
   sessionId:   string,
@@ -442,7 +435,7 @@ function findRecentFileSummary(
   }
 }
 
-function buildCanonical(input: {
+function buildCanonicalFields(input: {
   outcomeId:    string;
   refType:      string;
   refId:        string;
@@ -452,8 +445,8 @@ function buildCanonical(input: {
   scoreDelta:   number | null;
   evidence:     string | null;
   resolvedAt:   string;
-}): string {
-  return canonicalize([
+}): Array<string | number> {
+  return [
     input.outcomeId,
     input.refType,
     input.refId,
@@ -463,7 +456,7 @@ function buildCanonical(input: {
     input.scoreDelta === null ? "" : input.scoreDelta.toFixed(4),
     input.evidence ?? "",
     input.resolvedAt,
-  ]);
+  ];
 }
 
 function readOutcome(db: DatabaseSync, outcomeId: string): OutcomeRecord | null {
