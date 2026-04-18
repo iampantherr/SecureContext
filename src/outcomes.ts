@@ -109,6 +109,11 @@ export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
       const confidence = input.confidence ?? 1.0;
       const evidenceJson = input.evidence ? JSON.stringify(input.evidence, sortedReplacer) : null;
 
+      // CRITICAL: same race fix as telemetry.recordToolCall.
+      // BEGIN IMMEDIATE serializes concurrent writers so SELECT-prev-hash
+      // and INSERT happen atomically. Multiple agents firing resolvers on
+      // the same project DB would otherwise race and break the chain.
+      db.exec("BEGIN IMMEDIATE");
       const prevHash = getLastOutcomeHash(db);
       const canonical = buildCanonical({
         outcomeId,
@@ -135,6 +140,9 @@ export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
         prevHash, rowHash
       );
 
+      // Release the IMMEDIATE lock so other writers can proceed.
+      db.exec("COMMIT");
+
       logger.info("outcomes", "outcome_recorded", {
         outcome_id: outcomeId,
         ref_type: input.refType,
@@ -145,6 +153,9 @@ export function recordOutcome(input: RecordOutcomeInput): OutcomeRecord | null {
       });
 
       return readOutcome(db, outcomeId);
+    } catch (innerErr) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw innerErr;
     } finally {
       db.close();
     }

@@ -147,6 +147,18 @@ export function recordToolCall(input: ToolCallInput): ToolCallRecord | null {
     // Open DB + ensure schema
     const db = openProjectDb(input.projectPath);
     try {
+      // CRITICAL: BEGIN IMMEDIATE acquires the SQLite write lock BEFORE the
+      // SELECT-prev-hash, so the SELECT + INSERT pair is atomic with respect
+      // to other writer processes. Without this, two concurrent agents can
+      // read the same prev_hash and both INSERT rows linking to it →
+      // chain integrity breaks (RT-S1-17 stress test caught this on
+      // ≥2 concurrent writers per project DB).
+      //
+      // The cache is invalidated up-front because under contention the
+      // cached value may be stale (another writer extended the chain since
+      // we last looked). Force a fresh DB read inside the transaction.
+      _lastHashCache.delete(projectHash);
+      db.exec("BEGIN IMMEDIATE");
       // Compute hash chain link
       const prevHash = getLastHashForProject(db, projectHash);
       const ts = new Date().toISOString();
@@ -188,6 +200,9 @@ export function recordToolCall(input: ToolCallInput): ToolCallRecord | null {
       );
 
       // Update cache
+      // COMMIT releases the write lock, allowing waiting writers to proceed.
+      db.exec("COMMIT");
+
       _lastHashCache.set(projectHash, rowHash);
 
       // Emit DEBUG telemetry log entry (cheap; can be filtered out via ZC_LOG_LEVEL)
@@ -201,6 +216,10 @@ export function recordToolCall(input: ToolCallInput): ToolCallRecord | null {
       }, trace);
 
       return readToolCall(db, input.callId);
+    } catch (innerErr) {
+      // Roll back the IMMEDIATE transaction so other writers aren't blocked.
+      try { db.exec("ROLLBACK"); } catch {}
+      throw innerErr;
     } finally {
       db.close();
     }
