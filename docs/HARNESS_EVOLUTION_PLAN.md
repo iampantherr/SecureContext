@@ -34,9 +34,11 @@ Decisions documented here are **locked in** — they were debated, settled, and 
 10. [Cross-cutting concerns](#cross-cutting)
 11. [Karpathy's autoresearch — exact mapping](#autoresearch)
 12. [What gets shipped where (repo map)](#repo-map)
-13. [Risks + open questions](#risks)
-14. [Glossary](#glossary)
-15. [Revision history](#revisions)
+13. [Testing strategy (per sprint, exhaustive)](#testing)
+14. [Logging strategy (debugging-first observability)](#logging)
+15. [Risks + open questions](#risks)
+16. [Glossary](#glossary)
+17. [Revision history](#revisions)
 
 ---
 
@@ -208,25 +210,39 @@ SQLite wins for:
 
 **Trigger to switch:** Synthetic-fixture loop has produced ≥3 measurable skill improvements with no false-positive promotions over 1 week.
 
-### D4. Mutation engine — HYBRID (Ollama proposes, Sonnet judges, Opus escalation)
+### D4. Mutation engine — SONNET 4.6 PRIMARY (Opus escalation, pluggable for future local A/B)
 
-**Decision:**
+**Final decision (revised 2026-04-18):**
 
 ```
-Tier 1 (95% of mutations): qwen2.5-coder:14b proposes 5 candidates → Sonnet 4.6 picks 1
+Tier 1 (95% of mutations): Sonnet 4.6 generates 5 candidates AND picks best
 Tier 2 (5% — hard cases):  Opus 4.7 single deep mutation when Tier 1 has failed 3+ times
+PLUGGABLE: ZC_MUTATOR_MODEL env var allows swapping in any model
+           (e.g. deepseek-r1:32b once we have outcome data to A/B with)
 ```
 
-**Rationale:**
-- Local Ollama brainstorming is free and parallel on the 5090
-- Sonnet as JUDGE is far cheaper than Sonnet as GENERATOR
-- Opus reserved for hard cases earns its premium
-- Total budget: ~$0.10-0.30/night for the entire skill library
+**Rationale (why not local):**
+- Local 32B models on RTX 5090 (qwen2.5-coder:32b, deepseek-r1:32b) reach ~70-85% of
+  Sonnet 4.6 quality on reasoning-heavy tasks like skill mutation. The gap matters most
+  for THIS specific task (low volume, infrequent, high reasoning per call).
+- Cost is trivially small at our volume (see math below).
+- We build the engine with a pluggable model interface so later A/B testing is easy.
+
+**Cost math:**
+- Per mutation: ~3k input + ~1k output ≈ $0.024 (Sonnet pricing $3/MTok in + $15/MTok out)
+- Nightly: 3 worst skills × 5 candidates × $0.024 = $0.36/night
+- Monthly: ~$10.80 + occasional Opus escalation (~$2-5/mo) = **~$13-15/month total**
+
+**Pluggable architecture requirement:**
+The mutation engine MUST be implemented behind a `Mutator` interface with an
+`MUTATOR_MODEL` factory. Initial impl: `SonnetMutator`. Future impls: `OpusMutator`,
+`DeepseekR1LocalMutator`, etc. Switch via `ZC_MUTATOR_MODEL=deepseek-r1:32b` env var
+when we want to A/B test local models against Sonnet baseline using outcome data.
 
 **Frequency:**
 - Nightly batch: pick the 3 worst-performing skills, run mutation cycle on each
-- Per-cycle: 5 Ollama generations + 1 Sonnet judge + 5 fixture replays = ~$0.005 cost
-- Total nightly: ~15 mutation cycles × $0.005 = $0.075 + occasional Opus = ~$0.20
+- Per-cycle: 5 Sonnet calls (generate+pick) + 5 fixture replays via cheap local Ollama
+- Total nightly: ~$0.36 + occasional Opus escalation = **~$0.50/night worst-case**
 
 ### D5. Cost attribution granularity — PER-TOOL-CALL (with pre-aggregated views)
 
@@ -934,8 +950,299 @@ Our equivalent mapping:
 
 ---
 
+<a id="testing"></a>
+## 13. Testing strategy (per sprint, exhaustive)
+
+Every sprint ships with **8 categories of tests**. No sprint is "done" until all 8 are green.
+
+### Test category matrix
+
+| # | Category | Purpose | Where it lives |
+|---|---|---|---|
+| 1 | **Unit tests** (per-backend) | Single-function behavior. Run for both SQLite + Postgres. | `src/*.test.ts` (vitest) |
+| 2 | **Integration tests** | Cross-component flows. New schema + new API + new hook working together. | `scripts/test-{feature}-live.mjs` |
+| 3 | **End-to-end tests** | Realistic user scenarios with synthetic agents. | `scripts/e2e-{sprint}.mjs` |
+| 4 | **Performance / load tests** | p99 latency, throughput, memory under stress. | `scripts/perf-{component}.mjs` |
+| 5 | **Regression tests** | Replay historical sessions, verify no behavior change. | `scripts/regression-{sprint}.mjs` |
+| 6 | **Failure-mode tests** | Postgres down, Ollama down, network dropped, disk full. | `scripts/failmode-{component}.mjs` |
+| 7 | **Security / red-team** | Where applicable: prompt injection, RBAC bypass, SSRF. | `security-tests/{feature}.mjs` |
+| 8 | **User-scenario tests** | Specific real-world flows from real Amit usage. | `scripts/scenario-{name}.mjs` |
+
+### Sprint 1 — explicit test inventory
+
+**Unit (10+ tests per module, both backends):**
+- `recordToolCall()` — happy path, missing fields, large input, concurrent writes
+- `recordOutcome()` — link-by-ref-type+ref-id, idempotent on dupe, score_delta math
+- `recordLearning()` — JSONL parse, dedup, all 5 categories
+- Outcome resolvers — git_commit detection, user_prompt sentiment, follow_up pattern
+- Pricing math — every model in pricing table, ±5% accuracy
+
+**Integration:**
+- `scripts/test-telemetry-live.mjs`: spawn synthetic agent, call 20 tools, verify all 20 in `tool_calls`, verify cost math, verify outcome resolvers fire
+- Hook: write to `learnings/decisions.jsonl` → verify Postgres `learnings` table gets the row
+
+**E2E:**
+- `scripts/e2e-sprint1.mjs`: real Claude session (3 turns) on a fixture project. Verify telemetry captured, cost accurate vs API billing within ±5%, at least one outcome resolved.
+
+**Performance:**
+- `scripts/perf-tool-calls.mjs`: insert 10,000 tool_calls + 1,000 outcomes; verify p99 query latency on common views < 100ms; insert throughput > 500/sec
+
+**Regression:**
+- `scripts/regression-sprint1.mjs`: replay 10 captured historical sessions, verify cost capture matches recorded API billing within ±5%
+
+**Failure-mode:**
+- Postgres unreachable during tool call → telemetry buffer + retry, no agent disruption
+- Disk full when writing JSONL → graceful warning, no crash
+- Out-of-pricing-table model → record at $0 with `unknown_model` flag, log warning
+
+**Security:**
+- N/A for Sprint 1 (no new attack surface; existing RBAC covers)
+
+**User scenarios:**
+- "Amit runs 1-hour Claude session on RevClear, expects cost report at end" → run, verify report generated, cost within ±5%
+- "Amit replays a session to compare alternative tool choices" → replay tool exists, produces measurable diff
+
+### Sprint 2 — explicit test inventory
+
+**Unit:**
+- Skill loader — global, per-project, hierarchical merge, malformed frontmatter
+- `zc_skill_run` — preconditions check, input validation, output shape, missing skill error
+- Mutation engine — Sonnet API mock returning candidates, judge logic, replay scoring
+- Replay harness — fixture loading, isolated context, score computation
+- Context-budget tracker — token-counting accuracy, hook upgrade rules at 70/85/95%
+- Rolling compaction — segment selection, summary quality validation, in-place replace
+
+**Integration:**
+- Full mutation cycle: pick skill → generate candidates → judge → replay → promote/archive → verify Postgres state
+- Skill invocation: `zc_skill_run("audit_file", {path: "test.ts"})` → tool calls happen as expected → outcome recorded
+
+**E2E:**
+- 8 seed skills each tested with ≥5 fixtures
+- Nightly mutation engine runs for 7 days on synthetic outcome data → measurable improvement on at least 2 skills
+- Context-budget enforcement: synthetic agent at 75% context tries to Read → blocked → uses zc_file_summary instead
+
+**Performance:**
+- 1000 skill_runs ingestion < 30 sec
+- Mutation engine cycle (5 candidates + 5 replays) < 5 min
+
+**Regression:**
+- Existing harness without skills: ensure no behavior regression
+
+**Failure-mode:**
+- Sonnet API down during mutation: graceful skip, retry next night
+- Replay fixture missing: skip with clear error
+- Skill markdown invalid: refuse to load with parser error
+
+**Security:**
+- Prompt injection in skill body — must not exfiltrate or escalate (skills are TRUSTED but we still defense-in-depth)
+- Mutation cannot edit skill outside `~/.claude/skills/` or `<project>/.claude/skills/` (path validation)
+
+**User scenarios:**
+- "Amit invokes audit_file skill on a real source file → gets a structured report"
+- "Amit reviews the morning's mutation log, sees what got promoted and why"
+
+### Sprint 3 — explicit test inventory
+
+**Unit:**
+- ASSIGN schema validation (all required fields present, types correct, dependencies valid IDs)
+- Task queue: claim, heartbeat, reclaim-on-stale, SKIP LOCKED concurrent claims
+- File-ownership conflict detection (overlapping exclusive sets, edge cases)
+- Complexity → model tier router
+
+**Integration:**
+- Worker pool of 5 developers, 50 tasks queued, all 50 claimed and processed
+- File-ownership: ASSIGN with overlapping `exclusive` files → REJECT broadcast back to orchestrator
+
+**E2E:**
+- 5-agent live session on synthetic 50-task workload: all tasks complete, no double-claim, no merge conflict
+- Complexity routing: 100 tasks across complexity 1-5 → measure cost vs always-Sonnet baseline → ≥20% reduction
+
+**Performance:**
+- Task queue under concurrent load: 10 workers claiming from 1000-task queue, < 50ms p99 claim latency
+- File-ownership check: 100 concurrent ASSIGN validations, < 100ms p99
+
+**Regression:**
+- Existing 1-worker-per-role flow: works unchanged when `-WorkerCount` not specified
+
+**Failure-mode:**
+- Worker dies mid-task: heartbeat staleness detected within 5 min, task reclaimed by another worker
+- Postgres lock contention: SKIP LOCKED prevents deadlock
+- Orchestrator posts ASSIGN with malformed schema: rejected with clear error
+
+**Security:**
+- File-ownership bypass attempt: agent tries to write to file outside its `exclusive` set → blocked at hook level (extension of preread-dedup pattern)
+
+**User scenarios:**
+- "Amit launches a 7-developer pool, 100 tasks, expects all to complete without manual intervention"
+- "Amit specifies file_ownership exclusive=[src/auth/*] and another worker tries to ASSIGN same dir → rejected"
+
+### Sprint 4 — explicit test inventory
+
+**Unit:**
+- Reranker integration: top-20 → top-5 with measurable score change
+- HyDE: hypothetical answer generation + embed + search
+- Multi-hop: reference extraction from markdown/code, follow-up search
+
+**Integration:**
+- Search with `mode: "rerank"` returns measurably better top-5 vs default
+- Search with `mode: "hyde"` finds documents the default mode misses on benchmark
+
+**E2E:**
+- Curated benchmark of 50 real questions on 3 indexed projects
+- Compare default vs reranker vs HyDE vs multi-hop on precision@5
+- Reranker ≥15% precision@5 improvement vs default
+- HyDE ≥10% improvement on long-tail (questions with no exact keyword match)
+
+**Performance:**
+- Reranker latency: 20 candidates, p99 < 200ms on RTX 5090
+- HyDE: hypothetical generation < 1 sec
+- Dashboard query: all default views < 200ms p99
+
+**Regression:**
+- Default search (no mode flag) unchanged in result ordering and quality
+
+**Failure-mode:**
+- Reranker model not pulled: graceful fallback to BM25+cosine ordering
+- HyDE: Ollama down → fallback to raw query embedding
+- Dashboard: Postgres view missing → 503 with helpful error
+
+**Security:**
+- Reranker input must be quoted — must not allow injection via document content into rerank prompt
+- Dashboard: read-only; no mutation endpoints; auth required
+
+**User scenarios:**
+- "Amit asks a vague question, expects reranker to surface the most relevant 5 of 20 candidates"
+- "Amit opens the dashboard, can see live worker state + cost burn in 30 seconds"
+
+### Universal acceptance gates (all sprints)
+
+Before any sprint is marked DONE, all of the following must be true:
+
+- [ ] All 8 categories of tests (where applicable) are green
+- [ ] Both SQLite + Postgres backends pass identical test suites
+- [ ] Performance budgets met (declared in each sprint section)
+- [ ] CHANGELOG entry written
+- [ ] AGENT_HARNESS.md / README updated for any user-facing change
+- [ ] Logging instrumented (per [section 14](#logging))
+- [ ] Critical decision facts persisted to SC working memory
+- [ ] This doc's revision history updated
+
+---
+
+<a id="logging"></a>
+## 14. Logging strategy (debugging-first observability)
+
+**Principle:** when something goes wrong (and things will), it must take **< 5 minutes** to find the cause from logs alone — not from re-running the agent, not from adding `console.log` after the fact.
+
+### Log categories + levels
+
+| Level | Use for | Volume |
+|---|---|---|
+| `DEBUG` | Per-operation detail (every state transition, every variable) | High; off by default in prod |
+| `INFO` | Important state changes (mutation promoted, queue claimed, session started) | Moderate; on by default |
+| `WARN` | Degraded conditions (Ollama unreachable, retry triggered, fallback engaged) | Low; on by default |
+| `ERROR` | Failures (Postgres connection lost, schema mismatch, parse error) | Low; on by default + alert |
+| `AUDIT` | Security-relevant (token issued, role permission check, file-ownership block) | Low; always on, never compacted |
+
+### Per-component log files
+
+Every major component writes to its own structured-JSON log under `~/.claude/zc-ctx/logs/`:
+
+```
+~/.claude/zc-ctx/logs/
+├── telemetry.log         (Sprint 1 — every tool call)
+├── outcomes.log          (Sprint 1 — every outcome resolution)
+├── learnings-mirror.log  (Sprint 1 — every JSONL→Postgres index)
+├── skills.log            (Sprint 2 — skill loads, runs, replays)
+├── mutations.log         (Sprint 2 — every mutation cycle, full trace)
+├── budget.log            (Sprint 2 — context-budget transitions)
+├── compaction.log        (Sprint 2 — every rolling-compaction event)
+├── tasks.log             (Sprint 3 — queue claims, heartbeats, completions)
+├── ownership.log         (Sprint 3 — file-ownership decisions, conflicts)
+├── routing.log           (Sprint 3 — complexity → model decisions)
+├── retrieval.log         (Sprint 4 — reranker, HyDE, multi-hop debug)
+└── audit.log             (cross-component — security-relevant events)
+```
+
+### Structured log schema
+
+Every line is JSON:
+
+```json
+{
+  "ts":        "2026-04-18T20:54:31.182Z",
+  "level":     "INFO",
+  "component": "mutations",
+  "event":     "mutation_promoted",
+  "session_id": "abc-123",
+  "context": {
+    "skill_name":    "audit_file",
+    "from_version":  "0.1.0",
+    "to_version":    "0.1.1",
+    "replay_score_delta": 0.18,
+    "judge_rationale": "candidate 3 better separates issues from suggestions"
+  },
+  "trace_id":  "muta-7f9a"
+}
+```
+
+### Log rotation + retention
+
+- Rotation: per-day files, max 100MB each (`telemetry.2026-04-18.log`, `telemetry.2026-04-19.log`)
+- Retention: 30 days for INFO/WARN/ERROR; 365 days for AUDIT; DEBUG kept 7 days
+- Compression: rotated logs gzipped after 24 hours
+- Cleanup: nightly cron deletes expired logs
+
+### Cross-log correlation via `trace_id`
+
+Every log entry includes a `trace_id` that propagates through related operations. Example: a mutation cycle generates ONE trace_id (`muta-7f9a`); every log entry from that cycle (Sonnet call, replay, promotion, audit) shares it. Grep by trace_id to reconstruct an entire flow.
+
+### Debug-first MCP tool
+
+A new `zc_logs` tool ships in Sprint 1:
+
+```
+zc_logs(component, since, level, trace_id?)
+```
+
+Returns recent log entries matching the filter, formatted for agent consumption. The agent can self-debug:
+
+```
+Agent: "I keep getting timeouts on the mutation engine. Let me check."
+→ zc_logs("mutations", since="1h", level="ERROR")
+→ "Found 3 ERRORs: all 'Sonnet API timeout after 30s'. Consider retry with longer timeout."
+```
+
+### Console / live-tail mode
+
+Set `ZC_LOG_CONSOLE=1` to also stream INFO+ to stderr. Useful during sprint-specific debugging. Color-coded: cyan=INFO, yellow=WARN, red=ERROR, magenta=AUDIT.
+
+### Log-driven testing
+
+Every test in [section 13](#testing) MUST also assert on log output where appropriate. E.g.:
+
+```js
+// Test: Postgres unreachable during tool call
+const r = await recordToolCallWithSimulatedPgDown(...);
+assert(r.bufferedForRetry, "should buffer when PG down");
+assertLogContains("telemetry.log", { level: "WARN", event: "pg_unreachable_buffered" });
+```
+
+This catches "silently swallowed errors" — a class of bugs where the code "works" but logs nothing useful when it doesn't.
+
+### Sprint 1 logging deliverables
+
+- `src/logger.ts` — structured JSON logger with levels, rotation, console mode
+- `src/log-rotation.ts` — daily rotation + gzip + retention enforcement
+- `hooks/log-cleanup.ps1` — nightly cron equivalent
+- `zc_logs` MCP tool implementation
+- All Sprint 1 components wired through the logger
+- README section: "Debugging — where to look first"
+
+---
+
 <a id="risks"></a>
-## 13. Risks + open questions
+## 15. Risks + open questions
 
 ### Known risks
 
@@ -958,7 +1265,7 @@ Our equivalent mapping:
 ---
 
 <a id="glossary"></a>
-## 14. Glossary
+## 16. Glossary
 
 - **Skill** — a markdown program defining a composed agent workflow. Located in `~/.claude/skills/` (global) or `<project>/.claude/skills/` (per-project).
 - **Outcome** — a deferred fact about whether an action achieved its goal. Joined to actions via `ref_type, ref_id`.
@@ -971,8 +1278,9 @@ Our equivalent mapping:
 ---
 
 <a id="revisions"></a>
-## 15. Revision history
+## 17. Revision history
 
-| Date | Author | Change |
-|---|---|---|
-| 2026-04-18 | Amit + Claude (Sonnet 4.6) | Initial v1.0 — full plan ratified |
+| Date | Version | Author | Change |
+|---|---|---|---|
+| 2026-04-18 | v1.0 | Amit + Claude (Sonnet 4.6) | Initial — full plan ratified |
+| 2026-04-18 | v1.1 | Amit + Claude (Sonnet 4.6) | D4 mutation engine revised: Sonnet 4.6 PRIMARY (not Ollama hybrid) with pluggable interface for future local A/B. Added §13 Testing strategy (8 categories, per-sprint inventory). Added §14 Logging strategy (debugging-first observability with `zc_logs` tool). |
