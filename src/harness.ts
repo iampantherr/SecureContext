@@ -26,7 +26,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { join, relative, sep, extname } from "node:path";
 import { createHash } from "node:crypto";
 import { Config } from "./config.js";
@@ -98,7 +98,14 @@ export interface CapturedOutput {
  */
 export async function indexProject(
   projectPath: string,
-  options: { excludes?: string[]; extensions?: string[]; maxBytes?: number } = {}
+  options: {
+    excludes?:   string[];
+    extensions?: string[];
+    maxBytes?:   number;
+    /** Called after each file is summarized. Enables live progress UI
+     *  (e.g. background-index.mjs writes a status file on each tick). */
+    onProgress?: (done: number, total: number, path: string) => void;
+  } = {}
 ): Promise<IndexProjectResult> {
   const start     = Date.now();
   const excludes  = options.excludes   ?? [...Config.INDEX_PROJECT_EXCLUDES];
@@ -146,7 +153,8 @@ export async function indexProject(
   // Phase 2: batch-summarize. Returns a Map keyed by relPath with semantic or
   // truncation fallback per file. Bounded concurrency prevents GPU thrash.
   const summaries = await summarizeBatch(
-    candidates.map((c) => ({ path: c.relPath, content: c.content }))
+    candidates.map((c) => ({ path: c.relPath, content: c.content })),
+    options.onProgress
   );
 
   // Phase 3: write to KB, counting semantic vs truncation hits.
@@ -541,16 +549,90 @@ export function checkAnswer(
   };
 }
 
+// ─── Indexing status (v0.10.2 — auto-index awareness) ───────────────────────
+// The background-indexer (scripts/background-index.mjs) writes a small JSON
+// "status" file per project while indexing is running. These helpers read it
+// so the health banner can show "indexing: 12/50 files" live.
+
+export interface IndexingStatus {
+  state:            "not-indexed" | "indexing" | "indexed";
+  totalFiles?:      number;
+  completedFiles?:  number;
+  startedAt?:       string;
+  finishedAt?:      string;
+  model?:           string | null;
+  error?:           string | null;
+  fileCountInKb?:   number;         // current number of file:-prefixed KB entries
+}
+
+function statusFilePath(projectPath: string): string {
+  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return join(Config.DB_DIR, `${hash}.indexing.status`);
+}
+
+/**
+ * Determine where this project sits in the indexing lifecycle. Reads both the
+ * status file (written by background-index.mjs while it's running) and the
+ * source_meta table (to detect "already indexed"). Never throws.
+ */
+export function getIndexingStatus(projectPath: string): IndexingStatus {
+  const statusPath = statusFilePath(projectPath);
+
+  // Check source_meta first — definitive "are there entries yet?"
+  let fileCount = 0;
+  try {
+    const db = openDb(projectPath);
+    try {
+      type Row = { n: number };
+      const r = db.prepare(`SELECT COUNT(*) as n FROM source_meta WHERE source LIKE 'file:%'`).get() as Row;
+      fileCount = r.n;
+    } finally {
+      db.close();
+    }
+  } catch { /* no DB yet → fileCount stays 0 */ }
+
+  // Is a background indexer currently running?
+  if (existsSync(statusPath)) {
+    try {
+      const raw = readFileSync(statusPath, "utf8");
+      const s   = JSON.parse(raw) as {
+        started_at?: string; finished_at?: string; total_files?: number;
+        completed_files?: number; model?: string; error?: string;
+      };
+      // Stale? (> 1h since start and not finished → consider abandoned)
+      const ageMs = s.started_at ? Date.now() - new Date(s.started_at).getTime() : 0;
+      if (!s.finished_at && ageMs > 3600_000) {
+        // Fall through — report as not-indexed if fileCount is 0
+      } else if (!s.finished_at) {
+        return {
+          state:            "indexing",
+          totalFiles:       s.total_files,
+          completedFiles:   s.completed_files ?? 0,
+          startedAt:        s.started_at,
+          model:            s.model ?? null,
+          fileCountInKb:    fileCount,
+        };
+      }
+    } catch { /* unreadable — fall through */ }
+  }
+
+  return {
+    state:         fileCount > 0 ? "indexed" : "not-indexed",
+    fileCountInKb: fileCount,
+  };
+}
+
 // ─── System Health (degradation awareness) ────────────────────────────────────
 
 export interface SystemHealth {
-  mode:              "full" | "degraded";
+  mode:              "full" | "degraded" | "onboarding";
   ollamaReachable:   boolean;
   embeddingReady:    boolean;     // nomic-embed-text (or configured embed model) installed
   summarizerReady:   boolean;     // a coder/chat model installed for semantic L0/L1
   summarizerModel:   string | null;
   httpApiReachable:  boolean | null;   // null if not configured (SQLite mode)
   httpApiUrl:        string | null;
+  indexingStatus:    IndexingStatus | null;  // v0.10.2 — null if not probed
   warnings:          string[];
   fixes:             string[];    // actionable commands to restore full mode
 }
@@ -565,7 +647,7 @@ let _healthCache: SystemHealth | null = null;
 let _healthCheckedAt = 0;
 const HEALTH_TTL_MS = 30_000;
 
-export async function getSystemHealth(): Promise<SystemHealth> {
+export async function getSystemHealth(projectPath?: string): Promise<SystemHealth> {
   const now = Date.now();
   if (_healthCache && now - _healthCheckedAt < HEALTH_TTL_MS) return _healthCache;
 
@@ -642,7 +724,24 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     }
   }
 
-  const mode: "full" | "degraded" = warnings.length === 0 ? "full" : "degraded";
+  // ── Indexing status (v0.10.2) ────────────────────────────────────────────
+  // If a project path is supplied, probe whether this project has been indexed.
+  // "not-indexed" and "indexing" are NOT hard errors — they're onboarding states,
+  // so we use mode='onboarding' rather than 'degraded' to keep full-mode agents
+  // from seeing the big yellow warning block.
+  let indexingStatus: IndexingStatus | null = null;
+  if (projectPath) {
+    try { indexingStatus = getIndexingStatus(projectPath); } catch { /* noop */ }
+  }
+
+  let mode: "full" | "degraded" | "onboarding";
+  if (warnings.length > 0) {
+    mode = "degraded";
+  } else if (indexingStatus && indexingStatus.state !== "indexed") {
+    mode = "onboarding";
+  } else {
+    mode = "full";
+  }
 
   _healthCache = {
     mode,
@@ -652,6 +751,7 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     summarizerModel,
     httpApiReachable,
     httpApiUrl: apiUrl,
+    indexingStatus,
     warnings,
     fixes,
   };
@@ -663,10 +763,42 @@ export async function getSystemHealth(): Promise<SystemHealth> {
  * Format a SystemHealth as a short banner suitable for prepending to
  * tool output (zc_status, zc_recall_context). Returns empty string in
  * full-mode so happy paths stay noise-free.
+ *
+ * Three banner shapes:
+ *   - "full"       → empty string (happy path, no noise)
+ *   - "onboarding" → short info block about initial indexing (not an error)
+ *   - "degraded"   → yellow warning block with fix commands
  */
 export function formatHealthBanner(h: SystemHealth): string {
   if (h.mode === "full") return "";
+
   const lines: string[] = [];
+
+  if (h.mode === "onboarding") {
+    // Indexing state takes precedence over a missing project card etc.
+    const st = h.indexingStatus;
+    if (st?.state === "indexing") {
+      const pct = (st.completedFiles && st.totalFiles)
+        ? Math.floor((st.completedFiles / st.totalFiles) * 100)
+        : null;
+      lines.push(`ℹ  SecureContext — indexing in progress (${st.completedFiles ?? 0}/${st.totalFiles ?? "?"} files${pct !== null ? `, ${pct}%` : ""})`);
+      lines.push(`   Semantic L0/L1 summaries are being generated in the background.`);
+      lines.push(`   zc_file_summary(path) may return 'not indexed' for files not yet processed —`);
+      lines.push(`   fall back to Read for those; the PostEdit hook will catch them up on any edit.`);
+      if (st.model) lines.push(`   Model: ${st.model}`);
+      lines.push(``);
+    } else if (st?.state === "not-indexed") {
+      lines.push(`ℹ  SecureContext — this project has no indexed source files yet`);
+      lines.push(`   Run zc_index_project() to generate semantic L0/L1 summaries (~30-60s typical).`);
+      lines.push(`   Or: let the PostEdit hook index files one-by-one as you edit them.`);
+      lines.push(`   The SessionStart auto-indexer should have started this in the background;`);
+      lines.push(`   if you don't see progress, check hooks/INSTALL.md to enable it.`);
+      lines.push(``);
+    }
+    return lines.join("\n");
+  }
+
+  // mode === "degraded"
   lines.push(`⚠️  SecureContext — DEGRADED MODE (${h.warnings.length} issue${h.warnings.length === 1 ? "" : "s"})`);
   lines.push(`   Some v0.10.0 harness features are unavailable. Session will work but less efficiently.`);
   lines.push(``);

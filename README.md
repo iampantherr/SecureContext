@@ -6,7 +6,7 @@
 [![Tests](https://img.shields.io/badge/security%20tests-91%20PASS%20%7C%200%20FAIL%20%7C%205%20WARN-brightgreen)](security-tests/results.json)
 [![Unit Tests](https://img.shields.io/badge/unit%20tests-449%20passed-brightgreen)](src)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
-[![Version](https://img.shields.io/badge/version-0.10.1-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.10.2-blue)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 

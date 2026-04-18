@@ -4,6 +4,55 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.10.2] — 2026-04-17 — Auto-indexing on session start + banner upgrade
+
+Addresses the "existing project, first time" onboarding friction from v0.10.0: scenario 2 (user installs SC on a half-built project) no longer requires the agent to explicitly call `zc_index_project()`. A SessionStart hook detects unindexed projects and triggers indexing in the background automatically.
+
+### Added
+
+- **`hooks/session-start-index-check.ps1`** — SessionStart hook that detects project markers (`.git`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `CLAUDE.md`, etc.), probes the project's indexing state, and spawns `background-index.mjs` if no source files have been indexed yet. Non-blocking — agent work starts immediately. Emits a `<system-reminder>` telling the agent what's happening.
+- **`scripts/background-index.mjs`** — detached node process that runs `indexProject()` and writes a JSON status file (`~/.claude/zc-ctx/sessions/<hash>.indexing.status`) with live progress (`total_files`, `completed_files`). Cleans up on completion. Treats status files older than 1 hour as stale (crash recovery).
+- **`scripts/probe-indexing-status.mjs`** — small wrapper so the PowerShell hook can read `getIndexingStatus()` via a clean stdout contract.
+- **`harness.ts` → `getIndexingStatus(projectPath)`** — returns `{state: "not-indexed" | "indexing" | "indexed", totalFiles, completedFiles, startedAt, ...}`. Reads both `source_meta` (for "already indexed") and the status file (for live progress). Treats status files > 1h as stale.
+- **`harness.ts` → `indexProject(..., { onProgress })`** — new optional progress callback so the background indexer can update the status file on each file.
+- **Banner upgrade (health mode = "onboarding")** — `zc_recall_context()` and `zc_status()` now print a short info banner (not the scary yellow warning block) when:
+  - project has no indexed source files yet → "Run `zc_index_project()` to generate semantic L0/L1 summaries (~30-60s typical)"
+  - indexing is actively running → "Indexing in progress: 12/50 files, 24%"
+
+### Tested
+
+- **`scripts/test-autoindex-live.mjs`** — 33 assertions across 6 real scenarios:
+  1. Bare directory (no project markers) → silent no-op
+  2. Existing project, first time (3 files) → full lifecycle not-indexed → indexing → indexed
+  3. Already-indexed project → hook is a no-op
+  4. Concurrent hook invocation (resume after compact) → second call sees 'indexing' state
+  5. Stale status file (simulated crash) → treated as stale, fresh indexer starts
+  6. Health banner transitions correctly through lifecycle
+- All 33 passing against GPU-enabled Docker Ollama + `qwen2.5-coder:14b`.
+
+### Changed
+
+- **`SystemHealth.mode`** adds a new `"onboarding"` state alongside `"full"` and `"degraded"`. Keeps legitimate "project is new, still setting up" states from triggering the degraded-mode alarm.
+- **`formatHealthBanner()`** returns three distinct shapes: empty (full), info block (onboarding), warning block (degraded).
+- **`getSystemHealth(projectPath?)`** now takes an optional project path. When provided, populates `indexingStatus`.
+
+### Migration
+
+Fully additive — no breaking changes. To enable auto-indexing:
+
+```
+# Copy the new hook
+cp SecureContext/hooks/session-start-index-check.ps1 ~/.claude/hooks/
+
+# Add to ~/.claude/settings.json under hooks.SessionStart (alongside the
+# existing session-start-zc-recall.ps1). See hooks/INSTALL.md.
+```
+
+Or re-run the one-command installer:
+```
+node SecureContext/scripts/setup-docker.mjs --health-only
+```
+
 ## [0.10.1] — 2026-04-17 — One-command Docker setup helper
 
 ### Added

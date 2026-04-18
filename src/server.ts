@@ -942,7 +942,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Section 0 (v0.10.0): Health banner — visible at the TOP of every
         // session so degradation is impossible to miss. Empty in full mode.
-        const rcHealth = await getSystemHealth();
+        const rcHealth = await getSystemHealth(PROJECT_PATH);
         const rcBanner = formatHealthBanner(rcHealth);
         if (rcBanner) parts.push(rcBanner);
 
@@ -1144,7 +1144,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : `  Limit:  ${wmStats.max} facts`;
 
         // System health banner (v0.10.0) — warn the agent if any dep is degraded
-        const health = await getSystemHealth();
+        const health = await getSystemHealth(PROJECT_PATH);
         const healthBanner = formatHealthBanner(health);
 
         const lines = [
