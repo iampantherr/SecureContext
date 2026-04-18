@@ -36,9 +36,10 @@ Decisions documented here are **locked in** — they were debated, settled, and 
 12. [What gets shipped where (repo map)](#repo-map)
 13. [Testing strategy (per sprint, exhaustive)](#testing)
 14. [Logging strategy (debugging-first observability)](#logging)
-15. [Risks + open questions](#risks)
-16. [Glossary](#glossary)
-17. [Revision history](#revisions)
+15. [Security architecture — cybersecurity-first design](#security)
+16. [Risks + open questions](#risks)
+17. [Glossary](#glossary)
+18. [Revision history](#revisions)
 
 ---
 
@@ -210,39 +211,69 @@ SQLite wins for:
 
 **Trigger to switch:** Synthetic-fixture loop has produced ≥3 measurable skill improvements with no false-positive promotions over 1 week.
 
-### D4. Mutation engine — SONNET 4.6 PRIMARY (Opus escalation, pluggable for future local A/B)
+### D4. Mutation engine — SONNET 4.6 BATCH API PRIMARY (Opus escalation, pluggable for future local A/B)
 
-**Final decision (revised 2026-04-18):**
+**Final decision (revised 2026-04-18 v1.2):**
 
 ```
-Tier 1 (95% of mutations): Sonnet 4.6 generates 5 candidates AND picks best
-Tier 2 (5% — hard cases):  Opus 4.7 single deep mutation when Tier 1 has failed 3+ times
+Tier 1 (95% of mutations): Sonnet 4.6 via Anthropic Batch API
+                           (50% discount, 24-hour SLA — perfect for nightly)
+                           generates 5 candidates AND picks best
+Tier 2 (5% — hard cases):  Opus 4.7 via Batch API
+                           single deep mutation when Tier 1 has failed 3+ times
+Real-time fallback:        Non-batch API for ad-hoc / on-demand mutations
+                           (rare; controlled by ZC_MUTATOR_REALTIME=1 flag)
 PLUGGABLE: ZC_MUTATOR_MODEL env var allows swapping in any model
            (e.g. deepseek-r1:32b once we have outcome data to A/B with)
 ```
 
-**Rationale (why not local):**
+**Rationale (why batch API):**
+- Mutation work is inherently asynchronous — we want overnight improvements, not real-time
+- Batch API gives 50% discount on input AND output tokens
+- 24-hour SLA is irrelevant when we only run nightly anyway
+- Each mutation is independent — perfect parallelism for batching
+- Lower cost = we can afford to mutate MORE skills per night = faster system improvement
+
+**Rationale (why not local 32B):**
 - Local 32B models on RTX 5090 (qwen2.5-coder:32b, deepseek-r1:32b) reach ~70-85% of
   Sonnet 4.6 quality on reasoning-heavy tasks like skill mutation. The gap matters most
   for THIS specific task (low volume, infrequent, high reasoning per call).
-- Cost is trivially small at our volume (see math below).
+- Cost with batch API is trivially small (see math below).
 - We build the engine with a pluggable model interface so later A/B testing is easy.
 
-**Cost math:**
-- Per mutation: ~3k input + ~1k output ≈ $0.024 (Sonnet pricing $3/MTok in + $15/MTok out)
-- Nightly: 3 worst skills × 5 candidates × $0.024 = $0.36/night
-- Monthly: ~$10.80 + occasional Opus escalation (~$2-5/mo) = **~$13-15/month total**
+**Updated cost math (with batch API):**
+- Per mutation: ~3k input + ~1k output × 50% discount = **$0.012** (vs $0.024 non-batch)
+- Nightly: 3 worst skills × 5 candidates × $0.012 = **$0.18/night**
+- Monthly: **~$5.40** + occasional Opus escalation (~$1-2/mo) = **~$7-8/month total**
+- 48% savings vs non-batch
 
-**Pluggable architecture requirement:**
-The mutation engine MUST be implemented behind a `Mutator` interface with an
-`MUTATOR_MODEL` factory. Initial impl: `SonnetMutator`. Future impls: `OpusMutator`,
-`DeepseekR1LocalMutator`, etc. Switch via `ZC_MUTATOR_MODEL=deepseek-r1:32b` env var
-when we want to A/B test local models against Sonnet baseline using outcome data.
+**Architecture requirements:**
+1. **`BatchedMutator` class** — implements:
+   - `submit(mutationRequests[])` → returns `batch_id`
+   - `pollStatus(batch_id)` → returns `pending | in_progress | completed | failed`
+   - `retrieve(batch_id)` → returns results when complete
+   - Idempotent: stable `mutation_id` per request so retries don't duplicate
+2. **Background scheduler** — nightly cron (or systemd timer / Windows task scheduler):
+   - 02:00 local: gather all skills needing mutation → submit batch
+   - 03:00, 06:00, 09:00, 12:00 local: poll for completion
+   - On completion: process results → run replays → promote winners
+   - On 24h timeout: alert via AUDIT log + retry next night
+3. **Pluggable Mutator interface:**
+   ```typescript
+   interface Mutator {
+     mutate(skill: Skill, failureTraces: FailureTrace[]): Promise<MutationResult>;
+   }
+   class BatchedSonnetMutator implements Mutator { ... }
+   class RealtimeSonnetMutator implements Mutator { ... }
+   class LocalOllamaMutator implements Mutator { ... }
+   ```
+   Switch via `ZC_MUTATOR_MODEL=batched-sonnet|realtime-sonnet|local-deepseek-r1` env var.
 
 **Frequency:**
-- Nightly batch: pick the 3 worst-performing skills, run mutation cycle on each
-- Per-cycle: 5 Sonnet calls (generate+pick) + 5 fixture replays via cheap local Ollama
-- Total nightly: ~$0.36 + occasional Opus escalation = **~$0.50/night worst-case**
+- Nightly batch submission: 02:00 local
+- 5 Sonnet calls (generate+pick) + 5 fixture replays via cheap local Ollama per skill
+- Results available next morning (typically within 1-2 hours after submission)
+- Total nightly cost: ~$0.18 + occasional Opus = **~$0.30/night worst-case**
 
 ### D5. Cost attribution granularity — PER-TOOL-CALL (with pre-aggregated views)
 
@@ -1241,8 +1272,321 @@ This catches "silently swallowed errors" — a class of bugs where the code "wor
 
 ---
 
+<a id="security"></a>
+## 15. Security architecture — cybersecurity-first design
+
+> **Motto:** Cybersecurity is built INTO the architecture, not bolted on. Every component starts with "what's the threat model" before "what's the API."
+
+### 15.1 Why this section exists separately
+
+SC v0.6 - v0.10.4 already has solid security primitives — RBAC with HMAC tokens, hash-chain integrity (Biba), prompt-injection detection, scrypt-hardened channel keys, credential-isolated sandbox, SSRF protection, per-project DB isolation. **This section extends those primitives to every NEW component in Sprints 1-4.** No new attack surface ships unprotected.
+
+Existing security guarantees (do not regress):
+- All MCP tool calls validate `session_token` HMAC + `agent_id` binding (Ch.11 capability confinement)
+- All `zc_broadcast` writes hash-chained (Biba integrity — tamper-detectable)
+- All sandboxed code execution in process-isolated env with `PATH`-only env vars
+- All web fetches SSRF-protected with prompt-injection pre-filter
+- All RBAC checks enforced at the reference monitor (not advisory)
+
+### 15.2 Threat model (Sprint 0 deliverable)
+
+Before any code in Sprint 1, we ship a `THREAT_MODEL.md` covering:
+
+**Trust boundaries:**
+- User ↔ Claude Code ↔ MCP server (trusted)
+- MCP server ↔ Postgres / SQLite (trusted local)
+- MCP server ↔ Ollama local (trusted local)
+- MCP server ↔ Anthropic API (semi-trusted; encrypted but external)
+- Skill files (UNTRUSTED if from unknown source — treat as code-on-disk)
+- Mutation candidates (UNTRUSTED until validated + replayed)
+- Document content fed to reranker/HyDE (UNTRUSTED)
+- Project source files indexed for L0/L1 (UNTRUSTED for prompt-injection)
+
+**Attacker capabilities (worst-case assumed):**
+1. **Local code execution** — attacker controls files in a project under index
+2. **Network adversary** — attacker can intercept Anthropic API calls (mitigated by TLS)
+3. **Compromised dependency** — malicious npm package
+4. **Compromised model** — local Ollama serving manipulated outputs
+5. **Insider with workstation access** — can read SQLite files, ~/.claude/, env vars
+6. **Supply-chain attack on skills** — malicious skill markdown installed
+
+**Assets to protect (priority order):**
+1. **Anthropic API credentials** (highest — drains money + impersonation risk)
+2. **User credentials in environment** (DB passwords, GH_TOKEN, AWS keys, etc.)
+3. **Source code IP** (don't leak project content to unauthorized observers)
+4. **Audit log integrity** (tamper-detection of agent actions)
+5. **Conversation history** (PII, decisions, IP)
+6. **Cost / billing accuracy** (don't let an attacker manipulate cost reports)
+
+**Out of scope (explicit):**
+- Persistent root-level malware on the operator's machine (we trust the OS up to a point)
+- Side-channel attacks on the GPU (Ollama)
+- Quantum break of TLS
+
+### 15.3 Architectural security principles (apply to every Sprint 1-4 component)
+
+**P1. Defense in depth** — every component has at least 3 layers:
+- Input validation (schema + length + character allowlists)
+- Authorization (RBAC check before action)
+- Audit logging (write to AUDIT log on every privileged op)
+
+**P2. Least privilege** — every component runs with minimum permissions:
+- Telemetry writer can only INSERT to `tool_calls`/`outcomes`/`learnings` tables (no UPDATE/DELETE except by retention policy)
+- Skill loader can only READ from `~/.claude/skills/` and `<project>/.claude/skills/` (path-traversal blocked)
+- Mutation engine can only WRITE to specific skill paths (validated per request)
+- Replay harness runs in subprocess with restricted env (PATH only, no API keys leaked in)
+
+**P3. Secure-by-default** — every config defaults to the most secure option:
+- Logging redacts secrets by default (must opt-IN to log raw via `ZC_LOG_RAW=1` for debugging only)
+- New skill installation requires manual confirmation (no auto-install from untrusted sources)
+- Dashboard requires auth token (no anonymous access)
+- Postgres connections use `sslmode=require` by default
+- Mutation candidates VALIDATED before execution
+
+**P4. Cryptographic integrity** — extend existing hash chain pattern:
+- `tool_calls` table chained by `prev_hash` / `row_hash` (so an attacker can't silently delete or modify entries — same pattern as broadcasts)
+- Skills HMAC-signed at promotion (so substitution is detectable)
+- Outcomes signed (so an attacker can't fake "shipped" status to manipulate the learning loop)
+- All HMAC keys derived from a single per-machine secret (rotated quarterly)
+
+**P5. Secrets management** — explicit policy:
+- API keys (Anthropic, OpenAI, etc.) NEVER appear in logs (even at DEBUG level)
+- `tool_calls` table: tool inputs containing secrets HASHED before storage (sha256, with allowlist of fields safe to store raw)
+- Mutation prompts MUST NOT include the user's API keys in the request body
+- Anthropic Batch API submissions reviewed for secret leakage before submission
+
+**P6. Adversarial input handling** — extend the existing prompt-injection scanner:
+- Skill bodies scanned at LOAD time + at MUTATION time (a malicious skill could try to escape)
+- Mutation candidates scanned BEFORE replay (don't run untrusted code)
+- Document content for reranker / HyDE scanned (existing scanner extended to these new paths)
+- Project source files retain existing scanner during L0/L1 generation
+
+**P7. Audit + forensics** — every security-relevant event to AUDIT log:
+- Token issued / revoked
+- File-ownership block (ASSIGN rejected for overlap)
+- Skill mutation promoted (with diff)
+- Permission denied
+- Failed authentication
+- Sandbox escape attempts (detected via process exit codes / resource limits)
+- Pricing-table modifications
+- Schema migration applied
+- Batch API submission accepted / rejected
+
+**P8. Supply chain security:**
+- Mutation engine cannot pull arbitrary models — `ZC_MUTATOR_MODEL` allowlist enforced
+- Skills cannot exec arbitrary code outside the sandbox
+- Pricing table updates require manual review (not auto-pulled from internet)
+- Reranker model pulled only from Ollama with explicit operator action
+- npm dependencies pinned in `package-lock.json` (no auto-update); audit weekly
+
+### 15.4 Per-sprint security control matrix
+
+#### Sprint 1 (telemetry + outcomes + learnings indexer)
+
+| New attack surface | Control |
+|---|---|
+| `tool_calls` table = sensitive data sink | Per-tool allowlist of which input fields are stored RAW vs HASHED. Default: HASHED. Operator opts in to RAW per tool. |
+| Outcome resolvers reading git history | Read-only git access; no shell injection (use git library, not `exec`). |
+| User-prompt sentiment resolver reads chat | Rate-limited; results stored as boolean only, not raw prompt text. |
+| JSONL → Postgres indexer reads arbitrary files | Strict path validation: only `<project>/learnings/*.jsonl` matched; other paths refused. |
+| Pricing table tampering | Pricing table HMAC-signed at build time. Mismatched signature on load → ERROR + degrade to "cost unknown" instead of using bad data. |
+| Tool-cost annotations could be poisoned | Annotations come from a STATIC table in `src/tools.ts`, not from runtime mutation. |
+| Logger writing arbitrary content | Log entries STRUCTURED JSON only (no prose injection). Operator-controlled fields validated for length + character set. |
+| `zc_logs` MCP tool returning sensitive data | Auth check: only requesting agent's own logs OR logs for sessions they participated in. |
+
+#### Sprint 2 (skills + mutation + context budget + compaction)
+
+| New attack surface | Control |
+|---|---|
+| Skill markdown = prompt injection vector | Skills scanned at load time with extended injection scanner. Skills from unknown sources require operator confirmation prompt before first execution. |
+| Mutation engine writes new skill files | Path validation (only `~/.claude/skills/` and `<project>/.claude/skills/`). HMAC signature added. Diff visible in mutation log for human review. |
+| Replay harness executing skills | Skills run in subprocess with restricted env (PATH only). Network access denied unless skill DECLARES `requires_network: true` in frontmatter. Disk write restricted to a temp dir per replay. |
+| Context-budget hooks bypassed | Hooks fire unconditionally at PreToolUse. Bypass requires explicit `force=true` AND logged to AUDIT. |
+| Rolling compaction modifying conversation history | Original segments preserved in `compacted_segments` table with HMAC. Audit log records every compaction. Agent can request unredact via `zc_unredact` tool. |
+| `ZC_MUTATOR_MODEL` env var hijacking | Allowlist enforced at startup: only known models (`batched-sonnet`, `realtime-sonnet`, `opus-4-7`, `local-deepseek-r1:32b`, `local-qwen2.5-coder:32b`) accepted. Unknown values → ERROR + fall back to default. |
+| Per-project skills overriding global with malicious version | Override permitted only after operator confirmation. Loaded skill diff shown vs global. |
+| Anthropic Batch API submission leaking secrets | Pre-submission scanner reviews every batch entry for known secret patterns (API key formats, JWT, AWS key prefixes, etc.). Match → reject + ERROR + AUDIT log. |
+
+#### Sprint 3 (structured tasks + queue + ownership + routing)
+
+| New attack surface | Control |
+|---|---|
+| ASSIGN schema injection (e.g., `acceptance_criteria: "; DROP TABLE..."`) | All fields parameterized in queries. Length + character allowlists per field. |
+| Task queue claim hijacking | Workers prove identity via session_token at claim time. Postgres `SKIP LOCKED` + `claimed_by = $worker_token` row check. |
+| File-ownership false declaration | Validated against actual file paths (must exist + be in project root). Cross-checked against in-flight task ownership. |
+| Worker pool member privilege escalation | Each worker has its own session_token. RBAC check: workers can only act on tasks claimed by them. |
+| Complexity-based routing gamed (e.g., declaring complexity=1 to get cheap model for hard task) | Post-task analysis: if task fails on Haiku that should have gone to Sonnet, mark agent_id as "complexity-escalator" and require manual approval for future complexity-1 ASSIGNs. |
+| Heartbeat spoofing (worker pretending to still be alive) | Heartbeat must include current session_token + recent broadcast hash. Stale tokens rejected. |
+
+#### Sprint 4 (reranker + HyDE + multi-hop + dashboard)
+
+| New attack surface | Control |
+|---|---|
+| Reranker input injection via document content | Document content QUOTED in rerank prompt with explicit `[BEGIN/END DOCUMENT]` boundaries. Same pattern as existing summarizer. |
+| HyDE hypothetical answer leaking info | Hypothetical answers generated by LOCAL Ollama only (no API call). Logged at DEBUG only (not stored persistently). |
+| Multi-hop following adversarial reference chains | Hop limit enforced (default depth=2, max=4). Each hop validated against URL/path allowlist. |
+| Dashboard XSS / CSRF | Standard web security: CSP headers, sameSite cookies, CSRF tokens, output encoding. NextJS default protections. |
+| Dashboard auth bypass | Auth required for ALL routes (no public). Token-based, same as Anthropic API. Read-only by default; no mutation endpoints. |
+| Dashboard data exfiltration | Per-user RBAC: operator sees only their projects/sessions. Cross-project leakage blocked. |
+
+### 15.5 Cryptographic integrity — extending the hash chain
+
+**Current state (v0.9.0):** broadcasts table chained.
+
+**Sprint 1 additions:**
+
+```sql
+ALTER TABLE tool_calls ADD COLUMN prev_hash TEXT NOT NULL DEFAULT 'genesis';
+ALTER TABLE tool_calls ADD COLUMN row_hash  TEXT NOT NULL DEFAULT '';
+-- row_hash = sha256(prev_hash || call_id || session_id || tool_name || ts || cost_usd)
+
+ALTER TABLE outcomes ADD COLUMN prev_hash TEXT NOT NULL DEFAULT 'genesis';
+ALTER TABLE outcomes ADD COLUMN row_hash  TEXT NOT NULL DEFAULT '';
+```
+
+**Verification tool:** `zc_verify_chain(table)` — walks the chain, returns OK or BROKEN_AT_ROW_N. Run nightly via cron + on-demand.
+
+**Sprint 2 additions:**
+
+```sql
+ALTER TABLE skills ADD COLUMN body_hmac TEXT NOT NULL;
+-- body_hmac = HMAC-SHA256(body, machine_secret)
+-- Verified on every skill load. Mismatch → refuse to load + AUDIT log.
+
+ALTER TABLE skill_mutations ADD COLUMN candidate_hmac TEXT NOT NULL;
+-- HMAC of the candidate body — proves it wasn't modified between proposal and replay.
+```
+
+### 15.6 Secrets management policy
+
+**Where secrets live:**
+- Anthropic API keys: `~/.claude/settings.json` `mcpServers.zc-ctx.env` (never in code)
+- DB passwords: `.env` file (excluded from git; fail closed if missing)
+- Channel keys: scrypt-hashed in `project_meta` table (not retrievable plaintext)
+- HMAC machine secret: generated on first startup, stored at `~/.claude/zc-ctx/.machine_secret` with mode 0600
+
+**Where secrets MUST NOT appear:**
+- ❌ Logs (even DEBUG)
+- ❌ Tool call inputs sent to LLM
+- ❌ Mutation prompts
+- ❌ Anthropic Batch API request bodies
+- ❌ Dashboard responses
+- ❌ Backups / exports without explicit operator opt-in
+
+**Detection:** every component runs raw inputs through a `secret_scanner.ts` module before any external send. Known patterns:
+- Anthropic API key: `sk-ant-...`
+- AWS access key: `AKIA...`
+- GitHub PAT: `ghp_...`, `gho_...`
+- JWT: `eyJ...` followed by base64 segments
+- Generic high-entropy strings (Shannon entropy > 4.5 bits/char)
+
+Match → REJECT + ERROR + AUDIT log.
+
+### 15.7 Red-team test plan (per sprint, exhaustive)
+
+These are the EXPLICIT red-team scenarios per sprint. They run as part of the sprint's test suite (§13 category 7).
+
+#### Sprint 1 red-team
+
+| Test ID | Scenario | Expected outcome |
+|---|---|---|
+| RT-S1-01 | Adversary modifies `tool_calls` row directly in DB | `zc_verify_chain` detects break |
+| RT-S1-02 | Adversary submits crafted JSONL with embedded prompt-injection | Indexer escapes content; no agent context contamination |
+| RT-S1-03 | Tool input contains API key string | secret_scanner blocks before storage; AUDIT log entry |
+| RT-S1-04 | Outcome resolver triggered with crafted git commit message containing prompt injection | Resolver treats as DATA, never executes |
+| RT-S1-05 | `zc_logs` called by agent A requesting agent B's logs | Auth check denies; AUDIT log |
+| RT-S1-06 | Logger receives input with newline + ANSI escape codes | Sanitized; logs remain greppable |
+| RT-S1-07 | Postgres unreachable AND attacker tries to forge ack | Telemetry buffers locally; chain extends with local secret on resume |
+| RT-S1-08 | Pricing table replaced with attacker-favorable values | HMAC mismatch detected; degraded to "cost unknown" mode |
+
+#### Sprint 2 red-team
+
+| Test ID | Scenario | Expected outcome |
+|---|---|---|
+| RT-S2-01 | Adversary installs skill with prompt-injection in body | Scanner flags at load time; operator confirmation required |
+| RT-S2-02 | Mutation engine receives candidate trying to escape sandbox (e.g., shell command in body) | Pre-replay scanner blocks; replay refused; AUDIT log |
+| RT-S2-03 | Replay harness skill attempts to read `~/.ssh/id_rsa` | Subprocess sandbox denies; no file access outside replay tempdir |
+| RT-S2-04 | Skill declares `requires_network: true` for legit reason but body fetches from attacker URL | Network requests logged; per-skill URL allowlist enforced |
+| RT-S2-05 | `ZC_MUTATOR_MODEL=https://evil.com/api` (attempted endpoint hijack) | Allowlist rejects; fall back to default + AUDIT log |
+| RT-S2-06 | Per-project skill overrides global with malicious body | Operator confirmation required; diff shown |
+| RT-S2-07 | Batch API request body inspected — contains user's API key | Pre-submission scanner blocks |
+| RT-S2-08 | Compacted segment HMAC tampered | Detected on unredact; original treated as compromised |
+| RT-S2-09 | Mutation candidate body modified between proposal and replay | candidate_hmac mismatch; replay refused |
+
+#### Sprint 3 red-team
+
+| Test ID | Scenario | Expected outcome |
+|---|---|---|
+| RT-S3-01 | Worker A claims task, then Worker B presents same session_token to claim same task | Postgres row-level lock prevents; second claim denied |
+| RT-S3-02 | Adversary worker declares `file_ownership.exclusive=[/etc/passwd]` | Path validation blocks; ASSIGN rejected |
+| RT-S3-03 | Adversary worker forges heartbeat for another worker's task | session_token + broadcast hash mismatch detected |
+| RT-S3-04 | ASSIGN with SQL-injection in `acceptance_criteria` field | Parameterized queries block; insert succeeds with literal string |
+| RT-S3-05 | Worker pool member tries to claim task ASSIGNed to a different role | RBAC check denies |
+| RT-S3-06 | Complexity-1 ASSIGN for task that's actually complexity-5 (cost attack) | Post-task analysis flags agent; future complexity-1 by same agent require approval |
+| RT-S3-07 | Dependency cycle in ASSIGN dependencies | Validator detects + rejects |
+
+#### Sprint 4 red-team
+
+| Test ID | Scenario | Expected outcome |
+|---|---|---|
+| RT-S4-01 | Document content includes prompt injection; reranker prompt fed it | Quoted with boundaries; reranker treats as data |
+| RT-S4-02 | HyDE generates hypothetical answer that contains a leaked secret pattern | secret_scanner blocks before embedding |
+| RT-S4-03 | Multi-hop follows reference to attacker-controlled URL | Hop limit + URL allowlist block |
+| RT-S4-04 | Dashboard request from unauthenticated source | 401; AUDIT log |
+| RT-S4-05 | Dashboard request from authenticated user for another user's project | 403; AUDIT log |
+| RT-S4-06 | Dashboard XSS attempt via document title | Output-encoded; no script execution |
+| RT-S4-07 | CSRF token replay across origins | sameSite cookie + token check denies |
+
+### 15.8 Incident response plan
+
+If a security incident is suspected (chain break, secret leak detected, unexpected mutation, etc.):
+
+1. **Preserve evidence:** AUDIT log is immutable (append-only) and chain-protected. Snapshot DB.
+2. **Quarantine:** revoke all session tokens (`zc_revoke_all_tokens`); require re-issuance.
+3. **Diagnose:** `zc_verify_chain` on each hash-chained table. `secret_scanner` on recent inputs. `mutation_log` review.
+4. **Contain:** disable mutation engine if mutation-related; disable skill loading if skill-related.
+5. **Recover:** restore from snapshot if integrity broken; archive corrupted data for forensics.
+6. **Report:** generate `incident_report.md` from AUDIT log + chain verification + relevant tool_calls.
+
+### 15.9 Compliance + privacy considerations
+
+- All telemetry is LOCAL by default (SQLite per-project). Centralized Postgres opt-in.
+- No telemetry leaves the machine without explicit operator action.
+- Anthropic Batch API submissions follow Anthropic's privacy policy; data isolated per organization.
+- Conversation history retention: 30 days for INFO logs, 365 for AUDIT, configurable.
+- Right to deletion: `zc_purge_session(session_id)` removes all data referencing that session (chain remains; row contents replaced with `[REDACTED]` markers).
+
+### 15.10 Security review gate per sprint
+
+Before marking any sprint DONE:
+
+- [ ] `THREAT_MODEL.md` updated with new attack surfaces from this sprint
+- [ ] All red-team tests for this sprint pass
+- [ ] Secrets scanner runs against all new component inputs
+- [ ] Hash chains extended to new sensitive tables
+- [ ] AUDIT log entries defined for every privileged operation
+- [ ] No secrets appear in logs (verified by automated grep against test logs)
+- [ ] Postgres connections use TLS where applicable
+- [ ] Dependency audit (`npm audit`) clean
+- [ ] Sprint security review document signed off
+
+### 15.11 Sprint 0 (security baseline) — added
+
+Before Sprint 1 starts, ship:
+
+- `THREAT_MODEL.md` (initial version covering Sprint 1-4 surfaces)
+- `src/secret_scanner.ts` (used by all subsequent sprints)
+- `src/hmac_chain.ts` (extracted from existing chain.ts; reusable)
+- `src/audit_log.ts` (writes to AUDIT-level log; never compacted)
+- Machine-secret bootstrap on first start (mode 0600, generated cryptographically)
+- `npm audit` baseline + automated weekly check via CI
+
+Sprint 0 is small (~3-5 days) but unblocks the security guarantees of every subsequent sprint.
+
+---
+
 <a id="risks"></a>
-## 15. Risks + open questions
+## 16. Risks + open questions
 
 ### Known risks
 
@@ -1265,7 +1609,7 @@ This catches "silently swallowed errors" — a class of bugs where the code "wor
 ---
 
 <a id="glossary"></a>
-## 16. Glossary
+## 17. Glossary
 
 - **Skill** — a markdown program defining a composed agent workflow. Located in `~/.claude/skills/` (global) or `<project>/.claude/skills/` (per-project).
 - **Outcome** — a deferred fact about whether an action achieved its goal. Joined to actions via `ref_type, ref_id`.
@@ -1278,9 +1622,10 @@ This catches "silently swallowed errors" — a class of bugs where the code "wor
 ---
 
 <a id="revisions"></a>
-## 17. Revision history
+## 18. Revision history
 
 | Date | Version | Author | Change |
 |---|---|---|---|
 | 2026-04-18 | v1.0 | Amit + Claude (Sonnet 4.6) | Initial — full plan ratified |
 | 2026-04-18 | v1.1 | Amit + Claude (Sonnet 4.6) | D4 mutation engine revised: Sonnet 4.6 PRIMARY (not Ollama hybrid) with pluggable interface for future local A/B. Added §13 Testing strategy (8 categories, per-sprint inventory). Added §14 Logging strategy (debugging-first observability with `zc_logs` tool). |
+| 2026-04-18 | v1.2 | Amit + Claude (Sonnet 4.6) | D4 updated to use Anthropic Batch API for nightly mutations (50% discount, 24-hour SLA — perfect fit). Added comprehensive §15 Security architecture (cybersecurity-first principles, threat model, per-sprint security control matrix, cryptographic integrity extensions, secrets management, red-team test plan with explicit RT-S{n}-{nn} test IDs, incident response plan, security review gates, Sprint 0 security baseline). |
