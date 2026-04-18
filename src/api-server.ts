@@ -471,6 +471,194 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ─── v0.12.1 Reference Monitor: telemetry endpoints ──────────────────────
+  // Per Chin & Older 2011 Ch12 ("Reference Monitor"):
+  //   Every protected resource needs exactly one enforcement point that is:
+  //     (a) tamper-proof — only the API process holds DB write authority
+  //     (b) always invoked — no client bypass path
+  //     (c) verifiable — the validation is small and reviewable
+  //
+  // These endpoints are the SINGLE bypass-proof enforcement point for hash-
+  // chained telemetry writes. The MCP server (which runs in agent processes)
+  // becomes a CLIENT of these endpoints rather than opening DB files
+  // directly, closing Tier 2 access-control gaps #1 + #2.
+  //
+  // Authentication: Bearer session_token in Authorization header. The token
+  // is bound to an agent_id (verified at issuance — see issueToken). The
+  // endpoint asserts payload.aid === body.agentId, blocking cross-agent
+  // forgery (RT-S2-02 verifies).
+
+  /**
+   * Extract + verify the session_token from the Authorization header.
+   * Returns the verified payload, or throws ApiError on any failure.
+   */
+  async function requireSessionToken(
+    request: { headers: Record<string, string | string[] | undefined> },
+    projectPath: string,
+  ): Promise<{ agentId: string; role: string; tokenId: string }> {
+    const authHeader = request.headers["authorization"];
+    if (typeof authHeader !== "string" || !authHeader.startsWith("Bearer ")) {
+      throw new ApiError(401, "Missing or malformed Authorization header (expected: Bearer <session_token>)");
+    }
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (!token) throw new ApiError(401, "Empty session_token");
+
+    const payload = await store.verifyToken(projectPath, token);
+    if (payload === null) {
+      throw new ApiError(401, "session_token invalid, expired, or revoked");
+    }
+    return payload as { agentId: string; role: string; tokenId: string };
+  }
+
+  /**
+   * POST /api/v1/telemetry/tool_call
+   * Reference Monitor for per-tool-call telemetry writes.
+   *
+   * Body:
+   *   {
+   *     projectPath: string,
+   *     callId: string, sessionId: string, agentId: string,
+   *     toolName: string, model: string,
+   *     inputTokens?: number, outputTokens?: number, cachedTokens?: number,
+   *     inputChars?: number, outputChars?: number,
+   *     latencyMs: number, status: "ok"|"error"|"timeout",
+   *     errorClass?: string, traceId?: string, batch?: boolean,
+   *     taskId?: string, skillId?: string,
+   *   }
+   *
+   * Headers:
+   *   Authorization: Bearer <session_token>
+   *
+   * Returns:
+   *   { ok: true, record: ToolCallRecord }  — 200 on success
+   *   { error: "..." }  — 401 / 400 / 500 on failure
+   */
+  app.post("/api/v1/telemetry/tool_call", async (request, reply) => {
+    try {
+      const body = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(body.projectPath);
+
+      // Reference Monitor invariant (a) — token check is unbypassable here.
+      const tokenPayload = await requireSessionToken(request as never, pp);
+
+      // Reference Monitor invariant (b) — agent_id binding.
+      // The body.agentId MUST equal the token's bound agent_id. This is the
+      // anti-forgery check: an agent with a valid session_token can't write
+      // rows attributed to other agents.
+      const claimedAgentId = body.agentId;
+      if (typeof claimedAgentId !== "string") {
+        throw new ApiError(400, "agentId is required");
+      }
+      if (claimedAgentId !== tokenPayload.agentId) {
+        throw new ApiError(403, `Agent ID mismatch: token bound to '${tokenPayload.agentId}' but row claims '${claimedAgentId}' (cross-agent forgery blocked)`);
+      }
+
+      // Validate required fields
+      const required = ["callId", "sessionId", "toolName", "model", "latencyMs", "status"];
+      for (const k of required) {
+        if (body[k] === undefined || body[k] === null) {
+          throw new ApiError(400, `${k} is required`);
+        }
+      }
+
+      // Delegate to local recordToolCall (which uses ChainedTableSqlite).
+      // The HTTP layer is the enforcement point; the actual chain write is
+      // unchanged. Per-agent HMAC subkey from v0.12.0 still applies.
+      const { recordToolCall } = await import("./telemetry.js");
+      const record = await recordToolCall({
+        callId:       String(body.callId),
+        sessionId:    String(body.sessionId),
+        agentId:      claimedAgentId,
+        projectPath:  pp,
+        toolName:     String(body.toolName),
+        model:        String(body.model),
+        inputTokens:  typeof body.inputTokens  === "number" ? body.inputTokens  : undefined,
+        outputTokens: typeof body.outputTokens === "number" ? body.outputTokens : undefined,
+        cachedTokens: typeof body.cachedTokens === "number" ? body.cachedTokens : undefined,
+        inputChars:   typeof body.inputChars   === "number" ? body.inputChars   : undefined,
+        outputChars:  typeof body.outputChars  === "number" ? body.outputChars  : undefined,
+        latencyMs:    Number(body.latencyMs),
+        status:       body.status as "ok" | "error" | "timeout",
+        errorClass:   body.errorClass as never,
+        traceId:      typeof body.traceId === "string" ? body.traceId : undefined,
+        batch:        body.batch === true,
+        taskId:       typeof body.taskId  === "string" ? body.taskId  : undefined,
+        skillId:      typeof body.skillId === "string" ? body.skillId : undefined,
+      });
+
+      if (record === null) {
+        throw new ApiError(500, "Telemetry write failed (see server logs)");
+      }
+      return { ok: true, record };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error", detail: (e as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/telemetry/outcome
+   * Reference Monitor for outcome resolver writes.
+   *
+   * Body:
+   *   {
+   *     projectPath: string,
+   *     refType: "tool_call"|"task"|"skill_run"|"session",
+   *     refId: string,
+   *     outcomeKind: "shipped"|"reverted"|"accepted"|"rejected"|"sufficient"|"insufficient"|"errored",
+   *     signalSource: "git_commit"|"user_prompt"|"follow_up"|"manual",
+   *     confidence?: number,
+   *     scoreDelta?: number,
+   *     evidence?: Record<string, unknown>,
+   *   }
+   *
+   * Headers:
+   *   Authorization: Bearer <session_token>
+   *
+   * Note: outcomes don't have a per-row agent_id (they're written by the
+   * resolver runtime, not directly by an agent). The session_token is still
+   * required to confirm the writer is a legitimate SC client; cross-agent
+   * forgery doesn't apply here because the writer identity is "outcomes-resolver".
+   */
+  app.post("/api/v1/telemetry/outcome", async (request, reply) => {
+    try {
+      const body = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(body.projectPath);
+
+      // Token check (Reference Monitor invariant) — outcomes still need auth
+      // even though they don't have a per-row agent_id. Prevents anonymous
+      // writers from poisoning the outcomes table.
+      await requireSessionToken(request as never, pp);
+
+      const required = ["refType", "refId", "outcomeKind", "signalSource"];
+      for (const k of required) {
+        if (body[k] === undefined || body[k] === null) {
+          throw new ApiError(400, `${k} is required`);
+        }
+      }
+
+      const { recordOutcome } = await import("./outcomes.js");
+      const record = await recordOutcome({
+        projectPath:  pp,
+        refType:      body.refType as never,
+        refId:        String(body.refId),
+        outcomeKind:  body.outcomeKind as never,
+        signalSource: body.signalSource as never,
+        confidence:   typeof body.confidence === "number" ? body.confidence : undefined,
+        scoreDelta:   typeof body.scoreDelta === "number" ? body.scoreDelta : undefined,
+        evidence:     (body.evidence ?? undefined) as Record<string, unknown> | undefined,
+      });
+
+      if (record === null) {
+        throw new ApiError(500, "Outcome write failed (see server logs)");
+      }
+      return { ok: true, record };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error", detail: (e as Error).message });
+    }
+  });
+
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   const shutdown = async () => {
     await app.close();

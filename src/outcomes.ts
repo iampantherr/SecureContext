@@ -98,6 +98,31 @@ export interface OutcomeRecord extends ChainableRow {
  * Never throws; loud failure via logger.
  */
 export async function recordOutcome(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
+  // v0.12.1: Reference Monitor opt-in
+  const mode = (process.env.ZC_TELEMETRY_MODE || "local").toLowerCase();
+  if (mode === "api" || mode === "dual") {
+    const apiResult = await _recordOutcomeViaApiPath(input);
+    if (mode === "api") return apiResult;
+    // dual: also write locally below
+  }
+  return _recordOutcomeLocal(input);
+}
+
+async function _recordOutcomeViaApiPath(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
+  const { getOrFetchSessionToken, recordOutcomeViaApi } = await import("./telemetry_client.js");
+  // Outcomes are written by the resolver runtime, so the session token is
+  // bound to the writer's identity (orchestrator or whatever invoked the
+  // resolver). For now we use ZC_AGENT_ID + ZC_AGENT_ROLE.
+  const agentId = process.env.ZC_AGENT_ID   || "outcomes-resolver";
+  const role    = process.env.ZC_AGENT_ROLE || "developer";
+  const token = await getOrFetchSessionToken(input.projectPath, agentId, role);
+  if (!token) return _recordOutcomeLocal(input);
+  const r = await recordOutcomeViaApi(input, token);
+  if (r === null) return _recordOutcomeLocal(input);
+  return r;
+}
+
+async function _recordOutcomeLocal(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
   try {
     const db = openProjectDb(input.projectPath);
     try {

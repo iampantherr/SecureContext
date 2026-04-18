@@ -137,8 +137,44 @@ export function newCallId(): string {
  * is still synchronous internally — the async wrapper allows future Postgres
  * backends without API change. Per-agent HMAC subkey (Tier 1 fix) is applied
  * via ChainedTableSqlite + computeChainHash from chained_table.ts.
+ *
+ * v0.12.1: When ZC_TELEMETRY_MODE=api, routes through the SecureContext
+ * HTTP API's Reference Monitor (Tier 2 fix). The API verifies the writer's
+ * session_token + agent_id binding before persisting, blocking cross-agent
+ * forgery. Falls back to local-mode if no session_token is available
+ * (e.g. RBAC unconfigured).
  */
 export async function recordToolCall(input: ToolCallInput): Promise<ToolCallRecord | null> {
+  // v0.12.1: Reference Monitor opt-in
+  const mode = (process.env.ZC_TELEMETRY_MODE || "local").toLowerCase();
+  if (mode === "api" || mode === "dual") {
+    const apiResult = await _recordToolCallViaApiPath(input);
+    // dual: also write locally; api-only: return what we got
+    if (mode === "api") return apiResult;
+    // dual mode falls through to also do local write below
+  }
+  return _recordToolCallLocal(input);
+}
+
+async function _recordToolCallViaApiPath(input: ToolCallInput): Promise<ToolCallRecord | null> {
+  // Lazy import so SQLite-only deployments don't pay the import cost
+  const { getOrFetchSessionToken, recordToolCallViaApi } = await import("./telemetry_client.js");
+  const role = process.env.ZC_AGENT_ROLE || "developer";
+  const token = await getOrFetchSessionToken(input.projectPath, input.agentId, role);
+  if (!token) {
+    // Token unavailable — fall back to local. One-time logged at fetch time.
+    return _recordToolCallLocal(input);
+  }
+  const r = await recordToolCallViaApi(input, token);
+  if (r === null) {
+    // API failed — local fallback so telemetry isn't lost. (At-least-once
+    // semantics: this could double-write in dual mode; acceptable for now.)
+    return _recordToolCallLocal(input);
+  }
+  return r;
+}
+
+async function _recordToolCallLocal(input: ToolCallInput): Promise<ToolCallRecord | null> {
   const trace = input.traceId ?? newTraceId("call");
   try {
     const projectHash = sha256ProjectHash(input.projectPath);

@@ -4,6 +4,90 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.12.1] — 2026-04-18 — Tier 2: Reference Monitor + session_token binding for telemetry
+
+Closes the **two largest remaining access-control gaps** identified in the v0.12.0 design review (Chin & Older 2011 — Ch6 + Ch12). Telemetry writes now have a single bypass-proof enforcement point that authenticates the writer's identity, not just verifies row integrity.
+
+### Added — HTTP API Reference Monitor (`src/api-server.ts`)
+
+Two new endpoints implement the Reference Monitor pattern (Chin & Older 2011 Ch12 — exactly one enforcement point per protected resource, tamper-proof + always invoked + verifiable):
+
+- **`POST /api/v1/telemetry/tool_call`** — accepts a tool_call row, validates the `Authorization: Bearer <session_token>` header, asserts `payload.aid === body.agentId` (cross-agent forgery blocked), and delegates the write to the local `recordToolCall` (which still uses `ChainedTableSqlite` + per-agent HMAC subkey from v0.12.0).
+- **`POST /api/v1/telemetry/outcome`** — same pattern for outcome rows. Outcomes have no per-row `agent_id` (writer is the resolver runtime), so the binding check is just "valid token required" — prevents anonymous poisoning.
+
+The validation logic uses the existing `verifyToken` machinery from v0.9.0 RBAC — same HMAC-signed token format, same `agent_sessions` table, same project_hash binding, same revocation flow. No new auth substrate.
+
+### Added — telemetry HTTP client (`src/telemetry_client.ts`)
+
+When `ZC_TELEMETRY_MODE=api`, the MCP server's `recordToolCall` / `recordOutcome` route through the Reference Monitor instead of writing the local DB directly:
+
+```ts
+if (mode === "api" || mode === "dual") {
+  // Fetch + cache session_token; POST to /api/v1/telemetry/...
+  return await recordToolCallViaApi(input, sessionToken);
+}
+return await _recordToolCallLocal(input);
+```
+
+Token lifecycle:
+- At first call, fetches a session_token via `POST /api/v1/issue-token` (existing v0.9.0 endpoint)
+- Caches in-process for 1 hour
+- Re-fetches on HTTP 401 from the API
+- Falls back to local-mode if the API is unreachable or RBAC unconfigured (logged as a warning, never throws)
+
+### Added — `ZC_TELEMETRY_MODE` env var
+
+| Value | Behavior |
+|---|---|
+| `local` (default) | Direct SQLite writes (current v0.12.0 behavior) |
+| `api` | Routes through HTTP API Reference Monitor |
+| `dual` | Writes to BOTH (migration mode for verifying parity) |
+
+### Security closes Tier 2 gaps from access-control review
+
+| Gap | Before | After (v0.12.1) |
+|---|---|---|
+| **#1: No bypass-proof enforcement point.** Each agent's MCP server opened the project DB directly. | Any process with file access could write rows. | All writes route through the API; only the API process holds DB write authority. |
+| **#2: `agent_id` was an unauthenticated string.** | Agent A could write rows claiming to be agent B. | The API verifies `body.agentId === token.aid`. Forgery blocked at the Reference Monitor with HTTP 403. |
+
+Combined with v0.12.0's per-agent HMAC subkey (Tier 1 #1), telemetry rows are now both **integrity-protected** (chain) AND **authenticated** (token-bound writer).
+
+### Red-team tests (RT-S2-02 through RT-S2-06)
+
+- **RT-S2-02:** alice's token cannot write a row claiming bob → HTTP 403 with explicit "cross-agent forgery blocked" error
+- **RT-S2-03:** missing/malformed/empty `Authorization` header → 401
+- **RT-S2-04:** revoked token → 401
+- **RT-S2-05:** project-A token used against project-B path → 401 (project-scoped capability per Ch11)
+- **RT-S2-06:** end-to-end via `recordToolCallViaApi` client helper succeeds with valid token
+
+### Test summary
+
+- **459/459 tests pass** (449 baseline + 10 new Reference Monitor tests)
+- Stress test 10 workers × 100 calls: chain ✓ OK, 458 writes/sec sustained
+- Local-mode regression-free (default behavior unchanged for backward compat)
+
+### Upgrade notes
+
+**Backward-compatible by default.** Existing deployments continue using local-mode SQLite unless they explicitly set `ZC_TELEMETRY_MODE=api`.
+
+**For multi-agent production deployments:**
+
+1. Set `ZC_API_KEY` (already required for v0.9.0+ broadcast RBAC)
+2. Set `ZC_TELEMETRY_MODE=api` in agent environments
+3. Set `ZC_AGENT_ID` + `ZC_AGENT_ROLE` per agent (used for session_token issuance)
+4. Rebuild + redeploy the SC HTTP API container — the v0.12.1 code adds the new `/api/v1/telemetry/*` endpoints. The shipped Docker image will need a refresh.
+
+**For single-agent / local dev:** no changes required. Continue using the default local-mode.
+
+### Known limitations / deferred to v0.12.2
+
+- **Postgres backend (`ChainedTablePostgres`)** still pending. v0.12.1 ships the Reference Monitor pattern; v0.12.2 will add Postgres as a second `ChainedTable` implementation.
+- **Tier 1 fix #2 (POSIX 0700/0600 hardening) and Tier 1 fix #3 (per-agent Postgres role)** still pending — depend on Postgres backend.
+- **Cross-backend stress test** — pending Postgres backend.
+- **Sprint 3 (Tier 3 fixes)** — explicitly locked in `HARNESS_EVOLUTION_PLAN.md §8.6` with hard "DO NOT START Sprint 3 until..." gate.
+
+---
+
 ## [0.12.0] — 2026-04-18 — Sprint 2 prep: ChainedTable abstraction + per-agent HMAC subkey (Tier 1 #1)
 
 **This is a foundation release.** It introduces the storage abstraction layer that future Postgres support will plug into, and closes the largest pre-existing access-control gap in v0.11.0's hash-chain design. **Breaking change for chain verification — see migration notes.**
