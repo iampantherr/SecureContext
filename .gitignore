@@ -10,3 +10,9 @@ dist/
 .claude/
 AGENT_IMPLEMENTATION_GUIDE.md
 SecureContext_ProductionReadiness_Report.md
+# Internal planning docs (local-only, never push to public repo)
+docs/HARNESS_EVOLUTION_PLAN.md
+docs/THREAT_MODEL.md
+docs/internal/
+docs/planning/
+*.planning.md
