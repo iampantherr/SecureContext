@@ -4,6 +4,78 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.12.0] — 2026-04-18 — Sprint 2 prep: ChainedTable abstraction + per-agent HMAC subkey (Tier 1 #1)
+
+**This is a foundation release.** It introduces the storage abstraction layer that future Postgres support will plug into, and closes the largest pre-existing access-control gap in v0.11.0's hash-chain design. **Breaking change for chain verification — see migration notes.**
+
+### Added — backend-agnostic storage abstraction
+
+- **`src/security/chained_table.ts`** — `ChainedTable<TInput, TRow>` interface for hash-chained append-only tables. All operations are `async` (Option 4 from the design review — sync internally for SQLite, async-ready for Postgres without API change). Per-agent HMAC subkey derivation via HKDF lives here.
+- **`src/security/chained_table_sqlite.ts`** — SQLite implementation. Wraps `BEGIN IMMEDIATE` around the SELECT-prev-hash + caller's INSERT (preserves the v0.11.0+ concurrency-fix invariant, now in a clean abstraction).
+
+### Added — security: per-agent HMAC subkey (closes Tier 1 Gap #5 from access-control review)
+
+Sprint 1 (v0.11.0) used the raw machine secret as the HMAC key for all hash-chained rows. This made the chain integrity-only against external tampering, not authentication: any agent process knowing the machine secret could compute valid HMACs claiming any `agent_id`.
+
+v0.12.0 derives a per-agent subkey using HKDF-Expand:
+
+```
+chain_hmac_key = HKDF-Expand(machine_secret, "zc-chain:" || agent_id, 32)
+```
+
+The verifier reads each row's stored `agent_id` and derives the matching subkey. A row claiming a wrong identity fails HMAC verification at the chain check. Combined with v0.12.1's session_token binding (next release), telemetry rows become genuinely *authenticated* — the chain proves not just "this row hasn't been modified" but "this row was written by the agent it claims to have been written by."
+
+**Maps to Chin & Older 2011, Ch6 + Ch7** ("speaks-for" formalism — every claim should carry its trust chain).
+
+**New red-team test RT-S2-01:** agent B cannot forge a row claiming to be agent A. Verifier catches the forgery via hash-mismatch.
+
+### Changed — async public API (Option 4)
+
+`recordToolCall`, `recordOutcome`, and the three resolvers (`resolveGitCommitOutcome`, `resolveUserPromptOutcome`, `resolveFollowUpOutcomes`) are now `async`. The SQLite path remains synchronous internally — the wrapper adds microseconds of overhead — but the new uniform interface makes future backends drop in without API change.
+
+**Cascade:**
+- Every call site needs `await` (167+ in tests already updated)
+- Test callbacks moved from `() => {}` to `async () => {}` where applicable
+- `verifyToolCallChain` + `verifyOutcomesChain` remain sync (read-only, no Postgres pressure yet)
+
+### Removed
+
+- The per-process `_lastHashCache` from v0.11.0. Was redundant once `BEGIN IMMEDIATE` shipped (the cache was always-stale across processes anyway), and added a Heisenbug surface area. Reading the latest hash inside the IMMEDIATE-locked transaction is sub-millisecond — no perceptible perf change.
+- `_resetTelemetryCacheForTesting` is now a no-op (kept for backward-compat with tests that imported it).
+
+### ⚠️ BREAKING CHANGE — chain verification
+
+**Existing v0.11.0 chains (in already-populated `tool_calls` / `outcomes` tables) will fail to verify under v0.12.0.** This is intentional: the HMAC key derivation changed (raw secret → HKDF-derived per-agent subkey).
+
+**Impact:** `verifyToolCallChain` / `verifyOutcomesChain` will report `ok: false, brokenKind: "hash-mismatch", brokenAt: 0` for any row written before upgrading.
+
+**Migration options:**
+1. **Truncate and restart** — for non-production deployments, easiest path. New rows verify cleanly.
+2. **Re-hash retroactively** — write a migration script that, for each existing row, recomputes `row_hash` using the new subkey. Provided as `scripts/migrate-v011-to-v012-chains.mjs` (TODO — coming in v0.12.1).
+3. **Coexist** — keep v0.11.0 verification helpers as `verifyToolCallChain_v011` for legacy chains; use v0.12.0 helpers for new rows. Not recommended long-term.
+
+### Test summary
+
+- **449/449 tests pass** (433 baseline + 16 new chained_table tests, including RT-S2-01 cross-agent forgery)
+- **Stress test still chain ✓ OK** under 10 concurrent writers × 100 calls per project DB (regression from v0.11.0+a7ed9a1 confirmed)
+- All 22 prior test files untouched in coverage (only their async-cascade calls were updated)
+
+### Deferred to v0.12.1
+
+This release is the **foundation** for the rest of v0.12. v0.12.1 will add:
+
+- **Tier 2 fix #1: Reference Monitor pattern** — telemetry writes route through SecureContext HTTP API (single bypass-proof enforcement point per Chin & Older Ch12). MCP server becomes a *client* of the API; never opens DB files directly.
+- **Tier 2 fix #2: session_token binding** — every `recordToolCall` requires a session_token bound to `agent_id` (matches RBAC for broadcasts shipped in v0.9.0).
+- Postgres backend (`ChainedTablePostgres`) using single-statement INSERT + `FOR UPDATE` subquery
+- `ZC_TELEMETRY_BACKEND=sqlite|postgres|dual` env selection
+- Tier 1 fix #2: 0700/0600 POSIX hardening on session DB files
+- Tier 1 fix #3: per-agent Postgres role with INSERT-only grant
+- Cross-backend stress test (50+ concurrent writers, both backends)
+
+Sprint 3 will then add **Tier 3** — see `HARNESS_EVOLUTION_PLAN.md §8.6` (locked in with hard "DO NOT START" gate).
+
+---
+
 ## [0.11.0] — 2026-04-17 — Sprint 1: outcome telemetry + learnings loop foundation
 
 Adds the full **observability foundation** that lets future sprints (mutation engine, skill promotion, task routing) learn from what actually worked. Every MCP tool call is now recorded with cost + latency + outcome signals into a tamper-evident, hash-chained SQLite table. No agent-facing breakage — just a new `[cost: ...]` header on responses and one new MCP tool.
