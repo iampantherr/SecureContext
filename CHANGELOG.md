@@ -4,6 +4,49 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.10.5] — 2026-04-18 — Sprint 0: security baseline (cybersecurity-first foundation)
+
+Adds shared security infrastructure that future releases (Sprint 1+) build on top of. **No new MCP tools.** No agent-facing behavior change. Internal-only modules + a public threat model document.
+
+### Added — `src/security/` (4 new modules + tests)
+
+- **`machine_secret.ts`** — single per-machine 64-byte CSPRNG secret stored at `~/.claude/zc-ctx/.machine_secret` with mode 0600. Used as HMAC key seed for tamper-evident chains and audit log signatures. Override via `ZC_MACHINE_SECRET` env var (testing/CI). Rotation via `rotateMachineSecret()`. Atomic file ops; never logged.
+- **`hmac_chain.ts`** — reusable HMAC-keyed hash chain primitive. Stronger than v0.9.0's plain SHA256 chain (`src/chain.ts`): an attacker with full DB write access cannot forge valid `row_hash` without the machine secret. Used by audit_log; will be used for tool_calls / outcomes / skills / mutations in Sprint 1+. Constant-time comparison via `timingSafeEqual`. Pipe-escape canonicalization prevents collision attacks.
+- **`audit_log.ts`** — append-only, HMAC-chained log of every privileged operation. Stored at `~/.claude/zc-ctx/logs/audit.log` as JSONL. Verifiable end-to-end via `verifyAuditChain()`. Detects tampering (content mod, deletion, insertion). No public API for delete/edit. Designed to never be sent to LLM context.
+- **`secret_scanner.ts`** — detects API keys (Anthropic, OpenAI, AWS, GitHub, Google, Slack, Stripe), JWTs, SSH private keys, Bearer tokens, and high-entropy strings. `scanForSecrets(text)` returns matches by TYPE only (never the full secret). `redactSecrets(text)` returns text with secrets replaced by `[REDACTED:type]` markers. <1ms for 10KB inputs.
+
+### Added — public security documentation
+
+- **`docs/THREAT_MODEL.md`** — project security artifact describing trust boundaries, attacker capabilities, assets to protect, architectural defenses (v0.6 → v0.10.5), out-of-scope items, compliance + privacy, and incident response procedure. For operators reviewing SC for production use.
+
+### Added — testing
+
+- **76 new tests** in `src/security/` (16 machine_secret + 23 hmac_chain + 11 audit_log + 26 secret_scanner)
+- **14 explicit red-team test IDs** (RT-S0-01 through RT-S0-14) covering tamper detection, key forgery, canonicalization collisions, secret leak prevention
+- Vitest config (`vitest.config.ts`) added: excludes `dist/` from test discovery (was double-running compiled tests); sequential file execution to prevent shared-state interference on `~/.claude/zc-ctx/` paths
+
+### Changed — `.gitignore`
+
+- Added rules to keep INTERNAL planning docs out of the public repo (e.g. strategy discussions, design memos)
+- `docs/THREAT_MODEL.md` is INCLUDED in the repo (project security artifact, public)
+
+### Why this release
+
+This is **Sprint 0** of a multi-sprint harness evolution roadmap. Cybersecurity-first means we ship the security foundation BEFORE feature code. Every subsequent sprint (telemetry + outcomes, skills + mutation, structured tasks + work-stealing, observability + dashboard) will use these primitives to keep new attack surfaces closed by construction.
+
+### Upgrade notes
+
+Zero user action required. New modules are inert until used by Sprint 1+ features. Existing chains (`src/chain.ts` on broadcasts) and tools unchanged.
+
+The new `~/.claude/zc-ctx/.machine_secret` file is generated on first import of any security module. Mode 0600. Back this up if you back up your `~/.claude/zc-ctx/` directory (loss invalidates all signed audit entries / chained tables — they'd appear "tampered" since the verification key would no longer match).
+
+### Test summary
+
+- **302/302 unit tests pass** (76 new + 226 existing, no regressions)
+- **All 14 RT-S0 red-team tests pass**
+
+---
+
 ## [0.10.4] — 2026-04-18 — Write-as-you-go indexing (crash-safe + real-time progress)
 
 Found during live E2E on a 650-file project (`A2A_communication`): the v0.10.2 `indexProject` had a batch-then-write design that held all KB writes until every file was summarized. On a ~40-min indexing run this meant:

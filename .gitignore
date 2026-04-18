@@ -10,9 +10,10 @@ dist/
 .claude/
 AGENT_IMPLEMENTATION_GUIDE.md
 SecureContext_ProductionReadiness_Report.md
-# Internal planning docs (local-only, never push to public repo)
+# Internal planning / strategy docs (local-only, never push to public repo)
+# RULE: project security artifacts (THREAT_MODEL, SECURITY_REPORT) ARE public.
+#       What goes here is INTERNAL strategy/discussion — not project deliverables.
 docs/HARNESS_EVOLUTION_PLAN.md
-docs/THREAT_MODEL.md
 docs/internal/
 docs/planning/
 *.planning.md
