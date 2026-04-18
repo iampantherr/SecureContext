@@ -34,7 +34,7 @@
  *   (treat as compromised). Do not rotate casually.
  */
 
-import { existsSync, readFileSync, writeFileSync, statSync, chmodSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync, chmodSync, mkdirSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -190,18 +190,16 @@ function generateAndWriteSecret(): Buffer {
 
     // Atomic rename (POSIX guarantees, Windows uses MoveFileEx semantics)
     // Note: on Windows we may need to remove the dest first if it exists.
-    const fs = require("node:fs") as typeof import("node:fs");
     if (existsSync(MACHINE_SECRET_PATH)) {
       // This path runs only on rotation
-      fs.unlinkSync(MACHINE_SECRET_PATH);
+      unlinkSync(MACHINE_SECRET_PATH);
     }
-    fs.renameSync(tmpPath, MACHINE_SECRET_PATH);
+    renameSync(tmpPath, MACHINE_SECRET_PATH);
     try { chmodSync(MACHINE_SECRET_PATH, 0o600); } catch { /* Windows */ }
   } catch (e) {
     // Cleanup temp on failure
     try {
-      const fs = require("node:fs") as typeof import("node:fs");
-      if (existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
     } catch { /* ignore */ }
     throw new Error(
       `Failed to write machine secret to ${MACHINE_SECRET_PATH}: ${(e as Error).message}. ` +

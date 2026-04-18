@@ -29,6 +29,9 @@
  */
 
 import { createHmac } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { logger } from "./logger.js";
 import { auditLog } from "./security/audit_log.js";
 import { getMachineSecret } from "./security/machine_secret.js";
@@ -166,16 +169,13 @@ export function verifyPricingTable(): boolean {
   const current = tableSignature();
 
   // Look up baseline from disk
-  const fs = require("node:fs") as typeof import("node:fs");
-  const path = require("node:path") as typeof import("node:path");
-  const os   = require("node:os") as typeof import("node:os");
-  const sigPath = path.join(os.homedir(), ".claude", "zc-ctx", ".pricing_signature");
+  const sigPath = join(homedir(), ".claude", "zc-ctx", ".pricing_signature");
 
-  if (!fs.existsSync(sigPath)) {
+  if (!existsSync(sigPath)) {
     // First run — record the baseline
     try {
-      fs.mkdirSync(path.dirname(sigPath), { recursive: true });
-      fs.writeFileSync(sigPath, JSON.stringify({
+      mkdirSync(join(homedir(), ".claude", "zc-ctx"), { recursive: true });
+      writeFileSync(sigPath, JSON.stringify({
         version: PRICING_TABLE.version,
         signature: current,
         recorded_at: new Date().toISOString(),
@@ -200,7 +200,7 @@ export function verifyPricingTable(): boolean {
 
   // Compare against stored baseline
   try {
-    const stored = JSON.parse(fs.readFileSync(sigPath, "utf8"));
+    const stored = JSON.parse(readFileSync(sigPath, "utf8"));
     if (stored.version === PRICING_TABLE.version && stored.signature === current) {
       _verified = true;
       _tampered = false;
@@ -229,7 +229,7 @@ export function verifyPricingTable(): boolean {
       return false;
     }
     // Version differs = legit pricing update; refresh baseline
-    fs.writeFileSync(sigPath, JSON.stringify({
+    writeFileSync(sigPath, JSON.stringify({
       version: PRICING_TABLE.version,
       signature: current,
       recorded_at: new Date().toISOString(),
