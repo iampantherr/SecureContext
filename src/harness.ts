@@ -31,7 +31,7 @@ import { join, relative, sep, extname } from "node:path";
 import { createHash } from "node:crypto";
 import { Config } from "./config.js";
 import { openDb, indexContent, dbPath } from "./knowledge.js";
-import { summarizeBatch, selectSummaryModel } from "./summarizer.js";
+import { summarizeFile, selectSummaryModel } from "./summarizer.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,7 +88,7 @@ export interface CapturedOutput {
  *
  * Summarization strategy (v0.10.0):
  *   1. Collect qualifying files (walk + size/ext filter).
- *   2. Batch-summarize via Ollama coder model (summarizeBatch, bounded concurrency).
+ *   2. Per-file pipeline: summarize via Ollama, immediately write to KB (v0.10.4 write-as-you-go).
  *   3. Fall back to deterministic truncation per-file on Ollama failure.
  *   4. Write each file to FTS + source_meta with its best summary.
  *   5. Fire-and-forget embeddings (indexContent handles this).
@@ -150,39 +150,68 @@ export async function indexProject(
   }
   walk(projectPath);
 
-  // Phase 2: batch-summarize. Returns a Map keyed by relPath with semantic or
-  // truncation fallback per file. Bounded concurrency prevents GPU thrash.
-  const summaries = await summarizeBatch(
-    candidates.map((c) => ({ path: c.relPath, content: c.content })),
-    options.onProgress
-  );
-
-  // Phase 3: write to KB, counting semantic vs truncation hits.
+  // Phase 2+3 (v0.10.4): write-as-you-go pipeline. Each worker summarizes a
+  // file via Ollama, then immediately writes the result to the KB. Benefits
+  // over the old batch-then-write design:
+  //   - Crash at file N preserves all N-1 summaries (incremental durability).
+  //   - Other sessions probing the KB mid-index see real-time progress,
+  //     not "0 files done" until the very end.
+  //   - onProgress callback fires AFTER the DB write, so status files and
+  //     consumer UIs reflect actual KB state, not mid-flight summarization.
+  //
+  // Concurrency replicates the bounded-worker pattern from summarizeBatch
+  // (which would otherwise accumulate all summaries in memory).
   let filesIndexed    = 0;
   let bytesRead       = 0;
   let semanticCount   = 0;
   let truncationCount = 0;
   let semanticModel: string | null = null;
 
-  for (const c of candidates) {
-    const sum    = summaries.get(c.relPath);
-    const l0     = sum?.l0;
-    const l1     = sum?.l1;
-    const source = `file:${c.relPath}`;
-    try {
-      indexContent(projectPath, c.content, source, "internal", "internal", l0, l1);
-      bytesRead    += c.bytes;
-      filesIndexed += 1;
-      if (sum?.source === "semantic") {
-        semanticCount += 1;
-        if (!semanticModel && sum.modelUsed) semanticModel = sum.modelUsed;
-      } else {
-        truncationCount += 1;
+  const concurrency = Math.max(1, Config.SUMMARY_CONCURRENCY);
+  const queue       = [...candidates];
+  const total       = candidates.length;
+  let done = 0;
+
+  async function worker(): Promise<void> {
+    while (queue.length > 0) {
+      const c = queue.shift();
+      if (!c) return;
+
+      // Summarize (semantic via Ollama, or deterministic truncation fallback)
+      let sum;
+      try {
+        sum = await summarizeFile(c.relPath, c.content);
+      } catch {
+        // Summarization should never throw (summarizeFile returns truncation on
+        // error), but belt-and-suspenders:
+        sum = { l0: c.content.slice(0, Config.TIER_L0_CHARS).trim(),
+                l1: c.content.slice(0, Config.TIER_L1_CHARS).trim(),
+                source: "truncation" as const };
       }
-    } catch {
-      filesSkipped += 1;
+
+      // Immediately persist to KB (no waiting for the whole batch)
+      const source = `file:${c.relPath}`;
+      try {
+        indexContent(projectPath, c.content, source, "internal", "internal", sum.l0, sum.l1);
+        bytesRead    += c.bytes;
+        filesIndexed += 1;
+        if (sum.source === "semantic") {
+          semanticCount += 1;
+          if (!semanticModel && sum.modelUsed) semanticModel = sum.modelUsed;
+        } else {
+          truncationCount += 1;
+        }
+      } catch {
+        filesSkipped += 1;
+      }
+
+      // Progress fires AFTER the write — status files now reflect real DB state
+      done += 1;
+      options.onProgress?.(done, total, c.relPath);
     }
   }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   // Re-probe in case no file summary populated modelUsed (all truncation)
   if (!semanticModel && Config.SUMMARY_ENABLED) {

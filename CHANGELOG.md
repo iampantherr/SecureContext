@@ -4,6 +4,34 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.10.4] — 2026-04-18 — Write-as-you-go indexing (crash-safe + real-time progress)
+
+Found during live E2E on a 650-file project (`A2A_communication`): the v0.10.2 `indexProject` had a batch-then-write design that held all KB writes until every file was summarized. On a ~40-min indexing run this meant:
+- **Zero incremental durability** — a crash at file 649/650 lost every summary.
+- **DB was empty to outside observers for the full 40 minutes** — then jumped from 0 to 650 rows in one flush.
+- **Stale-state probing** — a second Claude session opening the same project mid-index saw an empty KB and (in some paths) spawned a second indexer for the same or parent directory.
+
+### Changed
+
+- **`harness.ts indexProject` — per-file pipeline.** Each worker now summarizes one file, immediately calls `indexContent()` to persist L0/L1 to `source_meta` + content to `knowledge`, then reports progress. Concurrency (`Config.SUMMARY_CONCURRENCY`, default 4) inlines the bounded-worker pattern from `summarizeBatch` without buffering all summaries in memory. `summarizeBatch` is no longer imported by `harness.ts` (still exported from `summarizer.ts` for callers that want the old batched shape).
+- **onProgress callback fires AFTER the write**, not after the summary. So `background-index.mjs` status files and any consumer UIs now reflect real KB state, not mid-flight summarization.
+
+### Benefits
+
+- **Crash-safe.** Indexer interrupted at N/M files → first N files are durably in the KB. Re-running re-summarizes only the missing M-N files (via the `getIndexingStatus` "already-indexed" probe).
+- **Real-time visibility.** `zc_file_summary(path)` starts returning semantic summaries on the very first file that completes, rather than after the whole project finishes.
+- **No rogue re-spawns.** The SessionStart hook's check for "already being indexed" no longer fires false negatives mid-index.
+- **Memory bounded.** Previous design held a `Map<path, SummaryPair>` of all 650 summaries. New design holds at most `SUMMARY_CONCURRENCY` (4) in flight.
+
+### Migration
+
+Zero user action needed. Just pull + rebuild:
+```bash
+cd SecureContext
+git pull origin main
+npm run build
+```
+
 ## [0.10.3] — 2026-04-17 — Bug fixes: legacy migration + env propagation + excludes
 
 Two bugs that silently broke v0.10.2 auto-indexing on real projects, found during live E2E testing with `Test_Agent_Coordination`:
