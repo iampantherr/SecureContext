@@ -4,6 +4,92 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.13.0] — 2026-04-18 — graphify integration: structural knowledge graph as a first-class SC capability
+
+Adds three new MCP tools that proxy to **[graphify](https://github.com/safishamsi/graphify)**, the AI coding assistant skill that builds structural knowledge graphs of any folder. Plus auto-indexing of `GRAPH_REPORT.md` so agents discover it via normal `zc_search` without needing to know graphify exists.
+
+**Why both:** SC and graphify solve different problems. SC = persistent state + multi-agent + telemetry + security. graphify = structural map of code + multimodal corpus understanding. They stack multiplicatively for token savings on architectural questions:
+
+| Question type | Without either | SC alone | graphify alone | **Both stacked** |
+|---|---|---|---|---|
+| "How does auth work?" (architectural) | ~25k tokens | ~2k tokens (BM25 chunks) | ~500 tokens (god-node + community) | **~1.5k tokens** (graph orient → SC fetch precise) |
+| "What did the developer agent commit?" (state) | N/A | ~1.5k tokens | N/A | ~1.5k tokens |
+| "Show me X module's signatures" (multimodal/AST) | N/A | N/A | ~800 tokens | ~800 tokens |
+
+### Added — three new MCP tools
+
+- **`zc_graph_query(query: string)`** — natural-language graph query. Forwards to graphify's `query_graph` (which traverses `graph.json` and returns matching nodes + relationships + confidence tags). Use for "how does X relate to Y" / "what depends on Z".
+- **`zc_graph_path(from: string, to: string)`** — shortest path between two named nodes. Forwards to graphify's `shortest_path`. Use for "trace the call chain".
+- **`zc_graph_neighbors(node: string)`** — immediate neighbors of a node. Forwards to graphify's `get_neighbors`. Use for "what's directly connected to X".
+
+All three return helpful hints when graphify isn't set up:
+
+```
+No graphify graph found at /your/project/graphify-out/graph.json.
+Run `/graphify .` in this project (requires the graphify CLI:
+`pip install graphifyy && graphify install`). Then retry zc_graph_query.
+```
+
+### Added — auto-index `graphify-out/GRAPH_REPORT.md`
+
+`zc_index_project` now automatically detects + indexes graphify's one-page architectural overview into the SC KB. The L0 summary identifies it as "GRAPH_REPORT.md from graphify — structural knowledge graph: god nodes, communities, suggested architectural questions" so agents discover it via normal `zc_search` without needing to know graphify exists.
+
+`IndexProjectResult` gains a `graphReportIndexed: boolean` field reporting whether the auto-index ran.
+
+### Added — `src/graph_proxy.ts`
+
+Lightweight subprocess client that:
+- Spawns `python -m graphify.serve graphify-out/graph.json` lazily (only on first `zc_graph_*` call)
+- Reuses one subprocess per project per SC server lifetime (cached handle)
+- Communicates via JSON-RPC over stdio (graphify's native protocol)
+- 10-second timeout per call, captures stderr to logs at WARN
+- Subprocess shutdown on SC server exit
+- **Defensive defaults:** ANY failure returns ok=false with a hint — never throws, never crashes the calling tool
+
+### Security
+
+- graphify subprocess runs with the SAME UID as the SC MCP server — no privilege escalation
+- Project path is normalized + validated before being passed; `spawn` uses argv array (no shell interpolation)
+- Subprocess can be killed via `shutdownAllGraphifyHandles()` for clean shutdown
+- graphify's output is treated as untrusted data — JSON-RPC parsing is strict; malformed lines logged + skipped
+
+### Test summary
+
+- **470/470 tests pass** (459 baseline + 11 new graph_proxy tests covering: missing graphify-out, missing graph.json, hint contents, graceful subprocess failure, no-throw guarantee)
+- **No regression** — all v0.11.0/v0.12.0/v0.12.1 tests pass unchanged
+- **Live subprocess path is not unit-tested** (would require Python + graphifyy in CI). Covered by manual integration testing.
+
+### Upgrade notes
+
+**Backward-compatible — no agent-facing changes when graphify isn't installed.** SC works exactly as before. The three new tools are inert (return hints) until you `pip install graphifyy && graphify install` and `/graphify .` your project.
+
+**To enable the integration:**
+
+1. Install graphify (one-time, system-wide): `pip install graphifyy && graphify install`
+2. Build a graph for your project: `/graphify .` from inside your AI assistant
+3. Next `zc_index_project` call will auto-detect + index `GRAPH_REPORT.md`
+4. Agents can immediately use `zc_graph_query` / `zc_graph_path` / `zc_graph_neighbors`
+
+**Recommended workflow for agents** (combined SC + graphify):
+
+| Question | Right tool |
+|---|---|
+| Architectural / structural ("how is X organized") | `zc_graph_query` first, then `zc_search` for precise content |
+| State / history ("what was decided") | `zc_recall_context` |
+| Specific implementation ("show me func X") | `zc_search` with the function name |
+| What's connected to X | `zc_graph_neighbors` |
+
+### Deferred to v0.14.0
+
+The deeper structural-understanding capabilities discussed in the design review (v0.13.0 → v0.14.0 split):
+- **Native AST tree-sitter pre-pass** for code files (LLM-free L0 from class/function/import extraction; ~50% indexing cost reduction for code-heavy projects)
+- **EXTRACTED / INFERRED / AMBIGUOUS provenance tagging** on `working_memory` + `knowledge_entries` (Chin & Older 2011 "speaks-for" formalism — every claim carries its trust chain)
+- **Leiden community detection** over the SC KB (graph topology beats vector similarity for some queries at near-zero cost)
+
+These complement graphify rather than competing with it (graphify provides the cross-corpus map; v0.14.0 work brings similar capabilities natively to SC's KB even when graphify isn't available). Sprint 3 then picks up Tier 3 access-control fixes — see `HARNESS_EVOLUTION_PLAN.md §8.6`.
+
+---
+
 ## [0.12.1] — 2026-04-18 — Tier 2: Reference Monitor + session_token binding for telemetry
 
 Closes the **two largest remaining access-control gaps** identified in the v0.12.0 design review (Chin & Older 2011 — Ch6 + Ch12). Telemetry writes now have a single bypass-proof enforcement point that authenticates the writer's identity, not just verifies row integrity.

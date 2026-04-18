@@ -623,6 +623,53 @@ const TOOLS: Tool[] = [
       required: ["component"],
     },
   },
+
+  // ── v0.13.0 graphify integration ──────────────────────────────────────
+  {
+    name: "zc_graph_query",
+    description:
+      "Query the project's structural knowledge graph (built by graphify). " +
+      "Use for ARCHITECTURAL questions like 'how does auth work' or 'what depends on the user model'. " +
+      "Returns graph nodes + relationships + confidence tags. " +
+      "Requires `graphify-out/graph.json` in the project (run `/graphify .` first to build it). " +
+      "Pairs with zc_search for precise content retrieval — graph orient first, then targeted reads.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language graph query (e.g. 'how does auth flow connect to the database')" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "zc_graph_path",
+    description:
+      "Find the shortest path between two named nodes in the structural graph. " +
+      "Use for 'how does X connect to Y' questions. Returns the chain of nodes + edges. " +
+      "Requires graphify-out/graph.json (see zc_graph_query for setup).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Source node name" },
+        to:   { type: "string", description: "Target node name" },
+      },
+      required: ["from", "to"],
+    },
+  },
+  {
+    name: "zc_graph_neighbors",
+    description:
+      "Get the immediate neighbors of a named node in the structural graph. " +
+      "Use for 'what's related to X' questions. Returns directly-connected nodes + their edge types. " +
+      "Requires graphify-out/graph.json.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        node: { type: "string", description: "Node name to inspect" },
+      },
+      required: ["node"],
+    },
+  },
 ];
 
 // ─── Server setup ──────────────────────────────────────────────────────────────
@@ -1529,6 +1576,37 @@ async function dispatchToolCall(
         }).join("\n");
 
         return { content: [{ type: "text", text: header + body }] };
+      }
+
+      // ── v0.13.0 graphify integration ────────────────────────────────
+      case "zc_graph_query": {
+        const { query } = args as { query: string };
+        const { graphQuery } = await import("./graph_proxy.js");
+        const r = await graphQuery(PROJECT_PATH, query);
+        if (!r.ok) {
+          return { content: [{ type: "text", text: r.hint ?? r.error ?? "graphify call failed" }], isError: !r.hint };
+        }
+        return { content: [{ type: "text", text: `## Graph query: ${query}\n\`\`\`json\n${JSON.stringify(r.data, null, 2)}\n\`\`\`` }] };
+      }
+
+      case "zc_graph_path": {
+        const { from, to } = args as { from: string; to: string };
+        const { graphPath } = await import("./graph_proxy.js");
+        const r = await graphPath(PROJECT_PATH, from, to);
+        if (!r.ok) {
+          return { content: [{ type: "text", text: r.hint ?? r.error ?? "graphify call failed" }], isError: !r.hint };
+        }
+        return { content: [{ type: "text", text: `## Path: ${from} → ${to}\n\`\`\`json\n${JSON.stringify(r.data, null, 2)}\n\`\`\`` }] };
+      }
+
+      case "zc_graph_neighbors": {
+        const { node } = args as { node: string };
+        const { graphNeighbors } = await import("./graph_proxy.js");
+        const r = await graphNeighbors(PROJECT_PATH, node);
+        if (!r.ok) {
+          return { content: [{ type: "text", text: r.hint ?? r.error ?? "graphify call failed" }], isError: !r.hint };
+        }
+        return { content: [{ type: "text", text: `## Neighbors of: ${node}\n\`\`\`json\n${JSON.stringify(r.data, null, 2)}\n\`\`\`` }] };
       }
 
       default:

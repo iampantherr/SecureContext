@@ -64,6 +64,7 @@ export interface IndexProjectResult {
   semanticModel:        string | null;
   semanticCount:        number;     // files that got a semantic summary
   truncationCount:      number;     // files that fell back to truncation
+  graphReportIndexed:   boolean;    // v0.13.0: graphify-out/GRAPH_REPORT.md auto-indexed
 }
 
 export interface CapturedOutput {
@@ -218,6 +219,32 @@ export async function indexProject(
     try { semanticModel = await selectSummaryModel(); } catch { /* noop */ }
   }
 
+  // v0.13.0: auto-index graphify GRAPH_REPORT.md if present.
+  // The structural map produced by graphify gives architectural orientation
+  // at near-zero cost — having it in the KB means agents can find it via
+  // normal zc_search instead of needing to know graphify's tools exist.
+  let graphReportIndexed = false;
+  try {
+    const { findGraphReport } = await import("./graph_proxy.js");
+    const reportPath = findGraphReport(projectPath);
+    if (reportPath) {
+      const reportContent = readFileSync(reportPath, "utf8");
+      // Use a special source name so it's identifiable in zc_search results
+      indexContent(
+        projectPath,
+        reportContent,
+        "graphify://GRAPH_REPORT.md",
+        "internal",
+        "internal",
+        // L0: a deterministic blurb so the agent knows what this is
+        "GRAPH_REPORT.md from graphify — structural knowledge graph: god nodes, communities, suggested architectural questions. Use zc_graph_query / zc_graph_path / zc_graph_neighbors for deeper queries.",
+        // L1: first ~2000 chars of the report itself
+        reportContent.slice(0, 2000),
+      );
+      graphReportIndexed = true;
+    }
+  } catch { /* graphify integration optional */ }
+
   return {
     filesScanned,
     filesIndexed,
@@ -229,6 +256,7 @@ export async function indexProject(
     semanticModel,
     semanticCount,
     truncationCount,
+    graphReportIndexed,
   };
 }
 
