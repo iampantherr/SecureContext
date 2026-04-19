@@ -4,6 +4,108 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.15.0] — 2026-04-18 — Sprint 3 Phase 1: Structured ASSIGN + MAC Classification (Tier 3 Part)
+
+First slice of Sprint 3 — the foundation pieces that don't require Postgres backend. Adds structured task fields to `ASSIGN` broadcasts (so dispatcher can route by complexity / enforce file ownership / resolve dependencies) and adds Mandatory Access Control labels to outcomes (closes Tier 3 fix T3.2 from §8.6 — at the SQLite layer; Postgres RLS lands in v0.16.0).
+
+### Added — §8.1 Structured ASSIGN broadcast schema (additive, backward-compatible)
+
+**Migration 18** adds 7 NULLABLE columns to `broadcasts`:
+
+| Column | Type | Purpose |
+|---|---|---|
+| `acceptance_criteria` | TEXT (JSON array) | Testable assertions defining "task done"; up to 20 items × 500 chars |
+| `complexity_estimate` | INTEGER | 1-5 estimate (5=needs Opus, 1=trivial Haiku); enables tier routing in v0.17 |
+| `file_ownership_exclusive` | TEXT (JSON array) | Files this task has exclusive WRITE authority over; path-traversal filtered |
+| `file_ownership_read_only` | TEXT (JSON array) | Files this task may READ but not modify |
+| `task_dependencies` | TEXT (JSON array of broadcast IDs) | Broadcast IDs that must MERGE before this task can start |
+| `required_skills` | TEXT (JSON array) | Skill names needed (Sprint 2 mutation engine will route by these) |
+| `estimated_tokens` | INTEGER | Optional token-cost estimate for budgeting |
+
+**API change (additive):** `broadcastFact()` accepts the new fields as optional opts; `BroadcastResult` echoes them back. **Backward compat preserved:** legacy ASSIGN broadcasts without these fields still work — DB stores NULL, response returns empty/null per field.
+
+**Sanitization (defense-in-depth):**
+- `complexity_estimate` clamped to 1..5; out-of-range coerced to NULL
+- File paths run through `isSafeFilePath` (rejects `../` and `..\\`)
+- `task_dependencies`: only positive integers kept, max 50
+- `acceptance_criteria` truncated to 500 chars per item, max 20 items
+- `required_skills` truncated to 100 chars per item, max 20 items
+- `estimated_tokens` clamped to [0, 1B]; non-finite → NULL
+
+**Index:** `idx_b_complexity ON broadcasts(complexity_estimate, type)` for the dispatcher's tier-routing scan that lands in v0.17.
+
+### Added — §8.6 T3.2 MAC-style classification on outcomes
+
+**Migration 19** adds two columns to `outcomes`:
+
+| Column | Default | Constraint |
+|---|---|---|
+| `classification` | `'internal'` | `CHECK IN ('public', 'internal', 'confidential', 'restricted')` |
+| `created_by_agent_id` | NULL | required when `classification='restricted'` |
+
+**Read filter logic in `getOutcomesForToolCall(projectPath, callId, requestingAgentId?)`:**
+
+| Tier | Visible to |
+|---|---|
+| `public` | All callers |
+| `internal` | All callers (current behavior — no change for existing rows) |
+| `confidential` | Any caller with non-empty `requestingAgentId` (registered agent) |
+| `restricted` | ONLY the originating `created_by_agent_id` |
+
+**Backward-compat:** omitting `requestingAgentId` returns ALL rows (admin/legacy path — preserves v0.14.0 behavior for callers that haven't updated yet).
+
+**Per-resolver auto-classification:**
+- `resolveUserPromptOutcome` → `'restricted'` + `createdByAgentId = ZC_AGENT_ID || recentCall.agent_id` (sentiment about a user message belongs to the originating agent only — cross-agent reads would leak how a specific user spoke to a specific worker)
+- `resolveGitCommitOutcome` → default `'internal'` (commit info isn't sensitive)
+- `resolveFollowUpOutcomes` → default `'internal'` (file_summary insufficiency is project-internal)
+
+**Defensive defaults:**
+- Caller passes `classification='restricted'` without `createdByAgentId` → downgraded to `'confidential'` + warning logged (no silent loss of readability)
+- Invalid classification value (e.g. `'TOP-SECRET'`) → coerced to `'internal'` (fail-safe default)
+- CHECK constraint enforces the four allowed values at the DB level (RT-S3-04 verifies SQL injection blocked)
+
+**Maps to Chin & Older 2011 Ch5 (Security Policies) + Ch13 (Confidentiality and Integrity Policies — Bell-LaPadula).**
+
+### Tests — 24 new (565/565 total pass)
+
+**§8.1 structured ASSIGN (10 tests):**
+- User case: full structured ASSIGN round-trips (10 fields verified end-to-end)
+- Backward-compat: legacy ASSIGN without new fields still works
+- Edge cases: complexity clamping (0/6/-1/3/3.7), oversize cap (30→20 acceptance_criteria), path-traversal rejection, integer-only filter on dependencies, length cap on skills, negative/NaN/oversize tokens, coexistence with non-ASSIGN broadcasts
+
+**§8.6 T3.2 classification (14 tests):**
+- Default `'internal'` classification round-trips
+- All 4 levels round-trip
+- `'restricted'` without `createdByAgentId` → downgraded to `'confidential'`
+- `getOutcomesForToolCall` without filter → admin/legacy path returns all rows
+- `'public'` + `'internal'` visible to all
+- `'confidential'` blocks empty agent_id, allows non-empty
+- **RT-S3-02:** cross-agent read of `'restricted'` row blocked (alice writes, bob can't read; alice can read her own; mixed-agent scenario where each sees only their own)
+- **RT-S3-03:** legacy rows get `'internal'` default from migration; CHECK constraint blocks attempts to NULL out classification
+- **RT-S3-04:** SQL injection / typo via direct DB UPDATE blocked by CHECK constraint
+- `resolveUserPromptOutcome` auto-tags `'restricted'` with the agent's identity; cross-agent read blocked
+- `resolveGitCommitOutcome` stays `'internal'`
+- Invalid classification on input coerced to `'internal'` (defensive)
+
+### Known limitation (deferred to v0.16.0)
+
+- **HTTP API mode (`ZC_TELEMETRY_MODE=api` / Docker stack):** the existing api-server (`securecontext-api` Docker container) doesn't yet know about the structured ASSIGN columns. Broadcasts going through the HTTP `/api/v1/broadcast` endpoint silently drop the new fields. **Local-mode broadcasts work fully.** v0.16.0 will add Postgres support for the new columns + RLS policy enforcing T3.2 at the database layer.
+- **Per-agent Postgres role (Tier 3 fix T3.1):** intentionally deferred to v0.16.0 since it depends on the Postgres backend for telemetry/work-stealing landing first (per §8.6 acceptance criteria).
+
+### Upgrade notes
+
+**Backward-compatible.** No existing call sites break:
+- `broadcastFact()` keeps its old signature; new fields are optional opts
+- `recordOutcome()` keeps its old signature; new `classification` + `createdByAgentId` are optional
+- `getOutcomesForToolCall()` keeps its old signature; new `requestingAgentId` is optional (omit for current admin/legacy behavior)
+- Migrations 18+19 are defensive (idempotent, skip if column already exists, skip if base table missing)
+
+**For dispatcher implementations:** start emitting `complexity_estimate` and `file_ownership_exclusive` on ASSIGN broadcasts now — v0.17 work-stealing queue will consume them.
+
+**For agents handling sensitive user prompts:** outcomes from `resolveUserPromptOutcome` are now auto-tagged `'restricted'` with your agent_id binding. Cross-agent leaks of inferred sentiment are blocked at the SQLite read filter (and at Postgres RLS in v0.16.0).
+
+---
+
 ## [0.14.0] — 2026-04-18 — Native AST + Provenance Tagging + Louvain Community Detection
 
 The "deeper internal capabilities" release. Three new features that complement v0.13.0's graphify integration — bringing similar structural-understanding capabilities natively to SC's KB even when graphify isn't available:

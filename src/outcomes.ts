@@ -65,6 +65,9 @@ export type OutcomeKind =
 export type SignalSource = "git_commit" | "user_prompt" | "follow_up" | "manual";
 export type RefType      = "tool_call" | "task" | "skill_run" | "session";
 
+/** v0.15.0 §8.6 T3.2 — MAC-style classification (Chin & Older 2011 Ch5+Ch13) */
+export type OutcomeClassification = "public" | "internal" | "confidential" | "restricted";
+
 export interface RecordOutcomeInput {
   refType:       RefType;
   refId:         string;
@@ -74,6 +77,11 @@ export interface RecordOutcomeInput {
   scoreDelta?:   number;            // optional: how this changed parent score
   evidence?:    Record<string, unknown>;  // structured supporting evidence (NEVER raw secrets)
   projectPath:   string;            // for DB resolution
+  // v0.15.0 §8.6 T3.2 — read-access tier
+  /** Classification label. Default 'internal' (current behavior). */
+  classification?:    OutcomeClassification;
+  /** Required when classification='restricted' — only this agent can read the row. */
+  createdByAgentId?:  string;
 }
 
 export interface OutcomeRecord extends ChainableRow {
@@ -153,6 +161,30 @@ async function _recordOutcomeLocal(input: RecordOutcomeInput): Promise<OutcomeRe
         resolvedAt,
       });
 
+      // v0.15.0 §8.6 T3.2 — classification label + creator binding.
+      // Default 'internal' preserves v0.14.0 behavior for callers that
+      // don't supply classification. 'restricted' rows MUST carry a
+      // createdByAgentId — coerce to 'internal' if author missing
+      // (defensive: don't silently lose readability).
+      const allowed: OutcomeClassification[] = ["public", "internal", "confidential", "restricted"];
+      let safeClassification: OutcomeClassification = "internal";
+      if (input.classification && allowed.includes(input.classification)) {
+        safeClassification = input.classification;
+      }
+      let safeCreatedBy: string | null = null;
+      if (typeof input.createdByAgentId === "string" && input.createdByAgentId.length > 0) {
+        safeCreatedBy = input.createdByAgentId.slice(0, 200);
+      }
+      if (safeClassification === "restricted" && !safeCreatedBy) {
+        // Restricted rows require a creator — downgrade to 'confidential'
+        // so the row remains readable by registered agents on this project.
+        // Logged so this isn't silent.
+        logger.warn("outcomes", "restricted_without_creator_downgraded", {
+          ref_id: input.refId, kind: input.outcomeKind,
+        });
+        safeClassification = "confidential";
+      }
+
       await chain.appendChainedWith(
         { agentId: writerAgentId, projectHash: sha256ProjectHash(input.projectPath), canonicalFields },
         ({ prevHash, rowHash, db: txnDb }) => {
@@ -160,12 +192,12 @@ async function _recordOutcomeLocal(input: RecordOutcomeInput): Promise<OutcomeRe
             INSERT INTO outcomes (
               outcome_id, ref_type, ref_id, outcome_kind,
               signal_source, confidence, score_delta, evidence, resolved_at,
-              prev_hash, row_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              prev_hash, row_hash, classification, created_by_agent_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             outcomeId, input.refType, input.refId, input.outcomeKind,
             input.signalSource, confidence, input.scoreDelta ?? null, evidenceJson, resolvedAt,
-            prevHash, rowHash
+            prevHash, rowHash, safeClassification, safeCreatedBy
           );
         }
       );
@@ -256,12 +288,24 @@ export async function resolveUserPromptOutcome(input: {
   projectPath: string;
   sessionId:   string;
   userMessage: string;
+  /** v0.15.0 §8.6 T3.2 — agent the prompt belongs to (becomes the row's
+   *  created_by_agent_id, gating cross-agent reads). Defaults to ZC_AGENT_ID. */
+  agentId?:    string;
 }): Promise<OutcomeRecord | null> {
   const sentiment = classifySentiment(input.userMessage);
   if (sentiment === "neutral") return null;
 
   const recentCall = getMostRecentToolCallForSession(input.projectPath, input.sessionId);
   if (!recentCall) return null;
+
+  // v0.15.0 §8.6 T3.2 — sentiment about a user message is sensitive to the
+  // ORIGINATING agent. Cross-agent reads of these outcomes leak information
+  // about how a specific user spoke to a specific worker. Tag 'restricted'
+  // with the agent_id binding so only the originating agent can read.
+  const writerAgent = input.agentId
+                   ?? process.env.ZC_AGENT_ID
+                   ?? recentCall.agent_id
+                   ?? "outcomes-resolver";
 
   return await recordOutcome({
     projectPath:   input.projectPath,
@@ -272,6 +316,8 @@ export async function resolveUserPromptOutcome(input: {
     confidence:    0.5,    // weak inference
     // Only store the sentiment + length, NOT the raw message text
     evidence:      { sentiment, message_length: input.userMessage.length },
+    classification:    "restricted",
+    createdByAgentId:  writerAgent,
   });
 }
 
@@ -360,14 +406,52 @@ export function verifyOutcomesChain(projectPath: string): {
   }
 }
 
-/** Get all outcomes for a given tool_call. */
-export function getOutcomesForToolCall(projectPath: string, callId: string): OutcomeRecord[] {
+/**
+ * Get all outcomes for a given tool_call.
+ *
+ * v0.15.0 §8.6 T3.2 — MAC-style read filter:
+ *   public/internal       → returned to all callers (default)
+ *   confidential          → returned to callers identified as a registered
+ *                            agent on this project (we approximate by
+ *                            "requestingAgentId is non-empty")
+ *   restricted            → returned ONLY when requestingAgentId === created_by_agent_id
+ *
+ * Pass `requestingAgentId` to enable the filter. Omit to retain v0.14.0
+ * behavior (returns ALL rows — admin/back-compat path).
+ */
+export function getOutcomesForToolCall(
+  projectPath: string,
+  callId: string,
+  requestingAgentId?: string,
+): OutcomeRecord[] {
   const db = openProjectDb(projectPath);
   try {
-    return db.prepare(`
+    const all = db.prepare(`
       SELECT * FROM outcomes WHERE ref_type = 'tool_call' AND ref_id = ?
       ORDER BY id ASC
     `).all(callId) as unknown as OutcomeRecord[];
+
+    // No filter requested → preserve legacy admin behavior
+    if (requestingAgentId === undefined) return all;
+
+    return all.filter((row) => {
+      // Legacy rows pre-migration-19 may lack `classification` (UNKNOWN);
+      // treat as 'internal' for safety (readable by any registered agent).
+      const cls: string = (row as unknown as Record<string, unknown>).classification as string ?? "internal";
+      const createdBy: string | null = ((row as unknown as Record<string, unknown>).created_by_agent_id as string | null) ?? null;
+
+      if (cls === "public" || cls === "internal") return true;
+      if (cls === "confidential") {
+        // Confidential = readable by any non-empty agent identity. The Postgres
+        // backend in v0.16.0 will tighten this to a registered agent_role check.
+        return requestingAgentId !== "";
+      }
+      if (cls === "restricted") {
+        return createdBy !== null && createdBy === requestingAgentId;
+      }
+      // Unknown classification value — fail closed (don't return)
+      return false;
+    });
   } finally {
     db.close();
   }
@@ -418,14 +502,14 @@ function openProjectDb(projectPath: string): DatabaseSync {
 function getMostRecentToolCallForSession(
   projectPath: string,
   sessionId:   string,
-): { call_id: string; tool_name: string; ts: string } | null {
+): { call_id: string; tool_name: string; ts: string; agent_id: string } | null {
   const db = openProjectDb(projectPath);
   try {
     const row = db.prepare(`
-      SELECT call_id, tool_name, ts FROM tool_calls
+      SELECT call_id, tool_name, ts, agent_id FROM tool_calls
       WHERE session_id = ?
       ORDER BY id DESC LIMIT 1
-    `).get(sessionId) as { call_id: string; tool_name: string; ts: string } | undefined;
+    `).get(sessionId) as { call_id: string; tool_name: string; ts: string; agent_id: string } | undefined;
     return row ?? null;
   } finally {
     db.close();

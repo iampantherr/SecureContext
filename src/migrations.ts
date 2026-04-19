@@ -586,6 +586,68 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 18,
+    description: "v0.15.0 §8.1: structured ASSIGN broadcast columns (acceptance_criteria, complexity, file_ownership, dependencies, required_skills, estimated_tokens)",
+    up: (db) => {
+      // Per HARNESS_EVOLUTION_PLAN.md §8.1: extend ASSIGN broadcasts with
+      // structured fields so dispatcher (Sprint 3 work-stealing queue) can
+      // route by complexity, enforce file ownership, and resolve task
+      // dependencies. All NULLABLE — backward-compatible with existing ASSIGN
+      // broadcasts that don't provide them.
+      const tbl = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='broadcasts'`
+      ).get();
+      if (!tbl) return;
+      const cols = db.prepare(`PRAGMA table_info(broadcasts)`).all() as Array<{ name: string }>;
+      const have = new Set(cols.map((c) => c.name));
+      // Each ALTER is independent so partial-migration on a previously-failed
+      // run can resume cleanly.
+      if (!have.has("acceptance_criteria"))      db.exec(`ALTER TABLE broadcasts ADD COLUMN acceptance_criteria TEXT`);
+      if (!have.has("complexity_estimate"))      db.exec(`ALTER TABLE broadcasts ADD COLUMN complexity_estimate INTEGER`);
+      if (!have.has("file_ownership_exclusive")) db.exec(`ALTER TABLE broadcasts ADD COLUMN file_ownership_exclusive TEXT`);
+      if (!have.has("file_ownership_read_only")) db.exec(`ALTER TABLE broadcasts ADD COLUMN file_ownership_read_only TEXT`);
+      if (!have.has("task_dependencies"))        db.exec(`ALTER TABLE broadcasts ADD COLUMN task_dependencies TEXT`);
+      if (!have.has("required_skills"))          db.exec(`ALTER TABLE broadcasts ADD COLUMN required_skills TEXT`);
+      if (!have.has("estimated_tokens"))         db.exec(`ALTER TABLE broadcasts ADD COLUMN estimated_tokens INTEGER`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_b_complexity ON broadcasts(complexity_estimate, type)`);
+    },
+  },
+
+  {
+    id: 19,
+    description: "v0.15.0 §8.6 T3.2: MAC-style classification labels on outcomes (public|internal|confidential|restricted)",
+    up: (db) => {
+      // Per HARNESS_EVOLUTION_PLAN.md §8.6 T3.2 + Chin & Older 2011 Ch5+Ch13:
+      // outcomes.evidence may contain inferred-from-user-message data
+      // (sentiment classifier, follow-up resolver). Classification labels
+      // let consumers filter rows when querying:
+      //   public/internal → readable by any agent on this project
+      //   confidential    → readable by registered agents on this project
+      //   restricted      → readable ONLY by created_by_agent_id
+      //
+      // SQLite enforces the read filter at the application layer (no RLS).
+      // Postgres RLS policy ships with the Postgres backend (v0.16.0).
+      //
+      // Defensive: idempotent + handles missing outcomes table.
+      const tbl = db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='outcomes'`
+      ).get();
+      if (!tbl) return;
+      const cols = db.prepare(`PRAGMA table_info(outcomes)`).all() as Array<{ name: string }>;
+      const have = new Set(cols.map((c) => c.name));
+      if (!have.has("classification")) {
+        db.exec(`ALTER TABLE outcomes ADD COLUMN classification TEXT NOT NULL DEFAULT 'internal'
+                 CHECK (classification IN ('public', 'internal', 'confidential', 'restricted'))`);
+      }
+      if (!have.has("created_by_agent_id")) {
+        // NULL allowed for legacy rows + non-restricted entries
+        db.exec(`ALTER TABLE outcomes ADD COLUMN created_by_agent_id TEXT`);
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_o_classification ON outcomes(classification, created_by_agent_id)`);
+    },
+  },
+
 ];
 
 /**

@@ -505,6 +505,15 @@ export interface BroadcastResult {
   reason:     string;
   importance: number;
   created_at: string;
+  // v0.15.0 §8.1 — structured ASSIGN fields. All NULLABLE/empty for
+  // non-ASSIGN broadcasts and for legacy clients that don't supply them.
+  acceptance_criteria?:      string[];
+  complexity_estimate?:      number | null;
+  file_ownership_exclusive?: string[];
+  file_ownership_read_only?: string[];
+  task_dependencies?:        number[];
+  required_skills?:          string[];
+  estimated_tokens?:         number | null;
 }
 
 // ── Scrypt KDF constants (from Config — repeated here for inline readability) ──
@@ -749,6 +758,21 @@ export function broadcastFact(
     importance?:    number;
     channel_key?:   string;
     session_token?: string;
+    // v0.15.0 §8.1 — structured ASSIGN fields (all OPTIONAL, all NULLABLE in DB)
+    /** Testable assertions that define "task done". Up to 20, each up to 500 chars. */
+    acceptance_criteria?: string[];
+    /** 1-5 estimate where 5 = needs Opus, 1 = trivial Haiku task. */
+    complexity_estimate?: number;
+    /** Files this task has exclusive WRITE authority over. Up to 50. */
+    file_ownership_exclusive?: string[];
+    /** Files this task may READ but not modify. Up to 50. */
+    file_ownership_read_only?: string[];
+    /** Broadcast IDs that must MERGE before this task can start. */
+    task_dependencies?: number[];
+    /** Skill names needed (Sprint 2 mutation engine will use this for routing). */
+    required_skills?: string[];
+    /** Optional token-cost estimate for budgeting. */
+    estimated_tokens?: number;
   } = {}
 ): BroadcastResult {
   const safeAgent   = sanitize(agentId,          64);
@@ -771,6 +795,46 @@ export function broadcastFact(
   const safeFilesJson   = JSON.stringify(sanitizedFiles);
   const safeDependsJson = JSON.stringify(sanitizedDepends);
   const now             = new Date().toISOString();
+
+  // v0.15.0 §8.1 — structured ASSIGN field sanitization. All NULLABLE in DB,
+  // so we collapse empty/missing inputs to null (vs empty JSON arrays that
+  // would consume bytes). Caps mirror the existing files/depends_on caps.
+  const sanitizedAcceptance = (opts.acceptance_criteria ?? [])
+    .map((s) => sanitize(String(s), 500))
+    .filter(Boolean)
+    .slice(0, 20);
+  const sanitizedFileOwnExcl = (opts.file_ownership_exclusive ?? [])
+    .map((f) => sanitize(String(f), 500))
+    .filter(isSafeFilePath)
+    .slice(0, 50);
+  const sanitizedFileOwnRO = (opts.file_ownership_read_only ?? [])
+    .map((f) => sanitize(String(f), 500))
+    .filter(isSafeFilePath)
+    .slice(0, 50);
+  const sanitizedTaskDeps = (opts.task_dependencies ?? [])
+    .filter((d) => Number.isInteger(d) && d > 0)
+    .slice(0, 50)
+    .map((d) => Math.floor(d));
+  const sanitizedReqSkills = (opts.required_skills ?? [])
+    .map((s) => sanitize(String(s), 100))
+    .filter(Boolean)
+    .slice(0, 20);
+  // CHECK constraint: 1..5 — coerce out-of-range to null
+  let safeComplexity: number | null = null;
+  if (typeof opts.complexity_estimate === "number" && Number.isFinite(opts.complexity_estimate)) {
+    const c = Math.round(opts.complexity_estimate);
+    if (c >= 1 && c <= 5) safeComplexity = c;
+  }
+  let safeEstTokens: number | null = null;
+  if (typeof opts.estimated_tokens === "number" && Number.isFinite(opts.estimated_tokens) && opts.estimated_tokens >= 0) {
+    safeEstTokens = Math.floor(Math.min(opts.estimated_tokens, 1_000_000_000));
+  }
+  // Materialize as JSON only when non-empty so DB nulls reflect "not provided"
+  const safeAcceptanceJson  = sanitizedAcceptance.length  > 0 ? JSON.stringify(sanitizedAcceptance)  : null;
+  const safeFileOwnExclJson = sanitizedFileOwnExcl.length > 0 ? JSON.stringify(sanitizedFileOwnExcl) : null;
+  const safeFileOwnROJson   = sanitizedFileOwnRO.length   > 0 ? JSON.stringify(sanitizedFileOwnRO)   : null;
+  const safeTaskDepsJson    = sanitizedTaskDeps.length    > 0 ? JSON.stringify(sanitizedTaskDeps)    : null;
+  const safeReqSkillsJson   = sanitizedReqSkills.length   > 0 ? JSON.stringify(sanitizedReqSkills)   : null;
 
   const db = openDb(projectPath);
 
@@ -845,12 +909,21 @@ export function broadcastFact(
   }
 
   const result = db.prepare(`
-    INSERT INTO broadcasts(type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at, session_token_id, prev_hash, row_hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO broadcasts(
+      type, agent_id, task, files, state, summary, depends_on, reason, importance,
+      created_at, session_token_id, prev_hash, row_hash,
+      acceptance_criteria, complexity_estimate,
+      file_ownership_exclusive, file_ownership_read_only,
+      task_dependencies, required_skills, estimated_tokens
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     type, safeAgent, safeTask, safeFilesJson, safeState,
     safeSummary, safeDependsJson, safeReason, safeImp, now,
-    sessionTokenId, prevHash, rowHash
+    sessionTokenId, prevHash, rowHash,
+    safeAcceptanceJson, safeComplexity,
+    safeFileOwnExclJson, safeFileOwnROJson,
+    safeTaskDepsJson, safeReqSkillsJson, safeEstTokens
   ) as { lastInsertRowid: number };
 
   const id = Number(result.lastInsertRowid);
@@ -869,6 +942,14 @@ export function broadcastFact(
     reason:     safeReason,
     importance: safeImp,
     created_at: now,
+    // v0.15.0 §8.1 structured fields (echo back to caller for verification)
+    acceptance_criteria:      sanitizedAcceptance,
+    complexity_estimate:      safeComplexity,
+    file_ownership_exclusive: sanitizedFileOwnExcl,
+    file_ownership_read_only: sanitizedFileOwnRO,
+    task_dependencies:        sanitizedTaskDeps,
+    required_skills:          sanitizedReqSkills,
+    estimated_tokens:         safeEstTokens,
   };
 }
 
