@@ -700,6 +700,26 @@ const TOOLS: Tool[] = [
       required: ["source"],
     },
   },
+  {
+    name: "zc_choose_model",
+    description:
+      "v0.17.0 §8.5 — Recommend a Claude model tier for a task given its complexity_estimate (1-5). " +
+      "Maps 1-2→Haiku (cheap/trivial), 3-4→Sonnet (standard), 5→Opus (hard reasoning). " +
+      "Returns model id, tier, rationale, per-Mtok input cost, and whether the input was clamped. " +
+      "Use before dispatching a task to a worker pool to route by cost-efficiency. " +
+      "Operators can override via ZC_MODEL_TIER_{HAIKU,SONNET,OPUS} env vars.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        complexity: {
+          type: "number",
+          description: "Task complexity 1-5 (from v0.15.0 §8.1 structured ASSIGN). " +
+            "Values outside 1-5, NaN, or missing → defaults to Sonnet with inputClamped=true.",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 // ─── Server setup ──────────────────────────────────────────────────────────────
@@ -1696,6 +1716,21 @@ async function dispatchToolCall(
         } else {
           lines.push(`This source is in a singleton community.`);
         }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_choose_model": {
+        const { complexity } = args as { complexity?: number };
+        const { chooseModel } = await import("./indexing/model_router.js");
+        const rec = chooseModel(complexity ?? null);
+        const lines: string[] = [];
+        lines.push(`## Model recommendation`);
+        lines.push(`- **Tier:** ${rec.tier}`);
+        lines.push(`- **Model:** ${rec.model}`);
+        lines.push(`- **Input cost:** $${rec.estimatedInputCostPerMtok.toFixed(2)}/Mtok`);
+        lines.push(`- **Clamped:** ${rec.inputClamped ? "yes" : "no"}`);
+        lines.push(``);
+        lines.push(rec.reason);
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 

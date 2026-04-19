@@ -1068,18 +1068,30 @@ export function recallSharedChannel(
     id: number; type: string; agent_id: string; task: string;
     files: string; state: string; summary: string; depends_on: string;
     reason: string; importance: number; created_at: string;
+    // v0.15.0 §8.1 — structured ASSIGN columns (may be NULL on legacy rows).
+    acceptance_criteria:      string | null;
+    complexity_estimate:      number | null;
+    file_ownership_exclusive: string | null;
+    file_ownership_read_only: string | null;
+    task_dependencies:        string | null;
+    required_skills:          string | null;
+    estimated_tokens:         number | null;
   };
+
+  const COLS = `id, type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at,
+    acceptance_criteria, complexity_estimate, file_ownership_exclusive, file_ownership_read_only,
+    task_dependencies, required_skills, estimated_tokens`;
 
   let rows: RawRow[];
   if (opts.type) {
     rows = db.prepare(`
-      SELECT id, type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at
+      SELECT ${COLS}
       FROM broadcasts WHERE type = ?
       ORDER BY created_at DESC LIMIT ?
     `).all(opts.type, limit) as RawRow[];
   } else {
     rows = db.prepare(`
-      SELECT id, type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at
+      SELECT ${COLS}
       FROM broadcasts
       ORDER BY created_at DESC LIMIT ?
     `).all(limit) as RawRow[];
@@ -1099,6 +1111,15 @@ export function recallSharedChannel(
     reason:     r.reason,
     importance: r.importance,
     created_at: r.created_at,
+    // v0.15.0 §8.1 — parse JSON-encoded columns (NULL → undefined so downstream
+    // consumers can cleanly skip them).
+    acceptance_criteria:      r.acceptance_criteria      ? tryParseJsonArray(r.acceptance_criteria)      : undefined,
+    complexity_estimate:      r.complexity_estimate ?? undefined,
+    file_ownership_exclusive: r.file_ownership_exclusive ? tryParseJsonArray(r.file_ownership_exclusive) : undefined,
+    file_ownership_read_only: r.file_ownership_read_only ? tryParseJsonArray(r.file_ownership_read_only) : undefined,
+    task_dependencies:        r.task_dependencies        ? tryParseJsonArray(r.task_dependencies).map((x) => Number(x)).filter(Number.isFinite) : undefined,
+    required_skills:          r.required_skills          ? tryParseJsonArray(r.required_skills)          : undefined,
+    estimated_tokens:         r.estimated_tokens ?? undefined,
   }));
 }
 

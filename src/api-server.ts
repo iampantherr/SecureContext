@@ -338,6 +338,34 @@ export async function createApiServer(storeOverride?: Store) {
       if (typeof type    !== "string") throw new ApiError(400, "type is required");
       if (typeof agentId !== "string") throw new ApiError(400, "agentId is required");
 
+      // v0.17.0 §8.2 — file-ownership overlap guard on ASSIGN.
+      // Reject if the new exclusive set overlaps with ANY in-flight (unmerged)
+      // ASSIGN's exclusive set in the same project. "In-flight" = ASSIGN whose
+      // `task` value has no subsequent MERGE in the last 200 broadcasts.
+      const newExcl = Array.isArray(body["file_ownership_exclusive"])
+        ? (body["file_ownership_exclusive"] as string[]).filter((f) => typeof f === "string")
+        : [];
+      if (type === "ASSIGN" && newExcl.length > 0) {
+        const recent = await store.recallBroadcasts(pp, { limit: 200 });
+        const mergedTasks = new Set<string>();
+        for (const b of recent) if (b.type === "MERGE" && b.task) mergedTasks.add(b.task);
+        for (const b of recent) {
+          if (b.type !== "ASSIGN") continue;
+          if (b.task && mergedTasks.has(b.task)) continue;  // completed
+          const otherExcl = b.file_ownership_exclusive ?? [];
+          if (otherExcl.length === 0) continue;
+          const overlap = newExcl.filter((f) => otherExcl.includes(f));
+          if (overlap.length > 0) {
+            return reply.status(409).send({
+              error: "File-ownership conflict",
+              detail: `File(s) [${overlap.join(", ")}] are already claimed exclusive by in-flight ASSIGN #${b.id} (task=${b.task ?? "?"}, agent=${b.agent_id}). Wait for MERGE or retry with a disjoint file set.`,
+              conflicting_broadcast_id: b.id,
+              overlapping_files: overlap,
+            });
+          }
+        }
+      }
+
       const msg = await store.broadcast(pp, type as never, agentId, {
         task:          typeof body["task"]          === "string" ? body["task"]          : undefined,
         summary:       typeof body["summary"]       === "string" ? body["summary"]       : undefined,

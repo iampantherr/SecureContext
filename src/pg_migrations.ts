@@ -203,6 +203,43 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 5,
+    description: "v0.17.0 §8.2: task_queue_pg (work-stealing with FOR UPDATE SKIP LOCKED)",
+    up: async (client) => {
+      // Per HARNESS_EVOLUTION_PLAN.md §8.2 — work-stealing queue with
+      // Postgres SKIP LOCKED. Workers claim atomically without blocking
+      // each other on contention.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS task_queue_pg (
+          task_id        TEXT PRIMARY KEY,
+          project_hash   TEXT NOT NULL,
+          role           TEXT NOT NULL,
+          payload        JSONB NOT NULL,
+          state          TEXT NOT NULL CHECK(state IN ('queued','claimed','done','failed')),
+          claimed_by     TEXT,
+          claimed_at     TIMESTAMPTZ,
+          heartbeat_at   TIMESTAMPTZ,
+          retries        INTEGER NOT NULL DEFAULT 0,
+          ts             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          done_at        TIMESTAMPTZ,
+          failure_reason TEXT
+        )
+      `);
+      // Critical: index for the routing query (project + role + state + ts)
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_tq_route
+          ON task_queue_pg(project_hash, role, state, ts)
+      `);
+      // Heartbeat scan (find stale claims)
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_tq_heartbeat
+          ON task_queue_pg(state, heartbeat_at)
+          WHERE state = 'claimed'
+      `);
+    },
+  },
+
 ];
 
 /**
