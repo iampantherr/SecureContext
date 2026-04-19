@@ -602,6 +602,34 @@ export class PostgresStore implements Store {
     const dependsOn   = JSON.stringify((opts.depends_on ?? []).slice(0, 10).map(d => String(d).slice(0, 100)));
     const now         = new Date().toISOString();
 
+    // v0.16.0 §8.1 — structured ASSIGN field sanitization (NULLABLE in PG)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const o = opts as any;
+    const safeAccept    = Array.isArray(o.acceptance_criteria)
+      ? JSON.stringify(o.acceptance_criteria.slice(0, 20).map((s: unknown) => String(s).slice(0, 500)))
+      : null;
+    let safeComplexity: number | null = null;
+    if (typeof o.complexity_estimate === "number" && Number.isFinite(o.complexity_estimate)) {
+      const c = Math.round(o.complexity_estimate);
+      if (c >= 1 && c <= 5) safeComplexity = c;
+    }
+    const safeFileExcl = Array.isArray(o.file_ownership_exclusive)
+      ? JSON.stringify(o.file_ownership_exclusive.slice(0, 50).map((s: unknown) => String(s).slice(0, 500)))
+      : null;
+    const safeFileRO = Array.isArray(o.file_ownership_read_only)
+      ? JSON.stringify(o.file_ownership_read_only.slice(0, 50).map((s: unknown) => String(s).slice(0, 500)))
+      : null;
+    const safeTaskDeps = Array.isArray(o.task_dependencies)
+      ? JSON.stringify(o.task_dependencies.filter((d: unknown) => typeof d === "number" && Number.isInteger(d) && d > 0).slice(0, 50))
+      : null;
+    const safeReqSkills = Array.isArray(o.required_skills)
+      ? JSON.stringify(o.required_skills.slice(0, 20).map((s: unknown) => String(s).slice(0, 100)))
+      : null;
+    let safeEstTokens: number | null = null;
+    if (typeof o.estimated_tokens === "number" && Number.isFinite(o.estimated_tokens) && o.estimated_tokens >= 0) {
+      safeEstTokens = Math.floor(Math.min(o.estimated_tokens, 1_000_000_000));
+    }
+
     // RBAC enforcement — if sessions exist, verify token and role permissions
     if (opts.session_token) {
       const tokenPayload = await this.verifyToken(projectPath, opts.session_token);
@@ -657,11 +685,17 @@ export class PostgresStore implements Store {
         INSERT INTO broadcasts(
           project_hash, type, agent_id, task, summary, files, state,
           depends_on, reason, importance, created_at,
-          session_token_id, prev_hash, row_hash
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          session_token_id, prev_hash, row_hash,
+          acceptance_criteria, complexity_estimate,
+          file_ownership_exclusive, file_ownership_read_only,
+          task_dependencies, required_skills, estimated_tokens
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                  $15,$16,$17,$18,$19,$20,$21)
         RETURNING id
       `, [projectHash, type, safeAgent, safeTask, safeSummary, files, safeState,
-          dependsOn, safeReason, safeImp, now, tokenId, prevHash, rowHash]);
+          dependsOn, safeReason, safeImp, now, tokenId, prevHash, rowHash,
+          safeAccept, safeComplexity, safeFileExcl, safeFileRO,
+          safeTaskDeps, safeReqSkills, safeEstTokens]);
 
       await client.query("COMMIT");
 
@@ -671,6 +705,13 @@ export class PostgresStore implements Store {
         files: JSON.parse(files), state: safeState, summary: safeSummary,
         depends_on: JSON.parse(dependsOn), reason: safeReason,
         importance: safeImp, created_at: now,
+        acceptance_criteria:      safeAccept    ? JSON.parse(safeAccept)    : [],
+        complexity_estimate:      safeComplexity,
+        file_ownership_exclusive: safeFileExcl  ? JSON.parse(safeFileExcl)  : [],
+        file_ownership_read_only: safeFileRO    ? JSON.parse(safeFileRO)    : [],
+        task_dependencies:        safeTaskDeps  ? JSON.parse(safeTaskDeps)  : [],
+        required_skills:          safeReqSkills ? JSON.parse(safeReqSkills) : [],
+        estimated_tokens:         safeEstTokens,
       };
     } catch (err) {
       await client.query("ROLLBACK");
@@ -987,12 +1028,52 @@ CREATE TABLE IF NOT EXISTS broadcasts (
   session_token_id TEXT    NOT NULL DEFAULT '',
   prev_hash        TEXT    NOT NULL DEFAULT 'genesis',
   row_hash         TEXT    NOT NULL DEFAULT '',
-  acked_at         TEXT
+  acked_at         TEXT,
+  -- v0.15.0 §8.1 — structured ASSIGN columns (all NULLABLE, additive)
+  acceptance_criteria      TEXT,
+  complexity_estimate      INTEGER,
+  file_ownership_exclusive TEXT,
+  file_ownership_read_only TEXT,
+  task_dependencies        TEXT,
+  required_skills          TEXT,
+  estimated_tokens         INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_bc_project  ON broadcasts(project_hash, id);
-CREATE INDEX IF NOT EXISTS idx_bc_type     ON broadcasts(project_hash, type);
-CREATE INDEX IF NOT EXISTS idx_bc_agent    ON broadcasts(project_hash, agent_id);
-CREATE INDEX IF NOT EXISTS idx_bc_created  ON broadcasts(project_hash, created_at DESC);
+-- v0.16.0: ALTER existing tables to add structured ASSIGN columns
+-- (idempotent — IF NOT EXISTS doesn't exist for ADD COLUMN in older PG, so we
+--  use a DO/EXCEPTION block per column)
+DO $$
+BEGIN
+  ALTER TABLE broadcasts ADD COLUMN acceptance_criteria      TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$
+BEGIN
+  ALTER TABLE broadcasts ADD COLUMN complexity_estimate      INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$
+BEGIN
+  ALTER TABLE broadcasts ADD COLUMN file_ownership_exclusive TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$
+BEGIN
+  ALTER TABLE broadcasts ADD COLUMN file_ownership_read_only TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$
+BEGIN
+  ALTER TABLE broadcasts ADD COLUMN task_dependencies        TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$
+BEGIN
+  ALTER TABLE broadcasts ADD COLUMN required_skills          TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+DO $$
+BEGIN
+  ALTER TABLE broadcasts ADD COLUMN estimated_tokens         INTEGER;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+CREATE INDEX IF NOT EXISTS idx_bc_project    ON broadcasts(project_hash, id);
+CREATE INDEX IF NOT EXISTS idx_bc_type       ON broadcasts(project_hash, type);
+CREATE INDEX IF NOT EXISTS idx_bc_agent      ON broadcasts(project_hash, agent_id);
+CREATE INDEX IF NOT EXISTS idx_bc_created    ON broadcasts(project_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bc_complexity ON broadcasts(complexity_estimate, type);
 
 -- Agent sessions (RBAC)
 CREATE TABLE IF NOT EXISTS agent_sessions (

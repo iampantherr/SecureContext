@@ -491,6 +491,14 @@ export interface BroadcastMessage {
   reason:     string;
   importance: number;
   created_at: string;
+  // v0.15.0/v0.16.0 §8.1 — structured ASSIGN fields (NULLABLE for non-ASSIGN broadcasts)
+  acceptance_criteria?:      string[];
+  complexity_estimate?:      number | null;
+  file_ownership_exclusive?: string[];
+  file_ownership_read_only?: string[];
+  task_dependencies?:        number[];
+  required_skills?:          string[];
+  estimated_tokens?:         number | null;
 }
 
 export interface BroadcastResult {

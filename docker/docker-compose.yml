@@ -67,6 +67,13 @@ services:
       ZC_OLLAMA_URL: http://sc-ollama:11434/api/embeddings
       ZC_OLLAMA_MODEL: ${OLLAMA_MODEL:-nomic-embed-text}
       NODE_ENV:     production
+      # v0.16.0 — telemetry/outcomes backend selection
+      ZC_TELEMETRY_BACKEND:   ${ZC_TELEMETRY_BACKEND:-postgres}
+      ZC_POSTGRES_HOST:       sc-postgres
+      ZC_POSTGRES_PORT:       "5432"
+      ZC_POSTGRES_USER:       ${POSTGRES_USER:-scuser}
+      ZC_POSTGRES_PASSWORD:   ${POSTGRES_PASSWORD}
+      ZC_POSTGRES_DB:         ${POSTGRES_DB:-securecontext}
     ports:
       - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
     depends_on:
