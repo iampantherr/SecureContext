@@ -348,7 +348,19 @@ export async function createApiServer(storeOverride?: Store) {
         session_token: typeof body["session_token"] === "string" ? body["session_token"]: undefined,
         files:         Array.isArray(body["files"])      ? body["files"]      as string[] : undefined,
         depends_on:    Array.isArray(body["depends_on"]) ? body["depends_on"] as string[] : undefined,
-      });
+        // v0.16.0 §8.1 — structured ASSIGN forwarding (closes v0.15.0 known limitation
+        // where HTTP API silently dropped these fields).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...({
+          acceptance_criteria:      Array.isArray(body["acceptance_criteria"])      ? body["acceptance_criteria"]      as string[] : undefined,
+          complexity_estimate:      typeof body["complexity_estimate"]      === "number" ? body["complexity_estimate"]    : undefined,
+          file_ownership_exclusive: Array.isArray(body["file_ownership_exclusive"]) ? body["file_ownership_exclusive"] as string[] : undefined,
+          file_ownership_read_only: Array.isArray(body["file_ownership_read_only"]) ? body["file_ownership_read_only"] as string[] : undefined,
+          task_dependencies:        Array.isArray(body["task_dependencies"])        ? body["task_dependencies"]        as number[] : undefined,
+          required_skills:          Array.isArray(body["required_skills"])          ? body["required_skills"]          as string[] : undefined,
+          estimated_tokens:         typeof body["estimated_tokens"]         === "number" ? body["estimated_tokens"]       : undefined,
+        } as Record<string, unknown>),
+      } as never);
       return { ok: true, message: msg };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });

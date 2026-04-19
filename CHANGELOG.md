@@ -4,6 +4,96 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.16.0] — 2026-04-19 — Sprint 3 Phase 2: Postgres Backend + T3.1/T3.2 (RLS) + API ASSIGN forwarding
+
+Sprint 3 Phase 2 — the Postgres backend that's been deferred since v0.12.x lands here, along with both remaining Tier 3 fixes (T3.1 per-query `SET LOCAL ROLE` and T3.2 Row-Level-Security policies). Closes the v0.15.0 known limitation where structured ASSIGN fields were silently dropped by the HTTP API.
+
+### Added — Postgres backend for telemetry/outcomes
+
+- **`src/pg_pool.ts`** — process-singleton `pg.Pool` with retry-friendly defaults (60s idle timeout, 30s statement timeout). Lazy initialization; returns null when no creds configured (graceful degrade for SQLite-only deployments). `withTransaction()` + `withClient()` helpers.
+- **`src/pg_migrations.ts`** — 4 migrations creating `tool_calls_pg`, `outcomes_pg`, `learnings_pg` (mirroring SQLite schema with `BIGSERIAL` ids + `JSONB` evidence + `TIMESTAMPTZ`). Idempotent; safe to call on every server start.
+- **`src/security/chained_table_postgres.ts`** — `ChainedTablePostgres` implementing the same `ChainedTable` interface as SQLite. Uses `BEGIN; SELECT row_hash FROM ... ORDER BY id DESC LIMIT 1 FOR UPDATE; INSERT ...; COMMIT` pattern — Postgres analog of SQLite's `BEGIN IMMEDIATE`. Same chain content (HKDF-keyed HMAC) as SQLite — rows are byte-identical across backends.
+
+### Added — `ZC_TELEMETRY_BACKEND` env switch (server-side)
+
+Previously hinted at; now wired in. Per-process choice of where telemetry rows land:
+
+| Value | Behavior |
+|---|---|
+| `sqlite` (default) | Writes to project SQLite (current v0.15.0 behavior) |
+| `postgres` | Writes to Postgres `tool_calls_pg` / `outcomes_pg` / `learnings_pg` |
+| `dual` | Writes to BOTH (parity-verification mode for migration) |
+
+Wired into `recordToolCall` + `recordOutcome` via the `_recordToolCallLocal` / `_recordOutcomeLocal` mode-switch paths added in v0.12.1.
+
+### Added — Tier 3 fix T3.1: per-query `SET LOCAL ROLE` (Chin & Older 2011 Ch11)
+
+Each agent now writes its telemetry under a **per-agent Postgres role** instead of the pool's broad role:
+
+1. On first tool call from a new `agent_id`, lazily provisioned via `CREATE ROLE "zc_agent_<sanitized>" NOLOGIN NOINHERIT` (idempotent via DO/EXCEPTION).
+2. Granted minimum privileges: `INSERT, SELECT, UPDATE` on telemetry tables (`UPDATE` required for `SELECT FOR UPDATE` row locking), `INSERT` on learnings, `USAGE ON SCHEMA public`, `USAGE` on BIGSERIAL sequences.
+3. Pool's owning role granted `MEMBER OF` the per-agent role, so `SET ROLE` works.
+4. Each chained INSERT runs inside `BEGIN; SET LOCAL ROLE <agent>; INSERT ...; COMMIT;` — `SET LOCAL` is auto-reset on COMMIT/ROLLBACK so the next pooled checkout starts clean.
+
+**Result:** Postgres's `current_user` reflects the actual writing agent, not the pool's user. Bears directly on T3.2 below.
+
+### Added — Tier 3 fix T3.2: Row-Level Security policies on `outcomes_pg`
+
+Migration 4 enables `ALTER TABLE outcomes_pg ENABLE ROW LEVEL SECURITY` and adds 4 policies (covering Bell-LaPadula confidentiality tiers per Chin & Older 2011 Ch5+Ch13):
+
+| Policy | Permits |
+|---|---|
+| `outcomes_read_public_internal` | SELECT where `classification IN ('public','internal')` for any role |
+| `outcomes_read_confidential` | SELECT where `classification = 'confidential'` for any agent role (registered = non-empty `current_user`) |
+| `outcomes_read_restricted` | SELECT where `classification = 'restricted' AND created_by_agent_id = current_setting('zc.current_agent', true)` — only the originating agent |
+| `outcomes_write_any` | INSERT for any role with table-level INSERT (gated by Tier 1 GRANTs) |
+
+`set_config('zc.current_agent', $agentId, true)` is set per-write-transaction so the RLS predicate evaluates against the correct agent identity.
+
+**RT-S3-05 verifies live:** alice writes a `'restricted'` outcome; bob (with valid `zc_agent_bob` role + correct `current_user`) cannot SELECT it; alice can SELECT her own. **This is enforced inside Postgres, not in application code** — same as Postgres protecting financial transaction tables. Even a compromised agent process with valid credentials cannot read other agents' restricted outcomes.
+
+### Added — HTTP API forwards structured ASSIGN columns
+
+`POST /api/v1/broadcast` now accepts and forwards the 7 structured ASSIGN fields added in v0.15.0:
+
+- `acceptance_criteria`, `complexity_estimate`, `file_ownership_exclusive`, `file_ownership_read_only`, `task_dependencies`, `required_skills`, `estimated_tokens`
+
+**Closes the v0.15.0 known limitation** where these fields were silently dropped in HTTP/Docker API mode.
+
+### Test summary
+
+- **575/575 tests pass** (565 baseline + **10 new Postgres-backend tests**)
+- All 10 Postgres tests run **against the real local Docker container** (`securecontext-postgres`) — they're skipped automatically when no PG is reachable so CI stays portable
+- **RT-S3-05 verified live**: cross-agent read of `'restricted'` row blocked by Postgres RLS even when both agents share the pool's DB credentials
+- **RT-S3-06 verified live**: chain hashes are byte-identical across SQLite + Postgres backends — rows can be migrated between backends without rehashing
+
+### Bugs found + fixed during integration
+
+1. `provisionAgentRole` originally ran GRANTs inside the writer transaction → Postgres permission cache didn't see them at SET LOCAL ROLE time. Fixed by running provisioning on its own connection (separate transaction, auto-committed).
+2. `SELECT FOR UPDATE` on `tool_calls_pg` requires `UPDATE` privilege (not just SELECT) on most PG versions — added explicit `GRANT UPDATE`.
+3. `GRANT USAGE ON SCHEMA public` was missing — required even for tables with table-level grants when the role doesn't inherit defaults.
+
+### Known limitations
+
+- **Existing `securecontext-api` Docker container is on v0.8.0** and doesn't yet have the v0.16.0 endpoints/columns. To use HTTP API mode against the bundled stack: rebuild + redeploy the container with the v0.16.0 code (`docker compose build sc-api && docker compose up -d sc-api`).
+- **Live multi-agent test through `start-agents.ps1` with `ZC_TELEMETRY_BACKEND=postgres`** requires the Docker image rebuild above. Functionally validated via 10 unit tests against real Postgres + cross-agent forgery RLS test (RT-S3-05) — the remaining "real agent in a real terminal" verification is a Docker-rebuild step away.
+- v0.17.0 (next) lands §8.2-8.5 work-stealing queue + worker pool spawning + file-ownership enforcement + complexity-based model routing — uses the Postgres backend shipped here.
+
+### Upgrade notes
+
+**Backward-compatible by default.** Deployments that don't set `ZC_TELEMETRY_BACKEND` continue to use SQLite exactly as in v0.15.0.
+
+**To enable Postgres backend:**
+
+1. Set `ZC_POSTGRES_PASSWORD` (or full `ZC_POSTGRES_URL`) — without these, the pool refuses to initialize and falls back to SQLite
+2. Set `ZC_TELEMETRY_BACKEND=postgres` (or `=dual` for parity verification during migration)
+3. The shared Postgres role needs `CREATEROLE` privilege so it can provision per-agent roles. The bundled `scuser` already has this. For custom Postgres setups: `ALTER ROLE <pool_user> WITH CREATEROLE;`
+4. Rebuild + redeploy the Docker `securecontext-api` container to pick up the new endpoints
+
+**For agents with sensitive user-prompt outcomes:** classification `'restricted'` rows now have **defense-in-depth via Postgres RLS** (in addition to the v0.15.0 SQLite application-level filter). Even if an attacker gains DB credentials, restricted rows remain author-only.
+
+---
+
 ## [0.15.0] — 2026-04-18 — Sprint 3 Phase 1: Structured ASSIGN + MAC Classification (Tier 3 Part)
 
 First slice of Sprint 3 — the foundation pieces that don't require Postgres backend. Adds structured task fields to `ASSIGN` broadcasts (so dispatcher can route by complexity / enforce file ownership / resolve dependencies) and adds Mandatory Access Control labels to outcomes (closes Tier 3 fix T3.2 from §8.6 — at the SQLite layer; Postgres RLS lands in v0.16.0).

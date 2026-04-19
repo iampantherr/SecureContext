@@ -130,7 +130,117 @@ async function _recordOutcomeViaApiPath(input: RecordOutcomeInput): Promise<Outc
   return r;
 }
 
+/**
+ * Local-mode dispatch — chooses storage backend based on ZC_TELEMETRY_BACKEND.
+ * Default 'sqlite'. 'postgres' routes through ChainedTablePostgres + RLS.
+ * 'dual' writes to both for migration verification.
+ */
 async function _recordOutcomeLocal(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
+  const backend = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
+  if (backend === "postgres" || backend === "dual") {
+    const pgResult = await _recordOutcomePostgres(input);
+    if (backend === "postgres") return pgResult;
+    // dual: also write to sqlite below
+  }
+  return _recordOutcomeSqlite(input);
+}
+
+/**
+ * v0.16.0 Postgres backend for outcomes.
+ * RLS policies on outcomes_pg gate cross-agent reads on 'restricted' rows
+ * (T3.2). Per-query SET LOCAL ROLE applies T3.1.
+ */
+async function _recordOutcomePostgres(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
+  try {
+    const { ChainedTablePostgres } = await import("./security/chained_table_postgres.js");
+    const { runPgMigrations } = await import("./pg_migrations.js");
+    await runPgMigrations();
+
+    const outcomeId  = `out-${randomUUID().slice(0, 12)}`;
+    const resolvedAt = new Date().toISOString();
+    const confidence = input.confidence ?? 1.0;
+    const evidenceJson = input.evidence ? JSON.stringify(input.evidence, sortedReplacer) : null;
+
+    // Same classification + creator-binding logic as the SQLite path
+    const allowed: OutcomeClassification[] = ["public", "internal", "confidential", "restricted"];
+    let safeClassification: OutcomeClassification = "internal";
+    if (input.classification && allowed.includes(input.classification)) {
+      safeClassification = input.classification;
+    }
+    let safeCreatedBy: string | null = null;
+    if (typeof input.createdByAgentId === "string" && input.createdByAgentId.length > 0) {
+      safeCreatedBy = input.createdByAgentId.slice(0, 200);
+    }
+    if (safeClassification === "restricted" && !safeCreatedBy) {
+      logger.warn("outcomes", "restricted_without_creator_downgraded_pg", {
+        ref_id: input.refId, kind: input.outcomeKind,
+      });
+      safeClassification = "confidential";
+    }
+
+    const writerAgentId = safeCreatedBy ?? "outcomes-resolver";
+
+    const canonicalFields = buildCanonicalFields({
+      outcomeId,
+      refType: input.refType,
+      refId: input.refId,
+      outcomeKind: input.outcomeKind,
+      signalSource: input.signalSource,
+      confidence,
+      scoreDelta: input.scoreDelta ?? null,
+      evidence: evidenceJson,
+      resolvedAt,
+    });
+
+    const chain = new ChainedTablePostgres({ tableName: "outcomes_pg" });
+
+    const result = await chain.appendChainedWith(
+      { agentId: writerAgentId, projectHash: sha256ProjectHash(input.projectPath), canonicalFields },
+      async ({ prevHash, rowHash, client }) => {
+        const r = await client.query(`
+          INSERT INTO outcomes_pg (
+            outcome_id, ref_type, ref_id, outcome_kind,
+            signal_source, confidence, score_delta, evidence, resolved_at,
+            prev_hash, row_hash, classification, created_by_agent_id
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13)
+          RETURNING id
+        `, [
+          outcomeId, input.refType, input.refId, input.outcomeKind,
+          input.signalSource, confidence, input.scoreDelta ?? null,
+          evidenceJson, resolvedAt, prevHash, rowHash,
+          safeClassification, safeCreatedBy,
+        ]);
+        return { id: r.rows[0]?.id ?? 0 };
+      }
+    );
+
+    logger.info("outcomes", "outcome_recorded_pg", {
+      outcome_id: outcomeId, kind: input.outcomeKind, classification: safeClassification, id: result.id,
+    });
+
+    return {
+      id:                  result.id,
+      outcome_id:          outcomeId,
+      ref_type:            input.refType,
+      ref_id:              input.refId,
+      outcome_kind:        input.outcomeKind,
+      signal_source:       input.signalSource,
+      confidence,
+      score_delta:         input.scoreDelta ?? null,
+      evidence:            evidenceJson,
+      resolved_at:         resolvedAt,
+      prev_hash:           result.prevHash,
+      row_hash:            result.rowHash,
+    } as unknown as OutcomeRecord;
+  } catch (e) {
+    logger.error("outcomes", "outcome_pg_failed", {
+      ref_id: input.refId, kind: input.outcomeKind, error: (e as Error).message,
+    });
+    return null;
+  }
+}
+
+async function _recordOutcomeSqlite(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
   try {
     const db = openProjectDb(input.projectPath);
     try {

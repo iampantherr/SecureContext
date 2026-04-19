@@ -174,7 +174,141 @@ async function _recordToolCallViaApiPath(input: ToolCallInput): Promise<ToolCall
   return r;
 }
 
+/**
+ * Local-mode dispatch — chooses the storage backend (SQLite vs Postgres)
+ * based on `ZC_TELEMETRY_BACKEND` env var. Default 'sqlite' preserves
+ * v0.15.0 behavior. 'postgres' routes through ChainedTablePostgres.
+ * 'dual' writes to BOTH (migration mode for verifying parity).
+ */
 async function _recordToolCallLocal(input: ToolCallInput): Promise<ToolCallRecord | null> {
+  const backend = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
+  if (backend === "postgres" || backend === "dual") {
+    const pgResult = await _recordToolCallPostgres(input);
+    if (backend === "postgres") return pgResult;
+    // dual mode: also do SQLite below for parity verification
+  }
+  return _recordToolCallSqlite(input);
+}
+
+/**
+ * v0.16.0 Postgres backend for tool_calls.
+ * Same chain content (HKDF-keyed HMAC) as SQLite — rows are interchangeable.
+ * Uses FOR UPDATE atomic INSERT pattern (see ChainedTablePostgres).
+ *
+ * Returns null on Postgres-unavailable / write-error so the caller can
+ * fall back to SQLite if needed (in dual mode the SQLite write still happens).
+ */
+async function _recordToolCallPostgres(input: ToolCallInput): Promise<ToolCallRecord | null> {
+  const trace = input.traceId ?? newTraceId("call");
+  try {
+    const projectHash = sha256ProjectHash(input.projectPath);
+    const inputTokens  = input.inputTokens  ?? Math.ceil((input.inputChars  ?? 0) / 4);
+    const outputTokens = input.outputTokens ?? Math.ceil((input.outputChars ?? 0) / 4);
+    const cachedTokens = input.cachedTokens ?? 0;
+    const cost = computeCost(input.model, inputTokens, outputTokens, {
+      batch: input.batch,
+      cached_input_tokens: cachedTokens,
+    });
+
+    // Lazy imports — keep SQLite-only deployments from paying the pg cost
+    const { ChainedTablePostgres } = await import("./security/chained_table_postgres.js");
+    const { runPgMigrations } = await import("./pg_migrations.js");
+    // Run migrations idempotently on every call (cheap after first run)
+    await runPgMigrations();
+
+    const ts = new Date().toISOString();
+    const canonicalFields = buildCanonicalFields({
+      callId: input.callId,
+      sessionId: input.sessionId,
+      agentId: input.agentId,
+      projectHash,
+      toolName: input.toolName,
+      model: input.model,
+      inputTokens,
+      outputTokens,
+      cost: cost.cost_usd,
+      latencyMs: input.latencyMs,
+      status: input.status,
+      ts,
+    });
+
+    const chain = new ChainedTablePostgres({
+      tableName:   "tool_calls_pg",
+      scopeWhere:  "project_hash = $1",
+      scopeParams: [projectHash],
+    });
+
+    const result = await chain.appendChainedWith(
+      { agentId: input.agentId, projectHash, canonicalFields },
+      async ({ prevHash, rowHash, client }) => {
+        const r = await client.query(`
+          INSERT INTO tool_calls_pg (
+            call_id, session_id, agent_id, project_hash,
+            task_id, skill_id,
+            tool_name, model,
+            input_tokens, output_tokens, cached_tokens,
+            cost_usd, cost_known,
+            latency_ms, status, error_class,
+            ts, prev_hash, row_hash, trace_id
+          ) VALUES (
+            $1, $2, $3, $4,
+            $5, $6,
+            $7, $8,
+            $9, $10, $11,
+            $12, $13,
+            $14, $15, $16,
+            $17, $18, $19, $20
+          ) RETURNING id
+        `, [
+          input.callId, input.sessionId, input.agentId, projectHash,
+          input.taskId ?? null, input.skillId ?? null,
+          input.toolName, input.model,
+          inputTokens, outputTokens, cachedTokens,
+          cost.cost_usd, cost.known ? 1 : 0,
+          input.latencyMs, input.status, input.errorClass ?? null,
+          ts, prevHash, rowHash, trace,
+        ]);
+        return { id: r.rows[0]?.id ?? 0 };
+      }
+    );
+
+    logger.debug("telemetry", "tool_call_recorded_pg", {
+      call_id: input.callId, tool_name: input.toolName, id: result.id,
+    }, trace);
+
+    // Synthesize a ToolCallRecord shape from inputs + chain result.
+    return {
+      id:            result.id,
+      call_id:       input.callId,
+      session_id:    input.sessionId,
+      agent_id:      input.agentId,
+      project_hash:  projectHash,
+      task_id:       input.taskId ?? null,
+      skill_id:      input.skillId ?? null,
+      tool_name:     input.toolName,
+      model:         input.model,
+      input_tokens:  inputTokens,
+      output_tokens: outputTokens,
+      cached_tokens: cachedTokens,
+      cost_usd:      cost.cost_usd,
+      cost_known:    cost.known ? 1 : 0,
+      latency_ms:    input.latencyMs,
+      status:        input.status,
+      error_class:   input.errorClass ?? null,
+      ts,
+      prev_hash:     result.prevHash,
+      row_hash:      result.rowHash,
+      trace_id:      trace,
+    };
+  } catch (e) {
+    logger.error("telemetry", "tool_call_pg_failed", {
+      call_id: input.callId, error: (e as Error).message,
+    }, trace);
+    return null;
+  }
+}
+
+async function _recordToolCallSqlite(input: ToolCallInput): Promise<ToolCallRecord | null> {
   const trace = input.traceId ?? newTraceId("call");
   try {
     const projectHash = sha256ProjectHash(input.projectPath);
