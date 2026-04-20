@@ -360,7 +360,7 @@ export async function resolveGitCommitOutcome(input: {
 
   // Find the most recent tool_call in this session — it's likely the action
   // that triggered the commit (Edit/Write/Bash that ended in `git commit`)
-  const recentCall = getMostRecentToolCallForSession(input.projectPath, input.sessionId);
+  const recentCall = await getMostRecentToolCallForSession(input.projectPath, input.sessionId);
   if (!recentCall) {
     logger.warn("outcomes", "git_commit_no_recent_call", {
       session_id: input.sessionId,
@@ -405,7 +405,7 @@ export async function resolveUserPromptOutcome(input: {
   const sentiment = classifySentiment(input.userMessage);
   if (sentiment === "neutral") return null;
 
-  const recentCall = getMostRecentToolCallForSession(input.projectPath, input.sessionId);
+  const recentCall = await getMostRecentToolCallForSession(input.projectPath, input.sessionId);
   if (!recentCall) return null;
 
   // v0.15.0 §8.6 T3.2 — sentiment about a user message is sensitive to the
@@ -609,10 +609,53 @@ function openProjectDb(projectPath: string): DatabaseSync {
   return db;
 }
 
-function getMostRecentToolCallForSession(
+/**
+ * v0.17.0 fix: backend-aware session lookup.
+ *
+ * Before: SQLite-only. When ZC_TELEMETRY_BACKEND=postgres was set, session
+ * tool_calls lived in tool_calls_pg and this function silently returned null,
+ * causing resolveGitCommitOutcome + resolveFollowUpOutcomes to no-op — no
+ * outcomes were recorded even though commits / file-summary-then-read
+ * patterns actually occurred.
+ *
+ * Now routes to Postgres when backend is postgres|dual, with SQLite fallback
+ * for dual mode (so either store can satisfy the lookup).
+ */
+async function getMostRecentToolCallForSession(
   projectPath: string,
   sessionId:   string,
-): { call_id: string; tool_name: string; ts: string; agent_id: string } | null {
+): Promise<{ call_id: string; tool_name: string; ts: string; agent_id: string } | null> {
+  const backend = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
+
+  if (backend === "postgres" || backend === "dual") {
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const pgRow = await withClient(async (c) => {
+        const r = await c.query<{ call_id: string; tool_name: string; ts: Date; agent_id: string }>(
+          `SELECT call_id, tool_name, ts, agent_id FROM tool_calls_pg
+           WHERE session_id = $1
+           ORDER BY id DESC LIMIT 1`,
+          [sessionId],
+        );
+        return r.rows[0] ?? null;
+      });
+      if (pgRow) {
+        return {
+          call_id:   pgRow.call_id,
+          tool_name: pgRow.tool_name,
+          ts:        pgRow.ts instanceof Date ? pgRow.ts.toISOString() : String(pgRow.ts),
+          agent_id:  pgRow.agent_id,
+        };
+      }
+      if (backend === "postgres") return null;  // PG-only: nowhere else to look
+      // fall through to SQLite for dual mode
+    } catch {
+      if (backend === "postgres") return null;  // PG unavailable: can't lookup
+      // dual mode: fall through
+    }
+  }
+
+  // SQLite path (default backend OR dual-mode fallback)
   const db = openProjectDb(projectPath);
   try {
     const row = db.prepare(`
