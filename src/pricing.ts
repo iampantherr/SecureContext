@@ -333,6 +333,35 @@ export function computeCost(
 }
 
 /**
+ * v0.17.1 Tier 2 — DB-assembly "infrastructure" tools that don't meaningfully
+ * consume compute. Their responses are deterministic from DB state — no LLM,
+ * no external service, no Ollama — so the *work* done by the tool itself is
+ * negligible. The LLM's next-turn ingest cost is still real (Anthropic bills
+ * it), but that's already attributed to the agent's NEXT turn's API request,
+ * not to this tool-call. Showing these as $0 in cost_usd prevents infra-tool
+ * noise from polluting the Opus orchestrator's "do it myself vs delegate"
+ * decisions.
+ *
+ * Telemetry still records accurate input_tokens + output_tokens so audits
+ * can recompute the full Tier 1 cost with computeToolCallCost.
+ *
+ * Operator override: set ZC_DISABLE_INFRA_ZERO_COST=1 to bill these at the
+ * full Tier 1 rate (useful when you need end-to-end cost reconciliation
+ * against Anthropic's invoices).
+ */
+export const INFRA_TOOLS = new Set<string>([
+  "zc_recall_context",
+  "zc_file_summary",
+  "zc_project_card",
+  "zc_status",
+]);
+
+export function isInfraTool(toolName: string): boolean {
+  if (process.env.ZC_DISABLE_INFRA_ZERO_COST === "1") return false;
+  return INFRA_TOOLS.has(toolName);
+}
+
+/**
  * v0.17.1 — correct cost accounting for MCP tool calls.
  *
  * An MCP tool call has TWO billable components from the LLM's perspective,

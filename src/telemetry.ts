@@ -54,7 +54,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync, existsSync } from "node:fs";
 import { logger, newTraceId } from "./logger.js";
-import { computeCost, computeToolCallCost, type CostCalculation } from "./pricing.js";
+import { computeCost, computeToolCallCost, isInfraTool, type CostCalculation } from "./pricing.js";
 import { redactSecrets, scanForSecrets } from "./security/secret_scanner.js";
 import { auditLog } from "./security/audit_log.js";
 import { canonicalize, type ChainableRow } from "./security/hmac_chain.js";
@@ -210,10 +210,17 @@ async function _recordToolCallPostgres(input: ToolCallInput): Promise<ToolCallRe
     //   tool-response  at input rate (LLM ingests them on next turn)
     // Naive computeCost treated tool response as LLM output → over-reported
     // by ~5× on Opus. See src/pricing.ts for the full rationale.
-    const cost = computeToolCallCost(input.model, inputTokens, outputTokens, {
+    let cost = computeToolCallCost(input.model, inputTokens, outputTokens, {
       batch: input.batch,
       cached_input_tokens: cachedTokens,
     });
+    // v0.17.1 Tier 2 — infrastructure tools (zc_recall_context, zc_file_summary,
+    // zc_project_card, zc_status) show $0 so infra-tool noise doesn't pollute
+    // the orchestrator's delegate-vs-DIY cost comparison. Token counts stay
+    // accurate so audits can recompute if needed.
+    if (isInfraTool(input.toolName)) {
+      cost = { ...cost, cost_usd: 0 };
+    }
 
     // Lazy imports — keep SQLite-only deployments from paying the pg cost
     const { ChainedTablePostgres } = await import("./security/chained_table_postgres.js");
@@ -324,10 +331,13 @@ async function _recordToolCallSqlite(input: ToolCallInput): Promise<ToolCallReco
     const cachedTokens = input.cachedTokens ?? 0;
 
     // v0.17.1 — see _recordToolCallPostgres for the tool-call cost rationale.
-    const cost = computeToolCallCost(input.model, inputTokens, outputTokens, {
+    let cost = computeToolCallCost(input.model, inputTokens, outputTokens, {
       batch: input.batch,
       cached_input_tokens: cachedTokens,
     });
+    if (isInfraTool(input.toolName)) {
+      cost = { ...cost, cost_usd: 0 };
+    }
 
     const db = openProjectDb(input.projectPath);
     try {

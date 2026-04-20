@@ -103,15 +103,32 @@ describe("telemetry", () => {
     expect(r).not.toBeNull();
     expect(r!.call_id).toBe(callId);
     expect(r!.tool_name).toBe("zc_status");
-    expect(r!.cost_usd).toBeGreaterThan(0);
-    // v0.17.1 pricing fix: tool-call rows now use computeToolCallCost which
-    // bills from the LLM's perspective:
-    //   tool call args (inputTokens=1000) → billed at OUTPUT rate (LLM emitted them)
-    //   tool response  (outputTokens=500) → billed at INPUT rate (LLM ingests them)
-    // Sonnet output $15/Mtok × 1000 + input $3/Mtok × 500 = $0.015 + $0.0015 = $0.0165
-    expect(r!.cost_usd).toBeCloseTo(0.0165, 4);
+    // v0.17.1 Tier 2: zc_status is an INFRA_TOOL — cost_usd is zeroed so
+    // the Opus orchestrator's delegate-vs-DIY decision isn't polluted by
+    // infra-tool noise. Token counts still accurate for audit.
+    expect(r!.cost_usd).toBe(0);
+    expect(r!.input_tokens).toBe(1000);
+    expect(r!.output_tokens).toBe(500);
     expect(r!.latency_ms).toBe(47);
     expect(r!.status).toBe("ok");
+  });
+
+  it("non-infra tools still bill at computed cost", async () => {
+    const r = await recordToolCall({
+      callId: newCallId(),
+      sessionId: "sess-1",
+      agentId: "agent-x",
+      projectPath: testProject,
+      toolName: "zc_fetch", // NOT an infra tool (external HTTP + Ollama)
+      model: "claude-sonnet-4-6",
+      inputTokens: 1000,
+      outputTokens: 500,
+      latencyMs: 47,
+      status: "ok",
+    });
+    // v0.17.1: 1000 × $15/Mtok (Sonnet output) + 500 × $3/Mtok (Sonnet input)
+    // = 0.015 + 0.0015 = 0.0165
+    expect(r!.cost_usd).toBeCloseTo(0.0165, 4);
   });
 
   it("recordToolCall stores cost_known=0 for unknown model", async () => {
