@@ -699,6 +699,43 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Task-queue stats (v0.17.1) — used by the dispatcher to wake idle workers
+  // when queued tasks exist for their role. Returns counts by role and state.
+  // Only meaningful in Postgres backend mode (task_queue_pg).
+  // ──────────────────────────────────────────────────────────────────────────
+  app.get("/api/v1/queue/stats-by-role", async (request, reply) => {
+    try {
+      const { projectPath } = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      const { createHash } = await import("node:crypto");
+      const { realpathSync } = await import("node:fs");
+      let normalized = pp;
+      try { normalized = realpathSync(pp); } catch { /* use raw */ }
+      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      const { withClient } = await import("./pg_pool.js");
+      const rows = await withClient(async (c) => {
+        const r = await c.query<{ role: string; state: string; n: string }>(
+          "SELECT role, state, COUNT(*)::int::text AS n FROM task_queue_pg WHERE project_hash = $1 GROUP BY role, state",
+          [projectHash],
+        );
+        return r.rows;
+      });
+      // Shape as { role: { queued, claimed, done, failed } }
+      const byRole: Record<string, { queued: number; claimed: number; done: number; failed: number }> = {};
+      for (const row of rows) {
+        if (!byRole[row.role]) byRole[row.role] = { queued: 0, claimed: 0, done: 0, failed: 0 };
+        const slot = byRole[row.role] as Record<string, number>;
+        slot[row.state] = Number(row.n);
+      }
+      return { ok: true, projectHash, byRole };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      // PG unavailable or SQLite-only deploy — return empty shape (not 500)
+      return { ok: true, byRole: {} };
+    }
+  });
+
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   const shutdown = async () => {
     await app.close();

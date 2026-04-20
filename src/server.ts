@@ -323,11 +323,15 @@ const TOOLS: Tool[] = [
     description:
       "Recall working memory and recent session events. " +
       "Call this at the start of every session to restore project context. " +
-      "Returns structured sections: Working Memory · Session Events · System Status.",
+      "Returns structured sections: Working Memory · Session Events · System Status. " +
+      "v0.17.1: repeat calls within 60s by the same agent/project return a cached response " +
+      "(unchanged if no new memory / broadcasts / events have landed), saving ~$0.06 per cached call. " +
+      "Pass force:true to bypass the cache.",
     inputSchema: {
       type: "object",
       properties: {
         agent_id: { type: "string", description: "Agent namespace (default: 'default')" },
+        force:    { type: "boolean", description: "Skip the recall cache and force a fresh pull (default: false)" },
       },
       required: [],
     },
@@ -1136,13 +1140,10 @@ async function dispatchToolCall(
       }
 
       case "zc_recall_context": {
-        const { agent_id } = args as { agent_id?: string };
-        const wm         = recallWorkingMemory(PROJECT_PATH, agent_id);
-        const events     = getRecentEvents(PROJECT_PATH, 20);
-        const broadcasts = recallSharedChannel(PROJECT_PATH, { limit: 30 });
+        const { agent_id, force } = args as { agent_id?: string; force?: boolean };
 
-        // Force-recompute complexity on every session start so the working memory
-        // limit immediately reflects any new agents, KB growth, or broadcast history.
+        // v0.17.1 — open DB once, use it for BOTH the cache freshness check AND
+        // the full recompute path below. This avoids opening the SQLite file twice.
         const { DatabaseSync: RcDs } = await import("node:sqlite");
         const { mkdirSync: rcMkd }   = await import("node:fs");
         const { join: rcJoin }       = await import("node:path");
@@ -1152,8 +1153,28 @@ async function dispatchToolCall(
         const rcDb     = new RcDs(rcDbFile);
         rcDb.exec("PRAGMA journal_mode = WAL");
         rcDb.exec("PRAGMA busy_timeout = 5000");
+
+        // v0.17.1 — fast-path: if we have a fresh cached response for this
+        // (project, agent) and nothing has changed in working_memory /
+        // broadcasts / session_events, return the cached text with a small
+        // "(cached Ns ago)" prefix. Skips ~800 output tokens on Opus (~$0.06).
+        // Bypass via force=true.
+        if (!force) {
+          const { tryGetCachedRecall, decorateCachedResponse } = await import("./recall_cache.js");
+          const cached = tryGetCachedRecall(PROJECT_PATH, agent_id, rcDb);
+          if (cached.hit && cached.response !== undefined && cached.ageMs !== undefined) {
+            rcDb.close();
+            return { content: [{ type: "text", text: decorateCachedResponse(cached.response, cached.ageMs) }] };
+          }
+        }
+
+        const wm         = recallWorkingMemory(PROJECT_PATH, agent_id);
+        const events     = getRecentEvents(PROJECT_PATH, 20);
+        const broadcasts = recallSharedChannel(PROJECT_PATH, { limit: 30 });
+
+        // Force-recompute complexity on every session start so the working memory
+        // limit immediately reflects any new agents, KB growth, or broadcast history.
         const complexity = computeProjectComplexity(rcDb);
-        rcDb.close();
 
         const parts: string[] = [];
 
@@ -1205,7 +1226,16 @@ async function dispatchToolCall(
           parts.push(`  Integrity: OK`);
         }
 
-        return { content: [{ type: "text", text: parts.join("\n") }] };
+        // v0.17.1 — cache the full response for future calls within 60s.
+        // Done BEFORE rcDb.close() so the change-detection max-id queries
+        // can piggyback on the already-open connection.
+        const _recallText = parts.join("\n");
+        try {
+          const { putCachedRecall } = await import("./recall_cache.js");
+          putCachedRecall(PROJECT_PATH, agent_id, _recallText, rcDb);
+        } catch { /* caching is best-effort; never fail the recall */ }
+        rcDb.close();
+        return { content: [{ type: "text", text: _recallText }] };
       }
 
       case "zc_broadcast": {
