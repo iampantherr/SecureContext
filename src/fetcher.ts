@@ -437,7 +437,8 @@ export async function fetchAndConvert(
     if (done) break;
     totalBytes += value.length;
     if (totalBytes > MAX_RESPONSE_BYTES) {
-      reader.cancel();
+      // Fire-and-forget — cancellation is best-effort, we're breaking out regardless
+      void reader.cancel();
       break;
     }
     chunks.push(value);

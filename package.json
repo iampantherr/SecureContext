@@ -1,6 +1,6 @@
 {
   "name": "zc-ctx",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "description": "Secure memory & context optimization MCP plugin for Claude Code — drop-in replacement for context-mode with credential isolation, SSRF protection, MemGPT-style persistent memory, and A2A multi-agent broadcast channel",
   "keywords": [
     "claude-code",
@@ -65,8 +65,11 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "lint": "eslint src --ext .ts",
-    "test": "vitest run"
+    "lint": "eslint src",
+    "test": "vitest run",
+    "check:env": "node scripts/check-env-pinning.mjs",
+    "check:env:test": "node scripts/check-env-pinning.test.mjs",
+    "lint:test": "node scripts/test-lint-catches-floating-promise.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -83,7 +86,11 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.2",
+    "@typescript-eslint/parser": "^8.58.2",
+    "eslint": "^9.39.4",
     "typescript": "^5.3.3",
+    "typescript-eslint": "^8.58.2",
     "vitest": "^4.1.0"
   }
 }

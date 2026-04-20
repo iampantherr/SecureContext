@@ -1981,7 +1981,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Re-throw so MCP transport returns the error to the caller
     // (telemetry write happens in the finally block below)
     const inputChars  = JSON.stringify(argsObj).length;
-    recordToolCall({
+    // Fire-and-forget: telemetry failure must not block the error from
+    // propagating. The void operator silences @typescript-eslint/no-floating-promises
+    // while documenting that the promise is intentionally un-awaited.
+    void recordToolCall({
       callId,
       sessionId:   MCP_SESSION_ID,
       agentId:     AGENT_ID,
@@ -2022,7 +2025,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // ── Record telemetry (fire-and-forget; never throws; never blocks return) ──
-  recordToolCall({
+  // void operator documents intent + silences no-floating-promises lint
+  void recordToolCall({
     callId,
     sessionId:   MCP_SESSION_ID,
     agentId:     AGENT_ID,

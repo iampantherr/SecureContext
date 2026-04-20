@@ -108,12 +108,39 @@ export interface OutcomeRecord extends ChainableRow {
 export async function recordOutcome(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {
   // v0.12.1: Reference Monitor opt-in
   const mode = (process.env.ZC_TELEMETRY_MODE || "local").toLowerCase();
+  let record: OutcomeRecord | null;
   if (mode === "api" || mode === "dual") {
     const apiResult = await _recordOutcomeViaApiPath(input);
-    if (mode === "api") return apiResult;
-    // dual: also write locally below
+    if (mode === "api") record = apiResult;
+    else {
+      // dual: also write locally below — store the local result too, either wins
+      record = apiResult ?? await _recordOutcomeLocal(input);
+    }
+  } else {
+    record = await _recordOutcomeLocal(input);
   }
-  return _recordOutcomeLocal(input);
+
+  // v0.17.1 L4 — auto-feedback into learnings JSONL. Best-effort, never throws,
+  // never affects the recorded outcome row. Only fires on kinds that signal
+  // failure (→ failures.jsonl) or high-confidence success (→ experiments.jsonl).
+  // This closes the learning loop: failures from THIS session become retrievable
+  // learnings for FUTURE sessions WITHOUT requiring agent discipline.
+  try {
+    const { feedbackFromOutcome } = await import("./outcome_feedback.js");
+    feedbackFromOutcome({
+      outcomeKind:      input.outcomeKind,
+      signalSource:     input.signalSource,
+      refType:          input.refType,
+      refId:            input.refId,
+      confidence:       input.confidence,
+      evidence:         input.evidence,
+      createdByAgentId: input.createdByAgentId,
+      outcomeId:        record?.outcome_id,
+      projectPath:      input.projectPath,
+    });
+  } catch { /* never fail the outcome write due to feedback */ }
+
+  return record;
 }
 
 async function _recordOutcomeViaApiPath(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {

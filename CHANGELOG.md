@@ -4,6 +4,93 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.17.2] — 2026-04-20 — Architectural lints (L1+L3) + learning-loop closure (L4)
+
+Pre-Sprint-2 hardening round. Closes three classes of bugs identified by
+the v0.17.1 verification retrospective before the mutation-engine build
+begins. All three are "catch future regressions automatically so we
+don't keep rediscovering the same class of bug by luck":
+
+### Added — L1: env-pinning linter (`scripts/check-env-pinning.mjs`)
+
+Static analysis script that walks `src/**/*.ts` for every `process.env.ZC_*`
+reference, classifies each as CRITICAL / SHARED_PROPAGATED / OPERATIONAL,
+and verifies CRITICAL vars are explicitly pinned in BOTH orchestrator +
+worker launcher heredocs of `A2A_dispatcher/start-agents.ps1`.
+
+Would have caught the v0.17.0 `ZC_AGENT_ID` pollution bug that silently
+mis-attributed 16 consecutive tool_calls to the wrong agent_id (breaking
+per-agent HKDF subkey isolation + RLS + log scoping).
+
+- 14-case self-test (`scripts/check-env-pinning.test.mjs`) covering happy
+  path, missing pin, unclassified var, shared-propagation warnings,
+  bracket-notation refs, missing dispatcher path.
+- Run via `npm run check:env` (production) or `npm run check:env:test` (selftest).
+- Exit 0 = all green, exit 1 = new var unclassified OR critical missing.
+
+### Added — L3: ESLint flat config with `@typescript-eslint/no-floating-promises`
+
+Installed `eslint@9 + typescript-eslint@8` with a minimal config focused
+on the single most-load-bearing rule: `no-floating-promises`. When the
+outcomes.ts module became async in v0.12.0, the `posttool-outcomes.mjs`
+hook kept calling `resolveGitCommitOutcome(...)` without await — the
+process exited before the async DB write completed. **9 months of
+undetected outcome-data loss.** The lint would have caught it on the
+first write.
+
+- Scanned src/ on install: found 3 real floating-promise violations
+  (2 `recordToolCall` in `server.ts`, 1 `reader.cancel` in `fetcher.ts`).
+  All fixed with explicit `void` operator + comments documenting intent.
+- Self-test (`scripts/test-lint-catches-floating-promise.mjs`) creates
+  a synthetic TS file with an unawaited call, confirms ESLint fails on
+  it, and confirms `void` + `await` both silence the rule. 5/5 pass.
+- Run via `npm run lint` or `npm run lint:test`.
+
+### Added — L4: outcome → learnings JSONL auto-feedback (`src/outcome_feedback.ts`)
+
+**Closes the learning loop.** Previously, a failure becoming a learning
+required agent discipline: (1) notice failure, (2) write to
+`failures.jsonl`, (3) remember the format, (4) let the hook mirror. Four
+points of failure, all behavioral.
+
+Now: `recordOutcome({outcomeKind: 'rejected' | 'failed' | 'insufficient'
+| 'errored' | 'reverted'})` atomically appends a structured JSON line
+to `<projectPath>/learnings/failures.jsonl`. Successful outcomes
+(`shipped`, `accepted`) with confidence ≥ 0.9 append to
+`learnings/experiments.jsonl`. Future sessions retrieve via `zc_search`
+without any agent discipline required.
+
+Features:
+- Best-effort; swallows errors (never affects the primary outcome row).
+- Auto-creates `learnings/` dir if missing (guard: projectPath must exist).
+- Symlink-escape guard: target must resolve inside `<projectPath>/learnings/`.
+- Payload capped at 64 KB per line; oversized evidence → dropped with a marker.
+- Concurrent writers don't corrupt — single `appendFileSync` per line.
+
+16 unit tests covering every outcome-kind branch, security guards
+(symlink escape, ghost projectPath), large-evidence truncation, rapid
+concurrent appends, and downstream-consumer format (learnings-indexer
+can mirror these rows into PG).
+
+Live verified end-to-end: called `recordOutcome` with `kind='rejected'`
+→ `failures.jsonl` gained 1 structured line tagged
+`"source":"auto-feedback-v0.17.1"`. Low-confidence `accepted` correctly
+skipped. High-confidence `shipped` landed in `experiments.jsonl`.
+
+### Test suite: 645/645 (+16 from v0.17.1)
+
+- New: `src/outcome_feedback.test.ts` (16 tests)
+- New: `scripts/check-env-pinning.test.mjs` (14 cases)
+- New: `scripts/test-lint-catches-floating-promise.mjs` (5 cases)
+
+### Migration
+
+- No schema changes. No behavior changes for existing outcomes — the
+  feedback module is additive. Projects with no `learnings/` dir get one
+  auto-created on the first failure/success outcome.
+- Operators running CI should add `npm run check:env` + `npm run lint`
+  to the pipeline.
+
 ## [0.17.1] — 2026-04-20 — Agent-idle fixes (A+B+C+D) + recall cache + cost-correctness (Tier 1+2)
 
 Hotfix round addressing five issues found in live verification of v0.17.0:
