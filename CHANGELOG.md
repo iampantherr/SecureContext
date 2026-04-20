@@ -4,6 +4,102 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.17.1] — 2026-04-20 — Agent-idle fixes (A+B+C+D) + recall cache + cost-correctness (Tier 1+2)
+
+Hotfix round addressing five issues found in live verification of v0.17.0:
+(a) agents going idle after `zc_summarize_session` instead of draining the
+task queue, (b) `zc_recall_context` dominating session cost at ~82% on Opus,
+(c) tool-call cost accounting billed at the wrong rate (5× over-reported on
+Opus), (d) infra-tool noise polluting the orchestrator's "do it myself vs.
+delegate to Sonnet developer" cost comparisons, and (e) seven
+architectural bugs surfaced by end-to-end data-flow tracing.
+
+### Added — `src/recall_cache.ts` (60s TTL + change-detection)
+
+- In-memory cache for `zc_recall_context` keyed by `(project_path, agent_id)`.
+  TTL 60s; cache miss on any new `working_memory` / `broadcasts` /
+  `session_events` row. Repeat calls inside the window return the prior
+  response prefixed with `(cached Xs ago)` — saves ~800 output tokens per hit.
+  Estimated savings: ~$0.06/call on Opus, ~$0.012/call on Sonnet.
+- `force: true` arg bypasses the cache when an agent explicitly wants fresh data.
+- Cache is scoped per `(project_hash, agent_id)` — no cross-agent leakage.
+- Process-lifetime only; max 64 entries with FIFO prune.
+- 11 unit tests.
+
+### Added — Tier 1 pricing: `computeToolCallCost()` in `src/pricing.ts`
+
+Tool calls now billed from the LLM's perspective:
+- Tool call args (what the LLM generated to invoke) → billed at model's **output rate**
+- Tool response (what the LLM reads on its next turn) → billed at model's **input rate**
+
+The naive `computeCost()` inverted these, over-reporting cost by ~5× on Opus
+(output $75/Mtok vs. input $15/Mtok). For `zc_recall_context`:
+  - Before: 798 × $75/Mtok = $0.060 (treated as Opus output)
+  - After: 798 × $15/Mtok = $0.012 (Opus reads as input on next turn)
+
+Matters because the Opus orchestrator uses cost tracking to decide "do I
+handle this myself vs. delegate to the Sonnet developer" — inflated
+numbers nudge toward unnecessary delegation.
+
+### Added — Tier 2 infra-tool zero-cost (`INFRA_TOOLS` set)
+
+DB-assembly tools (`zc_recall_context`, `zc_file_summary`, `zc_project_card`,
+`zc_status`) now return `cost_usd=0`. Rationale: their responses are
+deterministic from DB state — no LLM, no Ollama, no external service — so
+per-call work is negligible. Token counts still accurate so audits can
+recompute via `computeToolCallCost`.
+
+Override: set `ZC_DISABLE_INFRA_ZERO_COST=1` when you want full cost
+reconciliation against Anthropic invoices.
+
+### Added — HTTP endpoint `GET /api/v1/queue/stats-by-role`
+
+Returns `{ role: { queued, claimed, done, failed } }` for `task_queue_pg`.
+Used by the A2A dispatcher's new `checkWorkerWake` (see A2A_dispatcher
+v0.17.1) to poke idle workers when their role has claimable work.
+
+### Fixed — outcomes resolver pipeline (3 latent bugs from v0.12.0+)
+
+1. `getMostRecentToolCallForSession` was SQLite-only. In Postgres mode
+   session lookups returned null → `resolveGitCommitOutcome` +
+   `resolveFollowUpOutcomes` silently no-op'd. Result: every outcome row
+   since v0.12.0 (when the function became async) failed to persist.
+2. `posttool-outcomes.mjs` hook had the same SQLite-only query for session
+   id discovery. Fixed with the same PG lookup + SQLite fallback pattern.
+3. Hook called `resolveGitCommitOutcome(...)` without `await`. Process
+   exited before the async resolver's DB write completed. **9 months of
+   undetected outcome-data loss** (L3 in the architectural-lessons doc).
+
+### Fixed — `learnings-indexer.mjs` hook coverage gaps
+
+1. Previously matched only `Write|Edit|MultiEdit|NotebookEdit`. Agents
+   using `echo ... >> learnings/X.jsonl` via Bash silently bypassed the
+   hook. Now matches `Bash` too and parses `>>` / `>` redirection
+   targets from the command.
+2. Hook only wrote to SQLite; Postgres `learnings_pg` populated only via
+   manual `scripts/backfill-learnings.mjs`. Now mirrors to PG when
+   `ZC_TELEMETRY_BACKEND=postgres|dual`. Module-resolution handles running
+   from `~/.claude/hooks/` with no `node_modules` via `file://` fallback
+   to SC repo's `node_modules/pg`.
+3. `projectPath` hashing normalized via `realpathSync` so forward-slash /
+   backslash variants on Windows hash consistently.
+
+### Test suite: 629/629 (+12 from v0.17.0)
+
+- Added `src/recall_cache.test.ts` (11 tests: cold-miss, hit, staleness,
+  cross-agent/project isolation, TTL, undefined-agent bucketing).
+- Added telemetry non-infra-tool cost test.
+- Updated `postgres_backend.test.ts RT-S3-06` + `sprint1_integration.test.ts`
+  for new cost formula.
+
+### Migration
+
+- Pure code fixes — no schema changes.
+- Historical `tool_calls_pg` rows retain their old `cost_usd` values; new
+  rows use corrected formula.
+- To use `-WorkerCount N` with PG backend, ensure sc-api is rebuilt from
+  v0.17.1 source (adds `/api/v1/queue/stats-by-role` endpoint).
+
 ## [0.17.0] — 2026-04-20 — Sprint 3 Phase 3: Work-Stealing Queue + Model Router + Ownership Guard + Multi-Worker Pools
 
 Sprint 3 Phase 3 — the pieces that let multiple workers in the same role share one task queue without stepping on each other. Closes the "single worker per role" limit that v0.15.0/v0.16.0 left in place.
