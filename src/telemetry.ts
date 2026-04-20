@@ -54,7 +54,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { mkdirSync, existsSync } from "node:fs";
 import { logger, newTraceId } from "./logger.js";
-import { computeCost, type CostCalculation } from "./pricing.js";
+import { computeCost, computeToolCallCost, type CostCalculation } from "./pricing.js";
 import { redactSecrets, scanForSecrets } from "./security/secret_scanner.js";
 import { auditLog } from "./security/audit_log.js";
 import { canonicalize, type ChainableRow } from "./security/hmac_chain.js";
@@ -205,7 +205,12 @@ async function _recordToolCallPostgres(input: ToolCallInput): Promise<ToolCallRe
     const inputTokens  = input.inputTokens  ?? Math.ceil((input.inputChars  ?? 0) / 4);
     const outputTokens = input.outputTokens ?? Math.ceil((input.outputChars ?? 0) / 4);
     const cachedTokens = input.cachedTokens ?? 0;
-    const cost = computeCost(input.model, inputTokens, outputTokens, {
+    // v0.17.1 — use computeToolCallCost which bills the LLM's perspective:
+    //   tool-call-args at output rate (LLM generated them in prior turn)
+    //   tool-response  at input rate (LLM ingests them on next turn)
+    // Naive computeCost treated tool response as LLM output → over-reported
+    // by ~5× on Opus. See src/pricing.ts for the full rationale.
+    const cost = computeToolCallCost(input.model, inputTokens, outputTokens, {
       batch: input.batch,
       cached_input_tokens: cachedTokens,
     });
@@ -318,7 +323,8 @@ async function _recordToolCallSqlite(input: ToolCallInput): Promise<ToolCallReco
     const outputTokens = input.outputTokens ?? Math.ceil((input.outputChars ?? 0) / 4);
     const cachedTokens = input.cachedTokens ?? 0;
 
-    const cost = computeCost(input.model, inputTokens, outputTokens, {
+    // v0.17.1 — see _recordToolCallPostgres for the tool-call cost rationale.
+    const cost = computeToolCallCost(input.model, inputTokens, outputTokens, {
       batch: input.batch,
       cached_input_tokens: cachedTokens,
     });

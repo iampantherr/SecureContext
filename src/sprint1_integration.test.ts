@@ -214,14 +214,19 @@ describe("Sprint 1 — integration + E2E + user scenarios", () => {
 
   // ── Integration: cost annotation matches pricing table ─────────────────
 
-  it("cost stored in tool_calls row equals computeCost() exactly", async () => {
+  it("cost stored in tool_calls row equals computeToolCallCost() exactly (v0.17.1)", async () => {
     const cid = newCallId();
     const r = await recordToolCall({
       callId: cid, sessionId: "ci", agentId: "a", projectPath: projectA,
       toolName: "zc_search", model: "claude-sonnet-4-6",
       inputTokens: 1000, outputTokens: 500, latencyMs: 30, status: "ok",
     });
-    const independent = computeCost("claude-sonnet-4-6", 1000, 500);
+    // v0.17.1: telemetry now uses computeToolCallCost which prices from the
+    // LLM's perspective (tool response tokens billed at INPUT rate; tool call
+    // args at OUTPUT rate). The naive computeCost would over-report tool-call
+    // cost by ~5× on Opus. See src/pricing.ts for the full rationale.
+    const { computeToolCallCost } = await import("./pricing.js");
+    const independent = computeToolCallCost("claude-sonnet-4-6", 1000, 500);
     expect(r!.cost_usd).toBeCloseTo(independent.cost_usd, 8);
   });
 

@@ -104,8 +104,12 @@ describe("telemetry", () => {
     expect(r!.call_id).toBe(callId);
     expect(r!.tool_name).toBe("zc_status");
     expect(r!.cost_usd).toBeGreaterThan(0);
-    // Sonnet @ 3/MTok in + 15/MTok out × 1k in + 0.5k out = 0.003 + 0.0075 = 0.0105
-    expect(r!.cost_usd).toBeCloseTo(0.0105, 4);
+    // v0.17.1 pricing fix: tool-call rows now use computeToolCallCost which
+    // bills from the LLM's perspective:
+    //   tool call args (inputTokens=1000) → billed at OUTPUT rate (LLM emitted them)
+    //   tool response  (outputTokens=500) → billed at INPUT rate (LLM ingests them)
+    // Sonnet output $15/Mtok × 1000 + input $3/Mtok × 500 = $0.015 + $0.0015 = $0.0165
+    expect(r!.cost_usd).toBeCloseTo(0.0165, 4);
     expect(r!.latency_ms).toBe(47);
     expect(r!.status).toBe("ok");
   });

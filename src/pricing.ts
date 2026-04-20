@@ -332,6 +332,65 @@ export function computeCost(
   };
 }
 
+/**
+ * v0.17.1 — correct cost accounting for MCP tool calls.
+ *
+ * An MCP tool call has TWO billable components from the LLM's perspective,
+ * and they bill at DIFFERENT rates:
+ *
+ *   (1) The tool_use block the LLM generated to invoke the tool (tool call
+ *       args). These are LLM OUTPUT tokens from the PRIOR turn. They bill at
+ *       the model's output rate. Typically small — just the arg JSON.
+ *
+ *   (2) The tool_result content the LLM RECEIVES on its NEXT turn. These are
+ *       LLM INPUT tokens. They bill at the model's (cheaper) input rate.
+ *       For DB-sourced tools like zc_recall_context this can be hundreds of
+ *       tokens — the bulk of the cost.
+ *
+ * The naive `computeCost(model, input, output)` treats tool-response tokens
+ * as "output" — charged at the ~5× more expensive output rate on Opus. For
+ * zc_recall_context this over-reported the call cost by 5× (e.g. $0.06 when
+ * the real cost was $0.012). This matters because the Opus orchestrator's
+ * "do it myself vs. delegate to developer (Sonnet)" cost comparison relies
+ * on honest numbers — an inflated recall cost nudges it toward unnecessary
+ * delegation.
+ *
+ * Telemetry callers should use THIS function for tool-call rows. The naive
+ * computeCost is still correct for agent TURN costs (where the raw
+ * input/output semantics match what the LLM generates/receives).
+ *
+ * @param model Claude model identifier.
+ * @param toolCallArgsTokens Tokens the LLM emitted as the tool_use block
+ *                           (typically small — estimated from inputChars).
+ * @param toolResponseTokens Tokens the tool returned (what the LLM will
+ *                           ingest on its next turn — often big for
+ *                           DB-backed tools).
+ */
+export function computeToolCallCost(
+  model:               string,
+  toolCallArgsTokens:  number,
+  toolResponseTokens:  number,
+  options: {
+    batch?: boolean;
+    cached_input_tokens?: number;
+  } = {},
+): CostCalculation {
+  // The tool response is LLM INPUT on the next turn → bill at input rate.
+  // The tool call args are LLM OUTPUT from the prior turn → bill at output rate.
+  // computeCost's contract is (model, input_tokens, output_tokens) — so we
+  // pass the tool response as "input_tokens" and args as "output_tokens".
+  // The DB row still records the original (input, output) values correctly;
+  // only the cost computation is corrected.
+  const swapped = computeCost(model, toolResponseTokens, toolCallArgsTokens, options);
+  // Restore the caller's expected input/output semantics in the returned struct
+  // so the record mirrors what went into the tool_calls row.
+  return {
+    ...swapped,
+    input_tokens:  toolCallArgsTokens,
+    output_tokens: toolResponseTokens,
+  };
+}
+
 /** Returns the list of all known model names. */
 export function listKnownModels(): string[] {
   return Object.keys(PRICING_TABLE.models).sort();

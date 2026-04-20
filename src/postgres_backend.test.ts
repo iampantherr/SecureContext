@@ -294,8 +294,11 @@ describe.skipIf(!pgAvailable)("v0.16.0 Postgres backend (live PG required)", () 
       cid, "s-cross", "agent-cross", projectHash,
       "Read", "claude-sonnet-4-6",
       100, 50,
-      // cost_usd as toFixed(8). Sonnet @ 3 + 15 / Mtok = 0.0003 + 0.00075 = 0.00105
-      (0.0003 + 0.00075).toFixed(8),
+      // v0.17.1: tool-call cost is computed via computeToolCallCost which bills
+      // from the LLM's perspective — tool args (100) at OUTPUT rate + tool
+      // response (50) at INPUT rate. Sonnet $15/Mtok × 100 + $3/Mtok × 50
+      // = 0.0015 + 0.00015 = 0.00165.
+      (0.0015 + 0.00015).toFixed(8),
       10, "ok",
       sqliteResult!.ts,
     ];
