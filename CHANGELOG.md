@@ -4,6 +4,88 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.17.0] — 2026-04-20 — Sprint 3 Phase 3: Work-Stealing Queue + Model Router + Ownership Guard + Multi-Worker Pools
+
+Sprint 3 Phase 3 — the pieces that let multiple workers in the same role share one task queue without stepping on each other. Closes the "single worker per role" limit that v0.15.0/v0.16.0 left in place.
+
+### Added — Postgres work-stealing queue (§8.2)
+
+- **`task_queue_pg`** table (migration id=5) with state CHECK constraint + routing index `(project_hash, role, state, ts)` + partial heartbeat index `WHERE state='claimed'`.
+- **`src/task_queue.ts`** — seven operations backed by `FOR UPDATE SKIP LOCKED` so N workers can race-claim atomically without blocking each other:
+  - `enqueueTask()` — idempotent (`ON CONFLICT DO NOTHING`)
+  - `claimTask()` — atomic primitive (`UPDATE ... WHERE task_id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1)`)
+  - `heartbeatTask()` — workers must call every 30s
+  - `completeTask()` / `failTask()` — terminal states (fail bumps `retries`)
+  - `reclaimStaleTasks(staleAfterSeconds=300)` — sweep dead claims back to queue
+  - `getQueueStats()` — counts by state
+- **13 unit tests** (`src/task_queue.test.ts`) including:
+  - **RT-S4-01**: 50 concurrent workers × 100 tasks → each task claimed EXACTLY once (no double-claim; core correctness property of `SKIP LOCKED`)
+  - **RT-S4-02**: 600s-stale heartbeat → reclaim back to queued + retries++
+  - **RT-S4-03**: `failTask` bumps retries + persists failure_reason
+  - **RT-S4-04**: cross-role + cross-project scope isolation
+
+### Added — 6 MCP tools exposing the queue
+
+- `zc_enqueue_task` (orchestrator) · `zc_claim_task` (worker) · `zc_heartbeat_task` · `zc_complete_task` · `zc_fail_task` · `zc_queue_stats`
+- Worker `agent_id` is sourced from `ZC_AGENT_ID` env var so a multi-worker pool (e.g. `developer-1/2/3` all `role=developer`) shares one queue keyed by `(project_hash, role)` and claims atomically.
+- **5 MCP integration tests** (`src/task_queue_mcp.test.ts`) covering end-to-end lifecycle, 3-worker race, fail path, stats aggregation, cross-project isolation.
+
+### Added — Complexity-based model router (§8.5)
+
+- **`src/indexing/model_router.ts`** — `chooseModel(complexity 1-5)` returns `{model, tier, reason, estimatedInputCostPerMtok, inputClamped}`:
+  - 1-2 → **Haiku 4.5** (trivial tasks, $0.25/Mtok)
+  - 3-4 → **Sonnet 4.6** (standard work, $3.00/Mtok — cost/quality sweet spot)
+  - 5   → **Opus 4.7** (hard reasoning, $15.00/Mtok)
+- Env overrides: `ZC_MODEL_TIER_{HAIKU,SONNET,OPUS}` resolved per call so operators can flip at runtime.
+- Safe defaults: `null` / `undefined` / `NaN` / `Infinity` / out-of-range → Sonnet with `inputClamped=true`.
+- **19 unit tests** covering tier mapping, rounding, clamping edges, env overrides, result shape.
+- **`zc_choose_model`** MCP tool wraps it.
+
+### Added — File-ownership overlap guard at `/api/v1/broadcast` (§8.2)
+
+- HTTP API rejects `ASSIGN` whose `file_ownership_exclusive` overlaps any in-flight (unmerged) ASSIGN's exclusive set → **HTTP 409 Conflict** with `overlapping_files` + `conflicting_broadcast_id`. Prevents two workers being assigned the same file.
+- "In-flight" = ASSIGN whose `task` has no subsequent MERGE in the last 200 broadcasts.
+- **5 integration tests** (`src/ownership_guard.test.ts`):
+  - **RT-S4-05**: overlapping exclusive → 409
+  - **RT-S4-06**: disjoint exclusive → 200
+  - **RT-S4-07**: re-ASSIGN allowed after MERGE of the prior task
+  - Plus back-compat (no excl set) + non-ASSIGN types bypass guard
+
+### Fixed — `recallSharedChannel` was silently dropping v0.15.0 §8.1 structured columns
+
+SQLite-path `recallSharedChannel` only projected legacy columns. All downstream consumers saw `file_ownership_exclusive=undefined` even when the DB column was populated — the ownership-guard work surfaced this hidden v0.15.0 gap. Now projects all 7 v0.15.0 §8.1 columns with NULL → `undefined` semantics.
+
+### Added — `-WorkerCount N` on `start-agents.ps1` + role-tagged registration (A2A_dispatcher side)
+
+- New `-WorkerCount` param (1-20, default 1). When > 1, expands each `-Roles` entry into N numbered workers suffixed `-1`..`-N`:
+  ```powershell
+  start-agents.ps1 -Roles developer -WorkerCount 3
+  # → spawns developer-1, developer-2, developer-3
+  #   each with its own WT window, worktree, registration
+  #   all sharing role="developer" — one work-stealing queue
+  ```
+- `Get-AgentRole` helper strips `-N` suffix so `$roleMeta` + `roles.json` deep-prompt lookups still work.
+- `register.mjs` accepts `--role` flag / `ZC_AGENT_ROLE` env → writes `_agent_roles[agentId]` sidecar so dispatcher can route by role without breaking the existing `agentId → pane` string map.
+- Back-compat: `WorkerCount=1` (default) preserves legacy plain names ("developer" not "developer-1").
+- **Env propagation fix**: worker/orchestrator launch scripts now also propagate `ZC_POSTGRES_*` + `ZC_TELEMETRY_BACKEND` so the agent's MCP server can reach `task_queue_pg` (closes the longstanding v0.10.4 env-propagation follow-up).
+
+### Added — `scripts/backfill-learnings.mjs` (close the learning loop)
+
+- The PostToolUse `learnings-indexer.mjs` hook only mirrors NEW Write/Edit events — prior `<project>/learnings/*.jsonl` rows never get indexed into `learnings` / `learnings_pg`. So agents couldn't `zc_search` past decisions/failures from earlier sessions.
+- New script scans `<project>/learnings/*.jsonl`, categorizes by filename stem, idempotently upserts (via `UNIQUE`), mirrors to PG when `ZC_TELEMETRY_BACKEND=postgres|dual`.
+- Verified on Test_Agent_Coordination: 6 rows backfilled (3 decisions + 3 metrics). Previously both SQLite and PG had 0 learnings rows despite JSONL content existing.
+
+### Test Suite
+
+- **617/617 unit+integration tests pass** (was 575 pre-v0.17.0; +42 new: 13 task_queue + 19 model_router + 5 ownership guard + 5 task_queue MCP).
+- Live E2E on Test_Agent_Coordination with `-WorkerCount 3`: agent called `zc_choose_model` (verified 2→haiku, 4→sonnet, 5→opus tier mapping), enqueued 3 disjoint-ownership tasks via `zc_enqueue_task`, workers atomically claimed via `zc_claim_task`, committed actual file hardening (e.g. `checkRequest(req)` in `src/rate-limiter.js` throwing `TypeError: rate-limiter: req argument is required`; `harden: validate argv in index` commit `f25acf5a`).
+
+### Migration
+
+- **Schema**: migration id=5 (`task_queue_pg`) is idempotent + additive — Postgres-only feature (no SQLite companion).
+- **API**: zero breaking changes. All new MCP tools are additive.
+- **Env for workers**: if you run in HTTP/Postgres mode, restart agents via `start-agents.ps1` so they pick up the updated launch scripts that propagate `ZC_POSTGRES_*`. Until then, `zc_enqueue_task`/`zc_claim_task` return `Postgres pool unavailable`.
+
 ## [0.16.0] — 2026-04-19 — Sprint 3 Phase 2: Postgres Backend + T3.1/T3.2 (RLS) + API ASSIGN forwarding
 
 Sprint 3 Phase 2 — the Postgres backend that's been deferred since v0.12.x lands here, along with both remaining Tier 3 fixes (T3.1 per-query `SET LOCAL ROLE` and T3.2 Row-Level-Security policies). Closes the v0.15.0 known limitation where structured ASSIGN fields were silently dropped by the HTTP API.
