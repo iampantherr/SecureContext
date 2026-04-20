@@ -720,6 +720,90 @@ const TOOLS: Tool[] = [
       required: [],
     },
   },
+  {
+    name: "zc_enqueue_task",
+    description:
+      "v0.17.0 §8.2 — Enqueue a task into the work-stealing queue (task_queue_pg). " +
+      "Requires Postgres backend (falls back to error if ZC_TELEMETRY_BACKEND is sqlite). " +
+      "Idempotent: returns {inserted:false} if task_id already exists. " +
+      "Used by orchestrator to create tasks that any worker in a role can claim.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id:  { type: "string", description: "Unique task identifier (typically the ASSIGN broadcast task field)." },
+        role:     { type: "string", description: "Role name — workers with matching role can claim (e.g. 'developer')." },
+        payload:  { type: "object", description: "Task payload (full ASSIGN body as JSON). Workers receive this on claim." },
+      },
+      required: ["task_id", "role", "payload"],
+    },
+  },
+  {
+    name: "zc_claim_task",
+    description:
+      "v0.17.0 §8.2 — Atomically claim the oldest queued task for the given role. " +
+      "Uses Postgres FOR UPDATE SKIP LOCKED so multiple workers can call concurrently " +
+      "without blocking. Returns null if queue is empty. Once claimed, worker MUST call " +
+      "zc_heartbeat_task every 30s or zc_complete_task/zc_fail_task on completion.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        role: { type: "string", description: "Role to claim tasks for (worker's own role)." },
+      },
+      required: ["role"],
+    },
+  },
+  {
+    name: "zc_heartbeat_task",
+    description:
+      "v0.17.0 §8.2 — Refresh heartbeat on a claimed task. Workers MUST call every 30s " +
+      "while processing — otherwise reclaimStaleTasks (5min threshold) will return the " +
+      "task to queue. Returns {ok:false} if the worker no longer owns the task (reclaimed).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task ID to refresh." },
+      },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "zc_complete_task",
+    description:
+      "v0.17.0 §8.2 — Mark a claimed task as done. Idempotent: returns {ok:false} if " +
+      "the task was already completed or no longer owned by this worker.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task ID to mark done." },
+      },
+      required: ["task_id"],
+    },
+  },
+  {
+    name: "zc_fail_task",
+    description:
+      "v0.17.0 §8.2 — Mark a claimed task as failed + bump retries counter so a backoff " +
+      "layer can decide whether to re-enqueue. Records failure_reason (truncated to 1000 chars).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "Task ID to mark failed." },
+        reason:  { type: "string", description: "Short description of failure cause." },
+      },
+      required: ["task_id", "reason"],
+    },
+  },
+  {
+    name: "zc_queue_stats",
+    description:
+      "v0.17.0 §8.2 — Return queue counts by state {queued, claimed, done, failed}. " +
+      "Orchestrator uses this for flow control: back off spawning new tasks if queued>N.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // ─── Server setup ──────────────────────────────────────────────────────────────
@@ -1732,6 +1816,72 @@ async function dispatchToolCall(
         lines.push(``);
         lines.push(rec.reason);
         return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      // ── v0.17.0 §8.2 — work-stealing queue MCP tools ──────────────────────
+      // All of these require the Postgres telemetry backend. The task_queue_pg
+      // table lives in the same PG instance as tool_calls_pg / outcomes_pg
+      // and is migrated via pg_migrations.ts id=5.
+      case "zc_enqueue_task": {
+        const { task_id, role, payload } = args as {
+          task_id: string; role: string; payload: Record<string, unknown>;
+        };
+        if (!task_id || !role) {
+          return { content: [{ type: "text", text: "Error: task_id and role are required" }], isError: true };
+        }
+        const { enqueueTask } = await import("./task_queue.js");
+        const projectHashTq = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const inserted = await enqueueTask({
+          taskId:      task_id,
+          projectHash: projectHashTq,
+          role,
+          payload:     payload ?? {},
+        });
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, inserted, task_id, role }) }] };
+      }
+      case "zc_claim_task": {
+        const { role } = args as { role: string };
+        if (!role) {
+          return { content: [{ type: "text", text: "Error: role is required" }], isError: true };
+        }
+        const { claimTask } = await import("./task_queue.js");
+        const projectHashCt = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const workerIdCt = process.env.ZC_AGENT_ID || "unknown-worker";
+        const claim = await claimTask(projectHashCt, role, workerIdCt);
+        if (!claim) {
+          return { content: [{ type: "text", text: JSON.stringify({ ok: true, claim: null, note: "queue empty for this role" }) }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, claim, worker_id: workerIdCt }) }] };
+      }
+      case "zc_heartbeat_task": {
+        const { task_id } = args as { task_id: string };
+        if (!task_id) return { content: [{ type: "text", text: "Error: task_id is required" }], isError: true };
+        const { heartbeatTask } = await import("./task_queue.js");
+        const workerIdHb = process.env.ZC_AGENT_ID || "unknown-worker";
+        const ok = await heartbeatTask(task_id, workerIdHb);
+        return { content: [{ type: "text", text: JSON.stringify({ ok, task_id, worker_id: workerIdHb, note: ok ? "heartbeat accepted" : "task no longer owned (reclaimed or completed)" }) }] };
+      }
+      case "zc_complete_task": {
+        const { task_id } = args as { task_id: string };
+        if (!task_id) return { content: [{ type: "text", text: "Error: task_id is required" }], isError: true };
+        const { completeTask } = await import("./task_queue.js");
+        const workerIdCp = process.env.ZC_AGENT_ID || "unknown-worker";
+        const ok = await completeTask(task_id, workerIdCp);
+        return { content: [{ type: "text", text: JSON.stringify({ ok, task_id, worker_id: workerIdCp, note: ok ? "marked done" : "not owned or already terminal" }) }] };
+      }
+      case "zc_fail_task": {
+        const { task_id, reason } = args as { task_id: string; reason: string };
+        if (!task_id) return { content: [{ type: "text", text: "Error: task_id is required" }], isError: true };
+        const { failTask } = await import("./task_queue.js");
+        const workerIdFl = process.env.ZC_AGENT_ID || "unknown-worker";
+        const ok = await failTask(task_id, workerIdFl, reason ?? "unspecified");
+        return { content: [{ type: "text", text: JSON.stringify({ ok, task_id, worker_id: workerIdFl, note: ok ? "marked failed (retries++)" : "not owned or already terminal" }) }] };
+      }
+      case "zc_queue_stats": {
+        const { getQueueStats } = await import("./task_queue.js");
+        const projectHashSt = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const stats = await getQueueStats(projectHashSt);
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, stats }) }] };
       }
 
       default:
