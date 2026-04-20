@@ -144,12 +144,16 @@ async function main() {
       const stdout = toolResponse?.stdout ?? toolResponse?.output ?? "";
       // Only invoke if stdout non-empty — saves a no-op DB round-trip
       if (stdout && typeof stdout === "string" && stdout.includes("[")) {
-        resolveGitCommitOutcome({ projectPath, sessionId, bashOutput: stdout });
+        // v0.17.0: await so the hook process doesn't exit before the async
+        // resolver writes to PG. Previously the promise was fire-and-forget
+        // — when outcomes.ts became async (v0.12.0) the writes silently
+        // dropped because process.exit happened first.
+        await resolveGitCommitOutcome({ projectPath, sessionId, bashOutput: stdout });
       }
     } else if (toolName === "Read") {
       // newToolInput should carry the file_path (or path)
       if (toolInput?.file_path || toolInput?.path) {
-        resolveFollowUpOutcomes({
+        await resolveFollowUpOutcomes({
           projectPath,
           sessionId,
           newToolName: "Read",
