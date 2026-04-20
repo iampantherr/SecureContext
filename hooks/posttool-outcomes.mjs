@@ -31,13 +31,84 @@
 import { createInterface } from "node:readline";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
+function normalizeProjectPath(projectPath) {
+  try { return realpathSync(projectPath); }
+  catch { return projectPath; }
+}
+
 function projectDbPath(projectPath) {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = createHash("sha256").update(normalizeProjectPath(projectPath)).digest("hex").slice(0, 16);
   return join(homedir(), ".claude", "zc-ctx", "sessions", hash + ".db");
+}
+
+// v0.17.0 — when ZC_TELEMETRY_BACKEND=postgres|dual the session's tool_calls
+// live in tool_calls_pg, not SQLite. Query PG for the latest session_id in that
+// case; otherwise fall back to SQLite. Returns null if neither store has rows.
+async function resolveSessionId(projectPath) {
+  const backend = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
+  if (backend === "postgres" || backend === "dual") {
+    try {
+      // pg is installed in the SC repo's node_modules; hook runs from
+      // ~/.claude/hooks/ which has no node_modules of its own.
+      let pg;
+      try { pg = await import("pg"); }
+      catch {
+        const candidates = [];
+        if (process.env.ZC_REPO_DIR) candidates.push(join(process.env.ZC_REPO_DIR, "node_modules/pg/lib/index.js"));
+        candidates.push(join(homedir(), "AI_projects/SecureContext/node_modules/pg/lib/index.js"));
+        candidates.push("C:/Users/Amit/AI_projects/SecureContext/node_modules/pg/lib/index.js");
+        for (const p of candidates) {
+          if (!existsSync(p)) continue;
+          try { pg = await import("file:///" + p.replace(/\\/g, "/")); break; } catch { /* try next */ }
+        }
+      }
+      if (pg) {
+        const Pool = pg.Pool || (pg.default && pg.default.Pool);
+        if (Pool) {
+          const pool = new Pool({
+            host:     process.env.ZC_POSTGRES_HOST     || "localhost",
+            port:     Number(process.env.ZC_POSTGRES_PORT || 5432),
+            user:     process.env.ZC_POSTGRES_USER     || "scuser",
+            password: process.env.ZC_POSTGRES_PASSWORD || "",
+            database: process.env.ZC_POSTGRES_DB       || "securecontext",
+            max: 2,
+            idleTimeoutMillis: 3_000,
+          });
+          try {
+            const projectHashStr = createHash("sha256").update(normalizeProjectPath(projectPath)).digest("hex").slice(0, 16);
+            const r = await pool.query(
+              "SELECT session_id FROM tool_calls_pg WHERE project_hash = $1 ORDER BY id DESC LIMIT 1",
+              [projectHashStr],
+            );
+            if (r.rows[0]?.session_id) return r.rows[0].session_id;
+          } finally {
+            try { await pool.end(); } catch { /* noop */ }
+          }
+        }
+      }
+      if (backend === "postgres") return null;  // PG-only
+      // dual mode: fall through to SQLite
+    } catch {
+      if (backend === "postgres") return null;
+    }
+  }
+
+  // SQLite path
+  const dbPath = projectDbPath(projectPath);
+  if (!existsSync(dbPath)) return null;
+  try {
+    const db = new DatabaseSync(dbPath);
+    db.exec("PRAGMA busy_timeout = 3000");
+    const row = db.prepare("SELECT session_id FROM tool_calls ORDER BY id DESC LIMIT 1").get();
+    db.close();
+    return row?.session_id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
@@ -57,22 +128,8 @@ async function main() {
   // Fast reject: only Bash and Read matter for the Sprint 1 resolvers
   if (toolName !== "Bash" && toolName !== "Read") process.exit(0);
 
-  // Determine session id by reading the most recent tool_call row
-  const dbPath = projectDbPath(projectPath);
-  if (!existsSync(dbPath)) process.exit(0);
-
-  let sessionId;
-  try {
-    const db = new DatabaseSync(dbPath);
-    db.exec("PRAGMA busy_timeout = 3000");
-    const row = db.prepare(
-      "SELECT session_id FROM tool_calls ORDER BY id DESC LIMIT 1"
-    ).get();
-    db.close();
-    sessionId = row?.session_id;
-  } catch {
-    process.exit(0);
-  }
+  // Determine session id — backend-aware (PG or SQLite per ZC_TELEMETRY_BACKEND)
+  const sessionId = await resolveSessionId(projectPath);
   if (!sessionId) process.exit(0);
 
   // Import the SC outcomes module from the installed dist/
