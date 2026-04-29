@@ -337,6 +337,79 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 9,
+    description: "v0.18.1 Sprint 2.5: skill_promotion_queue_pg — operator-gated global promotion queue",
+    up: async (client) => {
+      // Mirror of SQLite migration 23. PG holds the canonical queue when
+      // ZC_TELEMETRY_BACKEND=postgres|dual so cross-machine operators see
+      // the same pending list.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_promotion_queue_pg (
+          candidate_skill_id  TEXT NOT NULL,
+          proposed_target     TEXT NOT NULL DEFAULT 'global',
+          surfaced_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          surfaced_by         TEXT NOT NULL CHECK (surfaced_by IN ('cron','manual')),
+          best_avg            NUMERIC(8,6),
+          global_avg          NUMERIC(8,6),
+          project_count       INTEGER,
+          status              TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending','approved','rejected','superseded')),
+          decided_at          TIMESTAMPTZ,
+          decided_by          TEXT,
+          decision_rationale  TEXT,
+          PRIMARY KEY (candidate_skill_id, proposed_target)
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_spq_pg_status ON skill_promotion_queue_pg(status, surfaced_at)`);
+    },
+  },
+
+  {
+    id: 10,
+    description: "v0.18.1: mutation_results_pg — side-channel for full-fidelity mutation candidate bodies (option-b)",
+    up: async (client) => {
+      // PG mirror of mutation_results (SQLite migration 24). Standard PG types
+      // only — works on local PG, docker PG, RDS, Supabase, etc. No extensions
+      // required.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS mutation_results_pg (
+          result_id        TEXT PRIMARY KEY,
+          mutation_id      TEXT NOT NULL,
+          skill_id         TEXT NOT NULL,
+          project_hash     TEXT NOT NULL,
+          proposer_model   TEXT,
+          proposer_role    TEXT,
+          candidate_count  INTEGER NOT NULL,
+          best_score       NUMERIC(8,6),
+          bodies           TEXT NOT NULL,
+          bodies_hash      TEXT NOT NULL,
+          headline         TEXT,
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          consumed_at      TIMESTAMPTZ,
+          consumed_by      TEXT
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mres_pg_mutation ON mutation_results_pg(mutation_id, created_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mres_pg_skill    ON mutation_results_pg(skill_id, created_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mres_pg_project  ON mutation_results_pg(project_hash, created_at DESC)`);
+    },
+  },
+
+  {
+    id: 11,
+    description: "v0.18.2 Sprint 2.6: operator review columns on mutation_results_pg + skill_runs_pg",
+    up: async (client) => {
+      // Idempotent ADD COLUMN IF NOT EXISTS (PG 9.6+).
+      await client.query(`ALTER TABLE mutation_results_pg ADD COLUMN IF NOT EXISTS original_task_id       TEXT`);
+      await client.query(`ALTER TABLE mutation_results_pg ADD COLUMN IF NOT EXISTS original_role          TEXT`);
+      await client.query(`ALTER TABLE mutation_results_pg ADD COLUMN IF NOT EXISTS consumed_decision      TEXT CHECK (consumed_decision IN ('approved','rejected') OR consumed_decision IS NULL)`);
+      await client.query(`ALTER TABLE mutation_results_pg ADD COLUMN IF NOT EXISTS picked_candidate_index INTEGER`);
+      await client.query(`ALTER TABLE skill_runs_pg       ADD COLUMN IF NOT EXISTS was_retry_after_promotion BOOLEAN NOT NULL DEFAULT FALSE`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mres_pg_pending ON mutation_results_pg(project_hash, consumed_at, created_at DESC)`);
+    },
+  },
+
 ];
 
 /**

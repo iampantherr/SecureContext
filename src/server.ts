@@ -814,6 +814,163 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_skill_pending_promotions",
+    description:
+      "v0.18.1 — List skill promotion candidates awaiting operator review. Each row has " +
+      "candidate_skill_id (per-project version that beat global by ≥10% in ≥2 projects), " +
+      "best_avg / global_avg, project_count, surfaced_at/by. Use zc_skill_approve_promotion " +
+      "or zc_skill_reject_promotion to act on each.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "zc_skill_approve_promotion",
+    description:
+      "v0.18.1 — Approve a pending global-promotion candidate. Atomic: marks the row " +
+      "approved + exports the candidate's body + imports as global scope. The new global " +
+      "version supersedes the prior global on next zc_skill_show. Operator-gated; rationale required.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        candidate_skill_id: { type: "string", description: "The candidate's full skill_id (name@version@scope)" },
+        rationale:          { type: "string", description: "Why this is being approved (audit trail)" },
+        proposed_target:    { type: "string", description: "Target scope. Default 'global'." },
+      },
+      required: ["candidate_skill_id", "rationale"],
+    },
+  },
+  {
+    name: "zc_skill_reject_promotion",
+    description:
+      "v0.18.1 — Reject a pending global-promotion candidate. Marks the row rejected with " +
+      "rationale; row stays in the queue for audit but won't surface in zc_skill_pending_promotions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        candidate_skill_id: { type: "string", description: "The candidate's full skill_id" },
+        rationale:          { type: "string", description: "Why this is being rejected" },
+        proposed_target:    { type: "string", description: "Target scope. Default 'global'." },
+      },
+      required: ["candidate_skill_id", "rationale"],
+    },
+  },
+  {
+    name: "zc_record_skill_outcome",
+    description:
+      "v0.18.1 — Worker-agent (developer/researcher/etc.) tool: report the outcome of running a skill " +
+      "against a fixture or task input. Atomically writes a row to skill_runs (telemetry) AND, when " +
+      "the run failed or scored below threshold, an outcome row with refType='skill_run' (which " +
+      "triggers the L1 mutation hook if ZC_L1_MUTATION_ENABLED=1). This is the canonical way for " +
+      "agents to close the feedback loop on a skill — failed runs become learning signal that the " +
+      "mutator agent can act on autonomously.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        skill_id:      { type: "string", description: "Full skill_id (name@version@scope) of the skill that was run." },
+        fixture_id:    { type: "string", description: "Optional: fixture identifier for traceability (e.g. 'happy', 'edge-case-null')." },
+        inputs:        { type: "object", description: "The actual inputs the skill was run with (becomes the inputs JSON of the skill_run row)." },
+        status:        { type: "string", enum: ["succeeded", "failed", "timeout"], description: "Run status. 'failed' or 'timeout' will trigger the L1 mutation hook." },
+        outcome_score: { type: "number", description: "Optional 0..1 score. Below 0.5 also triggers the L1 mutation hook even if status='succeeded'." },
+        failure_trace: { type: "string", description: "Required when status='failed' — short description of what went wrong." },
+        duration_ms:   { type: "number", description: "Wall-clock duration of the run in ms." },
+        total_cost:    { type: "number", description: "USD cost of the run (default 0)." },
+        total_tokens:  { type: "number", description: "Total tokens consumed in the run (default 0)." },
+        task_id:       { type: "string", description: "Optional: ID of the parent task the skill was running for (links skill_run → task_queue_pg)." },
+        session_id:    { type: "string", description: "Optional: session id (default 'agent-session')." },
+        was_retry_after_promotion: { type: "boolean", description: "v0.18.2 retry-cap: set TRUE when you are processing an auto-reassigned retry task (the task payload had retry_after_promotion=true). Failures flagged this way will NOT auto-mutate — they surface to the operator instead, preventing an infinite mutate→approve→fail→mutate loop." },
+      },
+      required: ["skill_id", "inputs", "status"],
+    },
+  },
+  {
+    name: "zc_record_mutation_result",
+    description:
+      "v0.18.1 — Mutator-agent-only. Persist mutation candidate bodies to the side-channel " +
+      "(mutation_results table) and return a tamper-evident pointer {result_id, bodies_hash, " +
+      "headline}. Use this BEFORE broadcasting STATUS state=mutation-result — put the pointer " +
+      "in the broadcast summary instead of inlining the bodies (which would blow the 1000-char " +
+      "summary cap and bloat zc_recall_context). The body lives here; consumers fetch via " +
+      "result_id and verify against bodies_hash.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mutation_id:    { type: "string", description: "Task ID of the mutation request being processed (mut-<uuid>)." },
+        skill_id:       { type: "string", description: "Full skill_id of the parent skill being mutated (name@version@scope)." },
+        proposer_model: { type: "string", description: "Model used to generate candidates (e.g. 'claude-sonnet-4-6')." },
+        proposer_role:  { type: "string", description: "Agent role of the proposer (default 'mutator')." },
+        bodies: {
+          type: "array",
+          description: "Array of candidate proposals. Each item: {candidate_body, rationale, self_rated_score}.",
+          items: {
+            type: "object",
+            properties: {
+              candidate_body:   { type: "string", description: "Full markdown body (no frontmatter) for this candidate." },
+              rationale:        { type: "string", description: "Why this candidate is a good fix." },
+              self_rated_score: { type: "number", description: "Self-rated quality score 0..1." },
+            },
+            required: ["candidate_body", "rationale", "self_rated_score"],
+          },
+        },
+        headline:          { type: "string", description: "Optional short summary for the broadcast pointer (auto-generated if omitted)." },
+        original_task_id:  { type: "string", description: "v0.18.2 — copy from the mutation task's payload.original_task_id; populates the row so the eventual approval flow can auto-reassign a retry to the same task lineage." },
+        original_role:     { type: "string", description: "v0.18.2 — copy from the mutation task's payload.original_role (typically 'developer'); used by the auto-reassign flow." },
+      },
+      required: ["mutation_id", "skill_id", "bodies"],
+    },
+  },
+  {
+    name: "zc_mutation_pending",
+    description:
+      "v0.18.2 Sprint 2.6 — Operator review tool. Lists mutation candidate bundles awaiting " +
+      "your decision (consumed_at IS NULL) for the current project. Returns each result's " +
+      "skill being mutated, candidate count, best score, headline, AND all candidate bodies " +
+      "inline so you can read them without a second round-trip. Use zc_mutation_approve to " +
+      "promote a specific candidate, or zc_mutation_reject to discard the entire bundle.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max number of pending bundles to return (default 20)." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "zc_mutation_approve",
+    description:
+      "v0.18.2 Sprint 2.6 — Operator approval. Atomically: (1) builds a new skill version with " +
+      "the picked candidate body, (2) archives the current active version, (3) upserts the new " +
+      "version, (4) marks the mutation_result consumed=approved with rationale, (5) optionally " +
+      "auto-reassigns a retry task to the original role with retry_after_promotion=true, and " +
+      "(6) broadcasts STATUS state='skill-promoted' so the orchestrator + dashboard see it. " +
+      "The retry-cap safeguard ensures that if the new version still fails, no further mutation " +
+      "auto-fires — the operator must intervene.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        result_id:         { type: "string", description: "The mres-<uuid> from zc_mutation_pending." },
+        picked_candidate_index: { type: "number", description: "0-based index of the candidate in the bundle's bodies[] you want to promote." },
+        rationale:         { type: "string", description: "Why this candidate was chosen (audit trail)." },
+        auto_reassign:     { type: "boolean", description: "Default true: enqueue a retry task to the original role so the dev re-runs fixtures against the new version. Set false for a quiet promotion." },
+      },
+      required: ["result_id", "picked_candidate_index", "rationale"],
+    },
+  },
+  {
+    name: "zc_mutation_reject",
+    description:
+      "v0.18.2 Sprint 2.6 — Operator rejection. Marks the mutation_result consumed=rejected " +
+      "with rationale. The current active skill version is unchanged. The mutator's cooldown " +
+      "guardrail will prevent immediate re-mutation; if the same skill keeps failing, a fresh " +
+      "L1 cycle will fire after the cooldown window expires.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        result_id: { type: "string", description: "The mres-<uuid> from zc_mutation_pending." },
+        rationale: { type: "string", description: "Why all candidates were rejected (audit trail)." },
+      },
+      required: ["result_id", "rationale"],
+    },
+  },
+  {
     name: "zc_enqueue_task",
     description:
       "v0.17.0 §8.2 — Enqueue a task into the work-stealing queue (task_queue_pg). " +
@@ -2127,6 +2284,499 @@ async function dispatchToolCall(
         }
       }
 
+      // ── v0.18.1 — Skill promotion queue MCP tools ─────────────────────────
+      case "zc_skill_pending_promotions": {
+        const { DatabaseSync: SppDb } = await import("node:sqlite");
+        const { mkdirSync: sppMkd } = await import("node:fs");
+        const { join: sppJoin } = await import("node:path");
+        const { createHash: sppHash } = await import("node:crypto");
+        sppMkd(Config.DB_DIR, { recursive: true });
+        const sppDbFile = sppJoin(Config.DB_DIR, `${sppHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const sppDb = new SppDb(sppDbFile);
+        sppDb.exec("PRAGMA journal_mode = WAL");
+        const { listPending } = await import("./skills/promotion_queue.js");
+        const pending = await listPending(sppDb);
+        sppDb.close();
+        const lines: string[] = [`## Skill promotion candidates (${pending.length} pending)`];
+        if (pending.length === 0) lines.push(`(no candidates awaiting review — run cron to surface, or wait for cross-project signal)`);
+        for (const p of pending) {
+          lines.push(`- **${p.candidate_skill_id}** → ${p.proposed_target}`);
+          lines.push(`  best_avg: ${p.best_avg?.toFixed(3) ?? '?'} > global_avg: ${p.global_avg?.toFixed(3) ?? '?'}  on ${p.project_count ?? '?'} project(s)`);
+          lines.push(`  surfaced: ${p.surfaced_at} by ${p.surfaced_by}`);
+        }
+        if (pending.length > 0) {
+          lines.push(``);
+          lines.push(`Use zc_skill_approve_promotion(candidate_skill_id, rationale) to approve;`);
+          lines.push(`     zc_skill_reject_promotion(candidate_skill_id, rationale) to reject.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_skill_approve_promotion": {
+        const { candidate_skill_id, rationale, proposed_target } = args as { candidate_skill_id: string; rationale: string; proposed_target?: string };
+        const { DatabaseSync: SapDb } = await import("node:sqlite");
+        const { mkdirSync: sapMkd } = await import("node:fs");
+        const { join: sapJoin } = await import("node:path");
+        const { createHash: sapHash } = await import("node:crypto");
+        sapMkd(Config.DB_DIR, { recursive: true });
+        const sapDbFile = sapJoin(Config.DB_DIR, `${sapHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const sapDb = new SapDb(sapDbFile);
+        sapDb.exec("PRAGMA journal_mode = WAL");
+        try {
+          const target = proposed_target ?? "global";
+          // 1. Look up the candidate skill (it lives at its own scope; export its body)
+          const { getSkillById, upsertSkill } = await import("./skills/storage_dual.js");
+          const candidate = await getSkillById(sapDb, candidate_skill_id);
+          if (!candidate) {
+            sapDb.close();
+            return { content: [{ type: "text", text: `Candidate ${candidate_skill_id} not found.` }], isError: true };
+          }
+          // 2. Build a new global-scoped skill from the candidate's body + frontmatter
+          //    (drop project-specific scope, bump version)
+          const { buildSkill } = await import("./skills/loader.js");
+          // Compute next version: take parent name's current global active, bump
+          const { getActiveSkill } = await import("./skills/storage_dual.js");
+          const currentGlobal = await getActiveSkill(sapDb, candidate.frontmatter.name, "global");
+          const nextVersion = currentGlobal ? bumpMinor(currentGlobal.frontmatter.version) : candidate.frontmatter.version;
+          const newSkill = await buildSkill(
+            { ...candidate.frontmatter, scope: target as "global" | `project:${string}`, version: nextVersion },
+            candidate.body,
+            { promoted_from: candidate.skill_id },
+          );
+          // 3. Atomic: archive current global (if any) + insert new + mark queue row approved
+          const { archiveSkill } = await import("./skills/storage_dual.js");
+          const { approvePromotion } = await import("./skills/promotion_queue.js");
+          sapDb.exec("BEGIN");
+          try {
+            if (currentGlobal) await archiveSkill(sapDb, currentGlobal.skill_id, `superseded by promoted candidate ${candidate.skill_id}`);
+            await upsertSkill(sapDb, newSkill);
+            await approvePromotion(sapDb, candidate_skill_id, AGENT_ID || "operator", rationale, target);
+            sapDb.exec("COMMIT");
+          } catch (e) {
+            sapDb.exec("ROLLBACK");
+            sapDb.close();
+            return { content: [{ type: "text", text: `Promotion failed: ${(e as Error).message}` }], isError: true };
+          }
+          sapDb.close();
+          return { content: [{ type: "text", text: `✓ Promoted ${candidate.skill_id} → ${newSkill.skill_id}\n  rationale: ${rationale}\n  superseded: ${currentGlobal?.skill_id ?? "(no prior global)"}` }] };
+        } catch (e) {
+          try { sapDb.exec("ROLLBACK"); } catch { /* noop */ }
+          sapDb.close();
+          return { content: [{ type: "text", text: `Approval error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      case "zc_skill_reject_promotion": {
+        const { candidate_skill_id, rationale, proposed_target } = args as { candidate_skill_id: string; rationale: string; proposed_target?: string };
+        const { DatabaseSync: SrpDb } = await import("node:sqlite");
+        const { mkdirSync: srpMkd } = await import("node:fs");
+        const { join: srpJoin } = await import("node:path");
+        const { createHash: srpHash } = await import("node:crypto");
+        srpMkd(Config.DB_DIR, { recursive: true });
+        const srpDbFile = srpJoin(Config.DB_DIR, `${srpHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const srpDb = new SrpDb(srpDbFile);
+        srpDb.exec("PRAGMA journal_mode = WAL");
+        const { rejectPromotion } = await import("./skills/promotion_queue.js");
+        const ok = await rejectPromotion(srpDb, candidate_skill_id, AGENT_ID || "operator", rationale, proposed_target ?? "global");
+        srpDb.close();
+        if (!ok) return { content: [{ type: "text", text: `No pending entry found for ${candidate_skill_id} (already decided?).` }], isError: true };
+        return { content: [{ type: "text", text: `✗ Rejected ${candidate_skill_id}\n  rationale: ${rationale}` }] };
+      }
+
+      // ── v0.18.1 — Worker-agent skill outcome reporter ─────────────────────
+      // Atomically writes skill_runs row + (on failure / low score) outcome row.
+      // The outcome write triggers the L1 mutation hook if ZC_L1_MUTATION_ENABLED=1.
+      case "zc_record_skill_outcome": {
+        const { skill_id, fixture_id, inputs, status, outcome_score, failure_trace,
+                duration_ms, total_cost, total_tokens, task_id, session_id,
+                was_retry_after_promotion } = args as {
+          skill_id: string;
+          fixture_id?: string;
+          inputs: Record<string, unknown>;
+          status: "succeeded" | "failed" | "timeout";
+          outcome_score?: number;
+          failure_trace?: string;
+          duration_ms?: number;
+          total_cost?: number;
+          total_tokens?: number;
+          task_id?: string;
+          session_id?: string;
+          was_retry_after_promotion?: boolean;
+        };
+        if (!skill_id || !inputs || !status) {
+          return { content: [{ type: "text", text: "skill_id, inputs, and status are required." }], isError: true };
+        }
+        if (!["succeeded", "failed", "timeout"].includes(status)) {
+          return { content: [{ type: "text", text: `status must be one of: succeeded, failed, timeout (got ${status}).` }], isError: true };
+        }
+
+        const { DatabaseSync: RsoDb } = await import("node:sqlite");
+        const { mkdirSync: rsoMkd } = await import("node:fs");
+        const { join: rsoJoin } = await import("node:path");
+        const { createHash: rsoHash, randomUUID: rsoUUID } = await import("node:crypto");
+        rsoMkd(Config.DB_DIR, { recursive: true });
+        const rsoProjectHash = rsoHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const rsoDbFile = rsoJoin(Config.DB_DIR, `${rsoProjectHash}.db`);
+        const rsoDb = new RsoDb(rsoDbFile);
+        rsoDb.exec("PRAGMA journal_mode = WAL");
+        try {
+          const runId = `run-${rsoUUID().slice(0, 12)}`;
+          const ts = new Date().toISOString();
+          const { recordSkillRun } = await import("./skills/storage_dual.js");
+          await recordSkillRun(rsoDb, {
+            run_id:        runId,
+            skill_id,
+            session_id:    session_id ?? "agent-session",
+            task_id:       task_id ?? null,
+            inputs,
+            outcome_score: typeof outcome_score === "number" ? outcome_score : (status === "succeeded" ? 1.0 : 0),
+            total_cost:    typeof total_cost === "number" ? total_cost : 0,
+            total_tokens:  typeof total_tokens === "number" ? total_tokens : 0,
+            duration_ms:   typeof duration_ms === "number" ? duration_ms : 0,
+            status,
+            failure_trace: failure_trace ?? null,
+            ts,
+            was_retry_after_promotion: was_retry_after_promotion === true,
+          }, PROJECT_PATH);
+
+          // Decide whether to record an outcome row (and thereby trigger L1).
+          // Failures, timeouts, and low scores all signal the skill needs work.
+          const isFailureLike =
+            status === "failed" || status === "timeout" ||
+            (typeof outcome_score === "number" && outcome_score < 0.5);
+          let outcomeId: string | null = null;
+          let l1Triggered = false;
+
+          if (isFailureLike) {
+            const { recordOutcome } = await import("./outcomes.js");
+            const outcomeKind: "failed" | "errored" =
+              status === "timeout" ? "errored" : "failed";
+            const result = await recordOutcome({
+              refType:          "skill_run",
+              refId:            runId,
+              outcomeKind,
+              signalSource:     "manual",
+              confidence:       1.0,
+              evidence:         { fixture_id: fixture_id ?? null, failure_trace: failure_trace ?? null, status },
+              projectPath:      PROJECT_PATH,
+              createdByAgentId: AGENT_ID || "worker",
+            });
+            outcomeId = result?.outcome_id ?? null;
+            // L1 fires inside recordOutcome when ZC_L1_MUTATION_ENABLED=1.
+            // We surface a hint based on the env so the agent knows what to expect.
+            l1Triggered = process.env.ZC_L1_MUTATION_ENABLED === "1";
+          }
+
+          rsoDb.close();
+          const summary = {
+            run_id: runId,
+            skill_id,
+            status,
+            outcome_id: outcomeId,
+            l1_trigger_eligible: isFailureLike,
+            l1_env_enabled: process.env.ZC_L1_MUTATION_ENABLED === "1",
+          };
+          const lines: string[] = [];
+          lines.push(`✓ Recorded skill_run ${runId} (status=${status}${typeof outcome_score === "number" ? `, score=${outcome_score}` : ""})`);
+          if (isFailureLike) {
+            lines.push(`✓ Recorded outcome ${outcomeId ?? "(null)"} (kind=${status === "timeout" ? "errored" : "failed"})`);
+            if (l1Triggered) {
+              lines.push(`→ L1 mutation hook fired (ZC_L1_MUTATION_ENABLED=1). If guardrails pass, a mutator task will be queued shortly. Check task_queue_pg WHERE role='mutator'.`);
+            } else {
+              lines.push(`(L1 mutation hook is DISABLED — set ZC_L1_MUTATION_ENABLED=1 in the MCP server env to enable autonomous mutation.)`);
+            }
+          } else {
+            lines.push(`(no outcome row written — run was successful and no mutation needed)`);
+          }
+          lines.push(``);
+          lines.push("```json");
+          lines.push(JSON.stringify(summary, null, 2));
+          lines.push("```");
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        } catch (e) {
+          try { rsoDb.close(); } catch { /* noop */ }
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      // ── v0.18.1 — Mutation results side-channel (option-b) ────────────────
+      case "zc_record_mutation_result": {
+        const { mutation_id, skill_id, proposer_model, proposer_role, bodies, headline,
+                original_task_id, original_role } = args as {
+          mutation_id: string;
+          skill_id: string;
+          proposer_model?: string;
+          proposer_role?: string;
+          bodies: Array<{ candidate_body: string; rationale: string; self_rated_score: number }>;
+          headline?: string;
+          original_task_id?: string;
+          original_role?: string;
+        };
+        if (!mutation_id || !skill_id || !Array.isArray(bodies)) {
+          return { content: [{ type: "text", text: "mutation_id, skill_id, and bodies[] are required." }], isError: true };
+        }
+        const { DatabaseSync: MrDb } = await import("node:sqlite");
+        const { mkdirSync: mrMkd } = await import("node:fs");
+        const { join: mrJoin } = await import("node:path");
+        const { createHash: mrHash } = await import("node:crypto");
+        mrMkd(Config.DB_DIR, { recursive: true });
+        const projectHash = mrHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const mrDbFile = mrJoin(Config.DB_DIR, `${projectHash}.db`);
+        const mrDb = new MrDb(mrDbFile);
+        mrDb.exec("PRAGMA journal_mode = WAL");
+        try {
+          const { recordMutationResult } = await import("./skills/mutation_results.js");
+          const pointer = await recordMutationResult(mrDb, {
+            mutation_id, skill_id, project_hash: projectHash,
+            proposer_model, proposer_role, bodies, headline,
+            original_task_id, original_role,
+          });
+          mrDb.close();
+          // Return the pointer as both text + structured payload. Mutator agent
+          // includes this pointer in its STATUS broadcast summary (under 1KB).
+          const payload = {
+            result_id:   pointer.result_id,
+            mutation_id: pointer.mutation_id,
+            bodies_hash: pointer.bodies_hash,
+            headline:    pointer.headline,
+          };
+          return {
+            content: [{
+              type: "text",
+              text:
+                `✓ Mutation result persisted (${bodies.length} candidate${bodies.length === 1 ? "" : "s"}).\n` +
+                `result_id:   ${pointer.result_id}\n` +
+                `bodies_hash: ${pointer.bodies_hash}\n` +
+                `headline:    ${pointer.headline}\n\n` +
+                `Now broadcast STATUS state='mutation-result' with summary=${JSON.stringify(payload)}`,
+            }],
+          };
+        } catch (e) {
+          mrDb.close();
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      // ── v0.18.2 Sprint 2.6 — Operator review + auto-reassign ──────────────
+      case "zc_mutation_pending": {
+        const { limit } = args as { limit?: number };
+        const { DatabaseSync: MpDb } = await import("node:sqlite");
+        const { mkdirSync: mpMkd } = await import("node:fs");
+        const { join: mpJoin } = await import("node:path");
+        const { createHash: mpHash } = await import("node:crypto");
+        mpMkd(Config.DB_DIR, { recursive: true });
+        const projectHash = mpHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const mpDb = new MpDb(mpJoin(Config.DB_DIR, `${projectHash}.db`));
+        mpDb.exec("PRAGMA journal_mode = WAL");
+        try {
+          const { listPendingForProject } = await import("./skills/mutation_results.js");
+          const pending = await listPendingForProject(mpDb, projectHash, limit ?? 20);
+          mpDb.close();
+          if (pending.length === 0) {
+            return { content: [{ type: "text", text: "No mutation results pending review for this project." }] };
+          }
+          const lines: string[] = [`# Pending mutation reviews (${pending.length})`, ""];
+          for (const r of pending) {
+            lines.push(`---`);
+            lines.push(`## \`${r.result_id}\`  →  skill: \`${r.skill_id}\``);
+            lines.push(`- proposer: ${r.proposer_model ?? "?"} (${r.proposer_role ?? "?"})`);
+            lines.push(`- candidates: ${r.candidate_count}, best score: ${r.best_score?.toFixed(2) ?? "?"}`);
+            lines.push(`- headline: ${r.headline ?? "(none)"}`);
+            lines.push(`- created: ${r.created_at}`);
+            if (r.original_task_id) lines.push(`- original task: ${r.original_task_id} (role=${r.original_role ?? "?"})`);
+            lines.push(``);
+            lines.push(`### Candidate bodies`);
+            for (let i = 0; i < r.bodies.length; i++) {
+              const b = r.bodies[i];
+              lines.push(``);
+              lines.push(`**[#${i}] score=${b.self_rated_score} (${b.candidate_body.length} chars)**`);
+              lines.push(`> ${b.rationale}`);
+              lines.push("```markdown");
+              lines.push(b.candidate_body);
+              lines.push("```");
+            }
+            lines.push(``);
+            lines.push(`To approve: \`zc_mutation_approve({result_id:"${r.result_id}", picked_candidate_index: <0..${r.bodies.length - 1}>, rationale: "..."})\``);
+            lines.push(`To reject:  \`zc_mutation_reject({result_id:"${r.result_id}", rationale: "..."})\``);
+          }
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        } catch (e) {
+          try { mpDb.close(); } catch { /* noop */ }
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      case "zc_mutation_approve": {
+        const { result_id, picked_candidate_index, rationale, auto_reassign } = args as {
+          result_id: string;
+          picked_candidate_index: number;
+          rationale: string;
+          auto_reassign?: boolean;
+        };
+        if (!result_id || typeof picked_candidate_index !== "number" || !rationale) {
+          return { content: [{ type: "text", text: "result_id, picked_candidate_index (number), and rationale are required." }], isError: true };
+        }
+        const { DatabaseSync: MaDb } = await import("node:sqlite");
+        const { mkdirSync: maMkd } = await import("node:fs");
+        const { join: maJoin } = await import("node:path");
+        const { createHash: maHash } = await import("node:crypto");
+        maMkd(Config.DB_DIR, { recursive: true });
+        const projectHash = maHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const maDb = new MaDb(maJoin(Config.DB_DIR, `${projectHash}.db`));
+        maDb.exec("PRAGMA journal_mode = WAL");
+        try {
+          const { fetchByResultId, approveMutation } = await import("./skills/mutation_results.js");
+          const result = await fetchByResultId(maDb, result_id);
+          if (!result) {
+            maDb.close();
+            return { content: [{ type: "text", text: `Result ${result_id} not found OR bodies_hash mismatch (tampered).` }], isError: true };
+          }
+          if (result.consumed_at) {
+            maDb.close();
+            return { content: [{ type: "text", text: `Result ${result_id} already consumed (decision=${result.consumed_decision}).` }], isError: true };
+          }
+          if (picked_candidate_index < 0 || picked_candidate_index >= result.bodies.length) {
+            maDb.close();
+            return { content: [{ type: "text", text: `picked_candidate_index ${picked_candidate_index} out of range (bundle has ${result.bodies.length} candidates).` }], isError: true };
+          }
+          const picked = result.bodies[picked_candidate_index];
+
+          // Look up the active skill we're replacing
+          const { getActiveSkill, getSkillById, archiveSkill, upsertSkill } = await import("./skills/storage_dual.js");
+          const targetScope = `project:${projectHash}` as const;
+          const current = await getSkillById(maDb, result.skill_id);
+          if (!current) {
+            maDb.close();
+            return { content: [{ type: "text", text: `Skill ${result.skill_id} not found in storage.` }], isError: true };
+          }
+          // bumpPatch helper inline (vs. bumpMinor for L2/global promotions)
+          const bumpPatch = (v: string): string => {
+            const parts = v.split(".");
+            if (parts.length !== 3) return v + ".1";
+            const patch = parseInt(parts[2], 10);
+            return `${parts[0]}.${parts[1]}.${Number.isFinite(patch) ? patch + 1 : 1}`;
+          };
+          const newVersion = bumpPatch(current.frontmatter.version);
+          const { buildSkill } = await import("./skills/loader.js");
+          const newSkill = await buildSkill(
+            { ...current.frontmatter, version: newVersion },
+            picked.candidate_body,
+            { promoted_from: result_id },
+          );
+
+          // Atomic-ish: archive current → upsert new → mark consumed
+          await archiveSkill(maDb, current.skill_id, `promoted_to_${newSkill.skill_id}`);
+          await upsertSkill(maDb, newSkill);
+          await approveMutation(maDb, result_id, picked_candidate_index, rationale, AGENT_ID || "operator");
+
+          // Auto-reassign retry (default true)
+          let retryTaskId: string | null = null;
+          const shouldReassign = auto_reassign !== false; // default true
+          if (shouldReassign && result.original_role) {
+            try {
+              const { enqueueTask } = await import("./task_queue.js");
+              const { randomUUID } = await import("node:crypto");
+              retryTaskId = `retry-${randomUUID().slice(0, 12)}`;
+              await enqueueTask({
+                taskId: retryTaskId,
+                projectHash,
+                role: result.original_role,
+                payload: {
+                  kind:                  "skill-revalidation",
+                  skill_id:              newSkill.skill_id,
+                  fixtures:              newSkill.frontmatter.fixtures ?? [],
+                  retry_after_promotion: true,           // ← retry-cap flag
+                  origin_mutation_result: result_id,
+                  origin_task_id:        result.original_task_id,
+                  instructions:
+                    "v0.18.2 RETRY-AFTER-PROMOTION: re-run all skill fixtures against the new version. " +
+                    "For each fixture, call zc_record_skill_outcome with was_retry_after_promotion=TRUE " +
+                    "(this prevents infinite mutate→fail loops). Then broadcast STATUS state='retry-pass' " +
+                    "(or 'retry-fail') summarizing pass/fail counts.",
+                },
+              });
+            } catch (e) {
+              // Don't fail the approval if reassign couldn't enqueue
+              const { logger } = await import("./logger.js");
+              logger.error("skills", "auto_reassign_failed", { result_id, error: (e as Error).message });
+            }
+          }
+
+          // Broadcast skill-promoted so dashboard + orchestrator see it
+          try {
+            const { broadcastFact } = await import("./memory.js");
+            const summary = JSON.stringify({
+              prior_skill_id: current.skill_id,
+              new_skill_id:   newSkill.skill_id,
+              picked_index:   picked_candidate_index,
+              picked_score:   picked.self_rated_score,
+              from_result_id: result_id,
+              retry_task_id:  retryTaskId,
+              decided_by:     AGENT_ID || "operator",
+            }).slice(0, 1000);
+            broadcastFact(PROJECT_PATH, "STATUS", AGENT_ID || "operator", {
+              task: `skill-promoted:${newSkill.skill_id}`,
+              state: "skill-promoted",
+              summary,
+              importance: 4,
+            });
+          } catch { /* broadcast best-effort */ }
+
+          maDb.close();
+          const lines: string[] = [];
+          lines.push(`✓ Approved: ${result.skill_id} → **${newSkill.skill_id}** (candidate #${picked_candidate_index}, score ${picked.self_rated_score})`);
+          lines.push(`  rationale: ${rationale}`);
+          lines.push(`  prior version archived: ${current.skill_id}`);
+          if (retryTaskId) {
+            lines.push(`  ✓ auto-reassigned retry task ${retryTaskId} → role=${result.original_role}`);
+            lines.push(`  retry-cap: failures during retry will NOT auto-mutate (operator review required)`);
+          } else if (!shouldReassign) {
+            lines.push(`  (auto_reassign=false; no retry task enqueued)`);
+          } else {
+            lines.push(`  (no original_role recorded → retry not enqueued; assign manually if needed)`);
+          }
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        } catch (e) {
+          try { maDb.close(); } catch { /* noop */ }
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      case "zc_mutation_reject": {
+        const { result_id, rationale } = args as { result_id: string; rationale: string };
+        if (!result_id || !rationale) {
+          return { content: [{ type: "text", text: "result_id and rationale are required." }], isError: true };
+        }
+        const { DatabaseSync: MrjDb } = await import("node:sqlite");
+        const { mkdirSync: mrjMkd } = await import("node:fs");
+        const { join: mrjJoin } = await import("node:path");
+        const { createHash: mrjHash } = await import("node:crypto");
+        mrjMkd(Config.DB_DIR, { recursive: true });
+        const projectHash = mrjHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const mrjDb = new MrjDb(mrjJoin(Config.DB_DIR, `${projectHash}.db`));
+        mrjDb.exec("PRAGMA journal_mode = WAL");
+        try {
+          const { rejectMutation } = await import("./skills/mutation_results.js");
+          const ok = await rejectMutation(mrjDb, result_id, rationale, AGENT_ID || "operator");
+          mrjDb.close();
+          if (!ok) return { content: [{ type: "text", text: `Result ${result_id} not found or already consumed.` }], isError: true };
+          // Broadcast for visibility
+          try {
+            const { broadcastFact } = await import("./memory.js");
+            broadcastFact(PROJECT_PATH, "STATUS", AGENT_ID || "operator", {
+              task: `mutation-rejected:${result_id}`,
+              state: "mutation-rejected",
+              summary: JSON.stringify({ result_id, rationale: rationale.slice(0, 400) }).slice(0, 1000),
+              importance: 3,
+            });
+          } catch { /* best-effort */ }
+          return { content: [{ type: "text", text: `✗ Rejected ${result_id}\n  rationale: ${rationale}` }] };
+        } catch (e) {
+          try { mrjDb.close(); } catch { /* noop */ }
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
       // ── v0.17.0 §8.2 — work-stealing queue MCP tools ──────────────────────
       // All of these require the Postgres telemetry backend. The task_queue_pg
       // table lives in the same PG instance as tool_calls_pg / outcomes_pg
@@ -2226,6 +2876,13 @@ const AGENT_ID    = process.env.ZC_AGENT_ID    || "default";
 const AGENT_MODEL = process.env.ZC_AGENT_MODEL || "unknown";
 
 /** Classify an error for telemetry's error_class taxonomy. */
+/** v0.18.1 — bump the minor segment of a semver-ish string. Used by global skill promotion. */
+function bumpMinor(version: string): string {
+  const m = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return version + ".1";
+  return `${m[1]}.${Number(m[2]) + 1}.0`;
+}
+
 function classifyError(e: unknown): "transient" | "permission" | "logic" | "unknown" {
   const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
   if (msg.includes("timeout") || msg.includes("etimedout") || msg.includes("econnrefused")) return "transient";

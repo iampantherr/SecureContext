@@ -170,13 +170,15 @@ export function recordSkillRun(db: DatabaseSync, run: SkillRun): void {
   db.prepare(`
     INSERT INTO skill_runs (
       run_id, skill_id, session_id, task_id, inputs, outcome_score,
-      total_cost, total_tokens, duration_ms, status, failure_trace, ts
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      total_cost, total_tokens, duration_ms, status, failure_trace, ts,
+      was_retry_after_promotion
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     run.run_id, run.skill_id, run.session_id, run.task_id ?? null,
     JSON.stringify(run.inputs), run.outcome_score ?? null,
     run.total_cost ?? null, run.total_tokens ?? null, run.duration_ms ?? null,
     run.status, run.failure_trace ?? null, run.ts,
+    run.was_retry_after_promotion ? 1 : 0,
   );
 }
 

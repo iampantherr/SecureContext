@@ -737,6 +737,101 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 23,
+    description: "v0.18.1: skill_promotion_queue — operator-gated cross-project → global promotion ledger",
+    up: (db) => {
+      // L2 of the two-tier improvement loop. Cron (or manual) inserts
+      // candidates surfaced by findGlobalPromotionCandidates with
+      // status='pending'. Operator runs zc_skill_pending_promotions to
+      // see them, then zc_skill_approve_promotion / zc_skill_reject_promotion.
+      // Approved promotions atomically export+import to global scope.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill_promotion_queue (
+          candidate_skill_id  TEXT NOT NULL,
+          proposed_target     TEXT NOT NULL DEFAULT 'global',
+          surfaced_at         TEXT NOT NULL,
+          surfaced_by         TEXT NOT NULL CHECK(surfaced_by IN ('cron','manual')),
+          best_avg            REAL,
+          global_avg          REAL,
+          project_count       INTEGER,
+          status              TEXT NOT NULL DEFAULT 'pending'
+                              CHECK(status IN ('pending','approved','rejected','superseded')),
+          decided_at          TEXT,
+          decided_by          TEXT,
+          decision_rationale  TEXT,
+          PRIMARY KEY (candidate_skill_id, proposed_target)
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_spq_status ON skill_promotion_queue(status, surfaced_at);`);
+    },
+  },
+
+  {
+    id: 24,
+    description: "v0.18.1: mutation_results — side-channel for full-fidelity mutation candidate bodies (option-b architecture)",
+    up: (db) => {
+      // Mutation candidate bodies can be large (5+ markdown bodies per result,
+      // each potentially many KB). Storing them in `broadcasts.summary` would
+      // (a) blow the 1000-char sanitize cap and (b) bloat every zc_recall_context
+      // call with multi-KB rows. Instead, the body lives here, and the broadcast
+      // carries a tiny pointer (mutation_id + result_id + bodies_hash) for
+      // tamper-evident reference. Pattern mirrors how PostBash hook archives
+      // tool_outputs to KB and stores only a pointer.
+      //
+      // bodies_hash is SHA-256 of the canonical bodies JSON. The broadcast
+      // includes the same hash, so consumers can verify the side-channel row
+      // has not been tampered with relative to what was originally announced.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mutation_results (
+          result_id        TEXT PRIMARY KEY,
+          mutation_id      TEXT NOT NULL,
+          skill_id         TEXT NOT NULL,
+          project_hash     TEXT NOT NULL,
+          proposer_model   TEXT,
+          proposer_role    TEXT,
+          candidate_count  INTEGER NOT NULL,
+          best_score       REAL,
+          bodies           TEXT NOT NULL,
+          bodies_hash      TEXT NOT NULL,
+          headline         TEXT,
+          created_at       TEXT NOT NULL,
+          consumed_at      TEXT,
+          consumed_by      TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mres_mutation ON mutation_results(mutation_id, created_at DESC);`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mres_skill ON mutation_results(skill_id, created_at DESC);`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mres_project ON mutation_results(project_hash, created_at DESC);`);
+    },
+  },
+
+  {
+    id: 25,
+    description: "v0.18.2 Sprint 2.6: operator review columns on mutation_results + skill_runs (retry-cap, auto-reassign, decision audit)",
+    up: (db) => {
+      // SQLite ALTER TABLE doesn't support multiple ADD COLUMN in one statement,
+      // and re-running migrations should be idempotent (the migrations harness
+      // wraps each in a transaction and skips already-applied IDs, so we don't
+      // have to guard the ADDs themselves — but defensive try/catch keeps the
+      // transaction alive if a column was manually added during dev).
+      const safeAdd = (table: string, col: string, def: string) => {
+        try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); } catch { /* column exists */ }
+      };
+      // mutation_results — operator decision + originating task context for auto-reassign
+      safeAdd("mutation_results", "original_task_id",       "TEXT");
+      safeAdd("mutation_results", "original_role",          "TEXT");
+      safeAdd("mutation_results", "consumed_decision",      "TEXT"); // 'approved' | 'rejected' | NULL
+      safeAdd("mutation_results", "picked_candidate_index", "INTEGER");
+      // skill_runs — retry-cap safeguard. When a worker runs a skill that was
+      // just promoted (task payload had retry_after_promotion=true), it sets
+      // this flag. The L1 trigger then SKIPS auto-mutation for runs flagged
+      // this way — preventing infinite mutate→approve→fail→mutate loops.
+      safeAdd("skill_runs", "was_retry_after_promotion", "INTEGER NOT NULL DEFAULT 0");
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mres_pending ON mutation_results(project_hash, consumed_at, created_at DESC);`);
+    },
+  },
+
 ];
 
 /**

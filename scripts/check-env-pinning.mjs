@@ -102,6 +102,14 @@ const OPERATIONAL = new Set([
   // at runtime in src/skills/mutator.ts; unknown values fall back to
   // local-mock + AUDIT log per RT-S2-05.
   "ZC_MUTATOR_MODEL",
+  // v0.18.1 — L1 outcome-trigger kill switch + guardrail tunables
+  "ZC_L1_MUTATION_ENABLED",
+  "ZC_MUTATION_COOLDOWN_HOURS",
+  "ZC_MUTATION_FAILURE_THRESHOLD",
+  "ZC_MUTATION_FAILURE_WINDOW",
+  "ZC_MUTATION_DAILY_CAP_PER_PROJECT",
+  "ZC_NIGHTLY_RUN_PROJECT_LEVEL_TOO",
+  "ZC_NIGHTLY_BROADCAST_ALERT",
 ]);
 
 // ─── Implementation ───────────────────────────────────────────────────────────

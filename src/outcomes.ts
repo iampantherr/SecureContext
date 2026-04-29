@@ -60,7 +60,12 @@ export type OutcomeKind =
   | "rejected"       // user_prompt sentiment = negative
   | "sufficient"     // tool_call achieved its purpose (no follow-up needed)
   | "insufficient"   // follow_up pattern detected (e.g. Read after summary)
-  | "errored";       // tool_call returned status=error
+  | "errored"        // tool_call returned status=error
+  // v0.18.1 — added so worker-agent skill outcome reporter (zc_record_skill_outcome)
+  // can produce a type-correct value for skill_run failures. The L1 mutation
+  // trigger already checks for this string at runtime; this just makes the
+  // TypeScript type agree with the runtime contract.
+  | "failed";        // skill_run fixture produced wrong output / threw error
 
 export type SignalSource = "git_commit" | "user_prompt" | "follow_up" | "manual";
 export type RefType      = "tool_call" | "task" | "skill_run" | "session";
@@ -140,7 +145,131 @@ export async function recordOutcome(input: RecordOutcomeInput): Promise<OutcomeR
     });
   } catch { /* never fail the outcome write due to feedback */ }
 
+  // v0.18.1 L1 — outcome-triggered skill mutation.
+  // When an outcome with kind in {failed, insufficient, errored, reverted, rejected}
+  // is tied to a skill_run (refType='skill_run'), check guardrails and if they pass
+  // enqueue a mutation request task. Best-effort — never throws.
+  //
+  // Disabled by default; enable per-project by setting
+  // ZC_L1_MUTATION_ENABLED=1 in the MCP server's env. Gives operators a
+  // kill switch without touching code.
+  if (process.env.ZC_L1_MUTATION_ENABLED === "1"
+      && input.refType === "skill_run"
+      && ["failed","insufficient","errored","reverted","rejected"].includes(input.outcomeKind)) {
+    try {
+      await maybeTriggerL1Mutation(input.projectPath, input.refId);
+    } catch { /* never fail outcome write due to L1 trigger */ }
+  }
+
   return record;
+}
+
+/**
+ * Internal helper for the L1 trigger. Looks up the skill_id from the
+ * skill_run row, runs guardrails, and (if pass) enqueues a `role='mutator'`
+ * task with the right payload.
+ */
+async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promise<void> {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { join } = await import("node:path");
+  const { mkdirSync } = await import("node:fs");
+  const { createHash } = await import("node:crypto");
+  const { Config } = await import("./config.js");
+  mkdirSync(Config.DB_DIR, { recursive: true });
+  const dbPath = join(Config.DB_DIR, `${createHash("sha256").update(projectPath).digest("hex").slice(0,16)}.db`);
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA busy_timeout = 5000");
+    // Lookup skill_id from skill_runs (the run is the failure that triggered this outcome).
+    // v0.18.2 Sprint 2.6: also fetch was_retry_after_promotion + task_id so we can
+    //   (a) skip mutation when this run was an auto-reassigned retry of a just-promoted
+    //       version (avoid mutate→approve→fail→mutate infinite loop)
+    //   (b) capture original_task_id/original_role for the eventual auto-reassign
+    const row = db.prepare(
+      `SELECT skill_id, failure_trace, task_id, was_retry_after_promotion
+         FROM skill_runs WHERE run_id = ?`
+    ).get(runId) as { skill_id?: string; failure_trace?: string; task_id?: string; was_retry_after_promotion?: number } | undefined;
+    if (!row?.skill_id) return;
+    const { logger } = await import("./logger.js");
+    if (row.was_retry_after_promotion) {
+      // The retry-cap safeguard: a recently-promoted skill failed on its first
+      // post-promotion run. Don't spawn another mutation; this needs operator eyes.
+      logger.info("skills", "l1_mutation_skipped_retry_cap", {
+        skill_id: row.skill_id, run_id: runId, reason: "was_retry_after_promotion",
+      });
+      return;
+    }
+    const { checkMutationGuardrails } = await import("./skills/mutation_guardrails.js");
+    const guard = checkMutationGuardrails(db, row.skill_id);
+    if (!guard.trigger) {
+      logger.debug("skills", "l1_mutation_skipped", { skill_id: row.skill_id, reason: guard.reason, metrics: guard.metrics });
+      return;
+    }
+    // Resolve the skill so we can pass body + traces + fixtures into the mutator
+    const { getActiveSkill } = await import("./skills/storage.js");
+    const projectScope = `project:${createHash("sha256").update(projectPath).digest("hex").slice(0,16)}` as `project:${string}`;
+    const skill = await getActiveSkill(db, "skill_id_will_be_resolved_below" as never, projectScope).catch(() => null);
+    // The above would only work by name; fallback to direct skill_id lookup
+    const { getSkillById } = await import("./skills/storage.js");
+    const targetSkill = skill ?? await getSkillById(db, row.skill_id).catch(() => null);
+    if (!targetSkill) {
+      logger.debug("skills", "l1_mutation_skill_missing", { skill_id: row.skill_id });
+      return;
+    }
+    // Recent failure traces from skill_runs
+    const { getRecentSkillRuns } = await import("./skills/storage.js");
+    const recentRuns = getRecentSkillRuns(db, row.skill_id, 10);
+    const traces = recentRuns.filter((r) => r.failure_trace).map((r) => r.failure_trace as string);
+    // v0.18.2 Sprint 2.6 — capture the ORIGINAL task lineage so the eventual
+    // approval flow can auto-reassign a retry to the same role. Look up the
+    // task that produced this skill_run; if it had a payload.role, propagate it.
+    let originalRole: string | null = null;
+    const originalTaskId = row.task_id ?? null;
+    if (originalTaskId) {
+      // Best-effort PG lookup (task_queue is PG-only). Failures are logged but
+      // don't block mutation — auto-reassign just falls back to broadcasting
+      // a LAUNCH_ROLE-or-ASSIGN if the role can't be inferred.
+      try {
+        const { withClient } = await import("./pg_pool.js");
+        const r = await withClient(async (c) => {
+          const res = await c.query<{ role: string }>(
+            `SELECT role FROM task_queue_pg WHERE task_id = $1 LIMIT 1`, [originalTaskId],
+          );
+          return res.rows[0]?.role ?? null;
+        });
+        originalRole = r;
+      } catch { /* ignore — best-effort */ }
+    }
+
+    // Enqueue the mutation task — the mutator agent will pick it up
+    const { enqueueTask } = await import("./task_queue.js");
+    const { randomUUID } = await import("node:crypto");
+    const taskId = `mut-${randomUUID().slice(0, 12)}`;
+    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    await enqueueTask({
+      taskId,
+      projectHash,
+      role: "mutator",
+      payload: {
+        kind:                "skill-mutation",
+        mutation_id:         taskId,
+        skill_id:            row.skill_id,
+        skill_name:          targetSkill.frontmatter.name,
+        parent_body:         targetSkill.body,
+        failure_traces:      traces,
+        fixtures:            targetSkill.frontmatter.fixtures ?? [],
+        acceptance_criteria: targetSkill.frontmatter.acceptance_criteria ?? null,
+        triggered_by:        "l1-outcome",
+        // v0.18.2 — operator review / auto-reassign context
+        original_task_id:    originalTaskId,
+        original_role:       originalRole,
+      },
+    });
+    logger.info("skills", "l1_mutation_triggered", { skill_id: row.skill_id, task_id: taskId, reason: guard.reason });
+  } finally {
+    try { db.close(); } catch { /* noop */ }
+  }
 }
 
 async function _recordOutcomeViaApiPath(input: RecordOutcomeInput): Promise<OutcomeRecord | null> {

@@ -147,9 +147,31 @@ export async function createApiServer(storeOverride?: Store) {
   }
 
   // ── Auth + rate-limit hook (runs before every route handler) ────────────────
+  // v0.18.2 Sprint 2.6 — register a urlencoded body parser inline (avoids a
+  // new dependency on @fastify/formbody). HTMX forms POST as
+  // application/x-www-form-urlencoded; without this Fastify rejects them with
+  // 415 Unsupported Media Type.
+  app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" },
+    (_req, body, done) => {
+      try {
+        const params = new URLSearchParams(body as string);
+        const obj: Record<string, string> = {};
+        for (const [k, v] of params.entries()) obj[k] = v;
+        done(null, obj);
+      } catch (e) { done(e as Error, undefined); }
+    },
+  );
+
   app.addHook("preHandler", async (request, reply) => {
     // Health check is always open
     if (request.url === "/health") return;
+
+    // v0.18.2 Sprint 2.6 — operator dashboard. Local-only by design (HOST default
+    // 0.0.0.0 in dev, but operators are expected to firewall :3099 to localhost
+    // for now). Routes under /dashboard render HTML for browser viewing without
+    // an Authorization header. When a multi-tenant story lands (Sprint 3.x),
+    // these routes will gate via the existing per-project RBAC token system.
+    if (request.url === "/dashboard" || request.url.startsWith("/dashboard/")) return;
 
     // Per-IP rate limiting
     const ip = request.ip;
@@ -186,6 +208,118 @@ export async function createApiServer(storeOverride?: Store) {
       ts:              new Date().toISOString(),
     };
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // v0.18.2 Sprint 2.6 — Operator Dashboard
+  // ─────────────────────────────────────────────────────────────────────────
+  // Local-only HTMX dashboard for reviewing pending skill-mutation results
+  // and approving / rejecting them. Bypasses the API key auth (see preHandler
+  // exemption above) so it can be opened in a browser without setting headers.
+  // For a multi-tenant story (Sprint 3.x), replace this exemption with
+  // session-token gating via the existing RBAC system.
+
+  app.get("/dashboard", async (_request, reply) => {
+    const { renderDashboardHtml } = await import("./dashboard/render.js");
+    reply.type("text/html").send(renderDashboardHtml());
+  });
+
+  app.get("/dashboard/health", async (_request, _reply) => {
+    const { withClient } = await import("./pg_pool.js");
+    try {
+      const n = await withClient(async (c) => {
+        const res = await c.query<{ n: string }>(
+          `SELECT COUNT(*)::text AS n FROM mutation_results_pg WHERE consumed_at IS NULL`,
+        );
+        return Number(res.rows[0]?.n ?? 0);
+      });
+      return { pending_count: n, ts: new Date().toISOString() };
+    } catch (e) {
+      return { pending_count: 0, error: (e as Error).message, ts: new Date().toISOString() };
+    }
+  });
+
+  app.get("/dashboard/pending", async (_request, reply) => {
+    const { renderPendingFragment } = await import("./dashboard/render.js");
+    const { withClient } = await import("./pg_pool.js");
+    try {
+      const rows = await withClient(async (c) => {
+        const res = await c.query<Record<string, unknown>>(
+          `SELECT result_id, mutation_id, skill_id, project_hash, proposer_model,
+                  proposer_role, candidate_count, best_score, bodies, bodies_hash,
+                  headline, created_at, original_task_id, original_role
+             FROM mutation_results_pg
+            WHERE consumed_at IS NULL
+            ORDER BY created_at DESC LIMIT 50`,
+        );
+        return res.rows;
+      });
+      reply.type("text/html").send(renderPendingFragment(rows));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load pending: ${(e as Error).message}</div>`);
+    }
+  });
+
+  app.post("/dashboard/approve", async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    const result_id            = String(body.result_id ?? "").trim();
+    const confirm_id           = String(body.confirm_id ?? "").trim();
+    const picked_candidate_idx = Number(body.picked_candidate_index);
+    const rationale            = String(body.rationale ?? "").trim();
+    const auto_reassign        = body.auto_reassign === "on" || body.auto_reassign === "true" || body.auto_reassign === true;
+
+    if (!result_id || result_id !== confirm_id) {
+      reply.type("text/html").send(`<div class="error">❌ Confirmation failed: typed ID does not match result_id.</div>`);
+      return;
+    }
+    if (!Number.isFinite(picked_candidate_idx) || picked_candidate_idx < 0) {
+      reply.type("text/html").send(`<div class="error">❌ picked_candidate_index missing or invalid.</div>`);
+      return;
+    }
+    if (!rationale) {
+      reply.type("text/html").send(`<div class="error">❌ Rationale required.</div>`);
+      return;
+    }
+
+    try {
+      const { handleApproveFromDashboard } = await import("./dashboard/operator_review.js");
+      const result = await handleApproveFromDashboard({ result_id, picked_candidate_index: picked_candidate_idx, rationale, auto_reassign });
+      reply.type("text/html").send(
+        `<div class="ok">✓ Approved <code>${escapeHtml(result_id)}</code><br>` +
+        `→ promoted to <code>${escapeHtml(result.new_skill_id)}</code> (candidate #${picked_candidate_idx})<br>` +
+        (result.retry_task_id ? `→ auto-reassigned retry task <code>${escapeHtml(result.retry_task_id)}</code> to role <code>${escapeHtml(result.original_role ?? "?")}</code><br>` : `→ no auto-reassign (operator unchecked OR no original_role)<br>`) +
+        `</div>`,
+      );
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">❌ ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  app.post("/dashboard/reject", async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    const result_id  = String(body.result_id ?? "").trim();
+    const confirm_id = String(body.confirm_id ?? "").trim();
+    const rationale  = String(body.rationale ?? "").trim();
+
+    if (!result_id || result_id !== confirm_id) {
+      reply.type("text/html").send(`<div class="error">❌ Confirmation failed: typed ID does not match.</div>`);
+      return;
+    }
+    if (!rationale) {
+      reply.type("text/html").send(`<div class="error">❌ Rationale required.</div>`);
+      return;
+    }
+    try {
+      const { handleRejectFromDashboard } = await import("./dashboard/operator_review.js");
+      await handleRejectFromDashboard({ result_id, rationale });
+      reply.type("text/html").send(`<div class="ok">✗ Rejected <code>${escapeHtml(result_id)}</code></div>`);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">❌ ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  function escapeHtml(s: string): string {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // Working Memory

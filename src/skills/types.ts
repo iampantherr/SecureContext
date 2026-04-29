@@ -126,6 +126,11 @@ export interface SkillRun {
   status:        SkillRunStatus;
   failure_trace: string | null;
   ts:            string;
+  // v0.18.2 Sprint 2.6 — retry-cap safeguard. Set true by the worker when it
+  // is processing an auto-reassigned retry task (payload had retry_after_promotion=true).
+  // The L1 mutation trigger SKIPS mutation when the latest run for a skill was
+  // marked this way — preventing infinite mutate→approve→fail→mutate loops.
+  was_retry_after_promotion?: boolean;
 }
 
 /**

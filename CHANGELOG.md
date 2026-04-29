@@ -4,6 +4,152 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.2] — 2026-04-29 — Sprint 2.6: operator dashboard + auto-reassign + retry-cap safeguard
+
+Closes the human-in-the-loop gap on the autonomous self-improving skills cycle.
+After approve/reject, the system auto-enqueues a retry task to the original
+worker role with a `retry_after_promotion` flag — the L1 mutation hook reads
+this flag and *skips* further mutation on subsequent failures, preventing
+infinite mutate→approve→fail→mutate loops.
+
+Ships a local HTMX dashboard at `localhost:3099/dashboard` (vanilla HTML, no
+build step, embedded in `zc-ctx-api`) for one-click candidate review with
+type-id-confirm safeguard against misclicks. Browser desktop notifications
+opt-in for new pending reviews. Three notification layers (title-bar count,
+pulsing badge, OS-native popup).
+
+Driven through Playwright in a complete browser walkthrough: fresh L1 trigger
+→ mutator generates 5×3 candidate bundles → operator REJECTS one bundle via
+UI (verifies type-id-confirm + audit trail) → operator APPROVES another bundle
+via UI (atomic archive→upsert→consume→retry-enqueue→broadcast) → developer
+auto-claims retry within 5s → 3/3 fixtures pass on v1.0.1 with retry-cap flag
+set → loop closed. Test report at `docs/SPRINT_2_6_TEST_REPORT.md`.
+
+### Added — schema (mig 25 SQLite, mig 11 PG)
+
+- `mutation_results.{original_task_id, original_role, consumed_decision, picked_candidate_index}` — operator-decision audit + auto-reassign target
+- `skill_runs.was_retry_after_promotion` — retry-cap flag (the safety net)
+- `idx_mres_pending` — fast lookup of unconsumed bundles per project
+
+### Added — MCP tools
+
+- `zc_mutation_pending(limit?)` — list candidate bundles awaiting your decision (returns full bodies inline so you can review without a second round-trip)
+- `zc_mutation_approve(result_id, picked_candidate_index, rationale, auto_reassign?)` — atomic archive→upsert→consume→retry-enqueue→STATUS broadcast
+- `zc_mutation_reject(result_id, rationale)` — mark consumed_decision='rejected'; skill unchanged
+
+### Added — HTTP routes (in `src/api-server.ts`)
+
+- `GET /dashboard` — full HTML page (~6.8KB, vanilla + HTMX + custom CSS)
+- `GET /dashboard/health` — `{pending_count}` polled every 5s for title-bar badge
+- `GET /dashboard/pending` — HTML fragment, polled every 10s for the pending list
+- `POST /dashboard/approve` — urlencoded form handler → atomic transaction
+- `POST /dashboard/reject` — urlencoded form handler
+
+All `/dashboard/*` exempt from API key auth (local-only by design; Sprint 3.x will gate via existing RBAC tokens for multi-tenant).
+
+### Added — modules
+
+- `src/dashboard/operator_review.ts` (200 LoC) — shared approve/reject flow, used by both MCP tool dispatch + HTTP route handler
+- `src/dashboard/render.ts` (240 LoC) — server-rendered HTML/CSS + HTMX wiring + vanilla-JS badge polling
+
+### Changed — L1 trigger now respects retry-cap
+
+`maybeTriggerL1Mutation` reads `skill_runs.was_retry_after_promotion`; if true, skips mutation with `l1_mutation_skipped_retry_cap` log. Also captures `original_task_id` + `original_role` (best-effort PG lookup of the task that produced the failing skill_run) so the eventual approval flow can auto-reassign.
+
+### Bugs fixed mid-sprint
+
+1. **Fastify rejected urlencoded form bodies with HTTP 415** — added inline `application/x-www-form-urlencoded` parser (avoids new dep on `@fastify/formbody`)
+2. **Project SQLite DBs created before mig 25 lacked `consumed_decision` column** — `openProjectDb` now calls `runMigrations(db)` on every dashboard touch
+3. **HTMX `hx-swap=outerHTML` was eating the badge** — switched the badge to vanilla `setInterval` polling + `fetch('/dashboard/health')` + JS-driven update; browser desktop notification logic preserved (fires only when count rises and permission granted)
+
+### Tests
+
+- 828/828 PASS (no regressions from v0.18.1 baseline)
+- Live browser walkthrough: REJECT path verified, APPROVE+auto-reassign path verified, dev retry verified end-to-end
+
+## [0.18.1] — 2026-04-29 — Sprint 2.5: option-b side-channel + L1 trigger + Pro-plan mutator + operator-gated promotion
+
+Operationalizes the Sprint 2 mutation engine. Three big architectural moves:
+
+**1. Option-b side-channel for mutation candidate bodies.** Bodies are too large
+(typical 5×1.2KB ≈ 6KB per result) for the 1000-char `broadcasts.summary` cap.
+Option-a (bump cap to 5MB) was rejected — it bloats every `zc_recall_context`
+call and breaks SC's "small structured signals; raw content stays out of
+context" design contract. Option-b adds `mutation_results` (SQLite mig 24) +
+`mutation_results_pg` (PG mig 10, docker-compatible). Bodies live there;
+broadcasts carry only a tamper-evident pointer (`{result_id, bodies_hash,
+headline}`). SHA-256 of canonical-JSON-encoded bodies lets consumers verify
+the side-channel row hasn't been tampered with relative to what was announced.
+
+**2. CLI-based mutator (no Anthropic API key required).** `CliClaudeMutator`
+enqueues a task to `task_queue_pg` for a dedicated `mutator` agent role.
+The dispatcher SendKeys-nudges the mutator window; a real Claude Sonnet 4.6
+agent autonomously claims, generates 5 candidate bodies, and broadcasts the
+result pointer. Pro plan auth, $0 dollars per mutation, rate-limit-only.
+
+**3. L1 outcome-triggered mutation hook.** When `recordOutcome` writes a row
+with `refType='skill_run'` and a failed-kind outcomeKind (and `ZC_L1_MUTATION_ENABLED=1`),
+`maybeTriggerL1Mutation` checks guardrails (cooldown 6h, ≥3 failures in last
+10, daily cap 5) and enqueues a mutator task autonomously. Operator-tunable
+via env vars. Closes the agent → telemetry → autonomous-mutation feedback loop.
+
+Plus operator-gated cross-project → global promotion via `skill_promotion_queue`
+(SQLite mig 23 / PG mig 9) and three MCP tools (`zc_skill_pending_promotions`,
+`zc_skill_approve_promotion`, `zc_skill_reject_promotion`).
+
+Test report at `docs/SPRINT_2_5_TEST_REPORT.md`. End-to-end verified live with
+real Claude agents (orch + dev + mutator) on `Test_Agent_Coordination`: dev
+fails fixtures → L1 fires → mutator generates 5 candidates in ~70s → operator
+approves → dev re-validates v1.0.1 → 3/3 fixtures pass → loop closed.
+
+### Added — schema (mig 22 + 23 + 24 SQLite, mig 8 + 9 + 10 PG)
+
+- `mutation_results` / `mutation_results_pg` — side-channel for full-fidelity bodies + tamper-evidence (`bodies_hash`)
+- `skill_promotion_queue` / `skill_promotion_queue_pg` — operator-gated cross-project → global promotion ledger
+- `OutcomeKind` union extended with `"failed"` (the L1 trigger code already checked for it at runtime; type now matches)
+
+### Added — modules
+
+- `src/skills/mutation_results.ts` (290 LoC) — record/fetch/markConsumed + canonical JSON hash + tamper-detect on read
+- `src/skills/mutation_results.test.ts` (215 LoC, 11 tests) — including the headline `LARGE bodies (>>1KB each, 5 candidates) round-trip without truncation` test that proves option-b solves the truncation problem
+- `src/skills/mutation_guardrails.ts` (90 LoC) — cooldown / failure-threshold / daily-cap checks
+- `src/skills/mutation_guardrails.test.ts` (11 tests)
+- `src/skills/mutators/cli_claude.ts` (270 LoC) — Pro-plan mutator using broadcast-poll-with-watermark
+- `src/skills/mutators/cli_claude.test.ts` (13 tests) — including secret-scan rejection (RT-S2-07)
+- `src/skills/promotion_queue.ts` (180 LoC) + tests (7) — backend-aware approve/reject with audit trail
+
+### Added — MCP tools
+
+- `zc_record_skill_outcome` — worker-agent tool: atomically writes skill_run + (on failure) outcome row, triggering L1
+- `zc_record_mutation_result` — mutator-agent tool: persists bodies to side-channel, returns pointer for broadcast
+- `zc_skill_pending_promotions`, `zc_skill_approve_promotion`, `zc_skill_reject_promotion` — operator review tools (L2 cron-driven cross-project promotion)
+
+### Changed — orchestration & launch
+
+- `A2A_dispatcher/start-agents.ps1`: hardcodes `mutator` as always-on role (`-AlwaysOnRoles @("mutator")` default); orchestrator dynamically spawns developer/etc. via `LAUNCH_ROLE`
+- `A2A_dispatcher/spawn-agent.ps1`: now propagates the FULL operational env to LAUNCH_ROLE-spawned workers (`ZC_TELEMETRY_BACKEND`, `ZC_L1_MUTATION_ENABLED`, `ZC_POSTGRES_*`, `ZC_RBAC_ENFORCE`, `ZC_CHANNEL_KEY_REQUIRED`, mutation guardrail tunables) — fixes the silent gap where dynamically-spawned dev wrote telemetry to SQLite-only and L1 was disabled
+- `A2A_dispatcher/roles.json`: developer prompt extended with skill-execution + zc_record_skill_outcome protocol
+- `scripts/run-nightly-mutations.mjs`: rewritten — L2 only (cross-project candidate surfacing); per-project mutation now happens at L1 in real-time
+
+### Bugs fixed mid-sprint
+
+1. **`--thinking-budget` is not a Claude Code CLI flag** — earlier draft passed it; CLI rejected on argv parse, dispatcher SendKeys nudges then hit raw PowerShell. Removed entirely.
+2. **`spawn-agent.ps1` env propagation gap** — only `ZC_API_*` propagated to LAUNCH_ROLE-spawned workers; now mirrors `start-agents.ps1`'s full operational env list.
+
+### Tests
+
+- 786 → 828 (+42 net Sprint 2.5 tests, all passing)
+- Cumulative pass: 828/828
+
+### Operational env vars (new)
+
+- `ZC_L1_MUTATION_ENABLED` (0/1, default 0) — kill switch for L1 trigger
+- `ZC_MUTATION_COOLDOWN_HOURS` (default 6)
+- `ZC_MUTATION_FAILURE_THRESHOLD` (default 3) / `ZC_MUTATION_FAILURE_WINDOW` (default 10)
+- `ZC_MUTATION_DAILY_CAP_PER_PROJECT` (default 5)
+- `ZC_NIGHTLY_RUN_PROJECT_LEVEL_TOO` (0/1, default 0) — DR knob to keep v0.18.0 cron behavior
+- `ZC_NIGHTLY_BROADCAST_ALERT` (0/1, default 1)
+
 ## [0.18.0] — 2026-04-29 — Sprint 2 baseline: skill mutation engine + replay + agentskills.io interop
 
 The self-improving skill loop. Skills become first-class hash-protected

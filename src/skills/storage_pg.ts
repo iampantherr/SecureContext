@@ -135,14 +135,16 @@ export async function recordSkillRunPg(run: SkillRun, projectHash: string): Prom
     await c.query(`
       INSERT INTO skill_runs_pg (
         run_id, skill_id, project_hash, session_id, task_id, inputs, outcome_score,
-        total_cost, total_tokens, duration_ms, status, failure_trace, ts
+        total_cost, total_tokens, duration_ms, status, failure_trace, ts,
+        was_retry_after_promotion
       )
-      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW()))
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW()), $14)
       ON CONFLICT (run_id) DO NOTHING
     `, [
       run.run_id, run.skill_id, projectHash, run.session_id, run.task_id,
       JSON.stringify(run.inputs), run.outcome_score, run.total_cost, run.total_tokens,
       run.duration_ms, run.status, run.failure_trace, run.ts,
+      run.was_retry_after_promotion ?? false,
     ]);
   });
 }
@@ -287,6 +289,8 @@ export async function _dropSkillTablesForTesting(): Promise<void> {
     await c.query(`DROP TABLE IF EXISTS skill_mutations_pg CASCADE`);
     await c.query(`DROP TABLE IF EXISTS skill_runs_pg CASCADE`);
     await c.query(`DROP TABLE IF EXISTS skills_pg CASCADE`);
-    await c.query(`DELETE FROM schema_migrations_pg WHERE id IN (6, 7, 8)`);
+    // v0.18.2 Sprint 2.6: include mig 11 (adds was_retry_after_promotion to
+    // skill_runs_pg) so it re-applies on the freshly-recreated table.
+    await c.query(`DELETE FROM schema_migrations_pg WHERE id IN (6, 7, 8, 11)`);
   });
 }

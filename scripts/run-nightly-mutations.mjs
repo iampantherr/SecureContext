@@ -1,47 +1,37 @@
 #!/usr/bin/env node
 /**
- * Nightly mutation cycle entrypoint (v0.18.0)
- * ============================================
+ * Nightly cron entrypoint (v0.18.1 — two-tier model)
+ * ===================================================
  *
- * Standalone script to run the mutation engine across all active skills
- * for a project. Designed to be invoked by:
+ * In v0.18.0 this script ran a full mutation cycle on the bottom-N skills.
+ * In v0.18.1 the model splits into two layers:
  *
- *   - OS cron (Linux/macOS):
- *       0 2 * * *   ZC_POSTGRES_PASSWORD=… ZC_TELEMETRY_BACKEND=postgres \
- *                   ZC_MUTATOR_MODEL=batch-sonnet ANTHROPIC_API_KEY=sk-… \
- *                   /usr/bin/node /path/to/SecureContext/scripts/run-nightly-mutations.mjs \
- *                   --project /path/to/your/project >> /var/log/zc-nightly.log 2>&1
+ *   L1 (continuous, per-project): outcome-triggered mutations during the
+ *       day. The orchestrator's outcome resolver fires `enqueueTask` with
+ *       role='mutator' on real failures (guardrails apply); the dedicated
+ *       mutator agent picks them up + processes them in real-time.
  *
- *   - Windows Task Scheduler:
- *       Action: Start a program
- *       Program: node.exe
- *       Args: C:\path\to\SecureContext\scripts\run-nightly-mutations.mjs --project C:\your\project
- *       Trigger: Daily at 02:00 local
+ *   L2 (this script, nightly): cross-project promotion review. Walks
+ *       `findGlobalPromotionCandidates` to find per-project versions
+ *       outperforming the global by ≥10% across ≥2 projects. Inserts
+ *       candidates into `skill_promotion_queue`. Broadcasts an ALERT so
+ *       the operator sees them at the start of the next session.
  *
- * What it does:
- *   1. Loads project DB (SQLite + PG mirror per ZC_TELEMETRY_BACKEND)
- *   2. Selects bottom-N skills by recent avg outcome_score (default top-3)
- *   3. For each, runs `runMutationCycle` with the configured mutator
- *   4. Records ALL candidates to skill_mutations (SQLite + PG)
- *   5. Promotes winners; archives parents
- *   6. Emits structured JSON summary to stdout for log scraping
- *   7. Exits with code 0 on success, non-zero on hard error
+ * What this script no longer does:
+ *   - Run in-process mutation cycles (that's L1's job now)
+ *   - Use the API key (the mutator agent uses Pro-plan auth)
+ *   - Block on Anthropic API responses
  *
- * Cost (per nightly run with batch-sonnet):
- *   3 skills × 5 candidates × $0.012/cycle = ~$0.18/night → ~$5.40/month
+ * Cost (per nightly run):
+ *   - Postgres queries only — $0
+ *   - One broadcast — $0
  *
- * Cost (with local-mock — for testing):
- *   $0
+ * Set ZC_NIGHTLY_RUN_PROJECT_LEVEL_TOO=1 to retain v0.18.0 behavior
+ * (run mutation cycles on bottom-N skills) for parity / disaster recovery.
  *
- * If ZC_MUTATOR_MODEL=batch-sonnet is set, the script BLOCKS while waiting
- * for the Anthropic batch to complete (24h SLA). For unattended overnight
- * runs that's fine; for ad-hoc runs use ZC_MUTATOR_MODEL=realtime-sonnet.
- *
- * Cross-project promotion check (S2.5-4):
- *   After all per-project cycles complete, queries `findGlobalPromotionCandidates`
- *   and emits candidates as a separate `global_candidates` block in the
- *   summary. Operators can review + promote via `zc_skill_propose_mutation`
- *   on the global skill or accept candidates manually.
+ * Operator setup:
+ *   - Linux:   crontab → 0 2 * * *  ZC_TELEMETRY_BACKEND=postgres ZC_POSTGRES_PASSWORD=… node /path/to/scripts/run-nightly-mutations.mjs --project /path/to/project
+ *   - Windows: Task Scheduler → daily 02:00 → node.exe with same args
  */
 
 import { DatabaseSync } from "node:sqlite";
@@ -50,16 +40,19 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 
-// ─── Args ───────────────────────────────────────────────────────────────────
-
 function parseArgs(argv) {
-  const args = { project: null, topN: 3, dryRun: false };
+  const args = { project: null, threshold: 0.10, minProjects: 2, dryRun: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--project" && argv[i + 1]) { args.project = argv[i + 1]; i++; }
-    else if (argv[i] === "--top-n" && argv[i + 1]) { args.topN = Number(argv[i + 1]); i++; }
+    else if (argv[i] === "--threshold" && argv[i + 1]) { args.threshold = Number(argv[i + 1]); i++; }
+    else if (argv[i] === "--min-projects" && argv[i + 1]) { args.minProjects = Number(argv[i + 1]); i++; }
     else if (argv[i] === "--dry-run") { args.dryRun = true; }
     else if (argv[i] === "--help") {
-      console.log(`Usage: node run-nightly-mutations.mjs --project <path> [--top-n N] [--dry-run]`);
+      console.log(`Usage: node run-nightly-mutations.mjs --project <path> [--threshold 0.10] [--min-projects 2] [--dry-run]
+
+v0.18.1 — Nightly cross-project promotion candidate surfacing.
+This script does NOT run mutation cycles itself (that's L1, real-time).
+It identifies candidates and queues them for operator approval.`);
       process.exit(0);
     }
   }
@@ -77,8 +70,6 @@ if (!existsSync(PROJECT_PATH)) {
   process.exit(2);
 }
 
-// ─── Resolve project DB ─────────────────────────────────────────────────────
-
 const projectHash = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
 const dbDir = join(homedir(), ".claude", "zc-ctx", "sessions");
 mkdirSync(dbDir, { recursive: true });
@@ -89,91 +80,112 @@ const summary = {
   started_at:        startedAt.toISOString(),
   project_path:      PROJECT_PATH,
   project_hash:      projectHash,
-  mutator:           process.env.ZC_MUTATOR_MODEL ?? "local-mock",
+  threshold:         args.threshold,
+  min_projects:      args.minProjects,
   backend:           process.env.ZC_TELEMETRY_BACKEND ?? "sqlite",
   dry_run:           args.dryRun,
-  cycles:            [],
-  global_candidates: [],
-  total_cost_usd:    0,
-  total_duration_ms: 0,
+  candidates_found:  0,
+  candidates_queued: 0,
+  cycles:            [],   // populated only when ZC_NIGHTLY_RUN_PROJECT_LEVEL_TOO=1
   ended_at:          null,
   error:             null,
 };
 
-// ─── Run ────────────────────────────────────────────────────────────────────
-
 try {
   const { runMigrations } = await import("../dist/migrations.js");
-  const { listActiveSkills } = await import("../dist/skills/storage_dual.js");
-  const { selectUnderperformingSkills, runMutationCycle } = await import("../dist/skills/orchestrator.js");
-  const { getMutator } = await import("../dist/skills/mutator.js");
 
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode = WAL");
   runMigrations(db);
 
-  // PG migrations if backend=postgres|dual
+  // PG migrations needed for findGlobalPromotionCandidates
   if (summary.backend === "postgres" || summary.backend === "dual") {
     const { runPgMigrations } = await import("../dist/pg_migrations.js");
     await runPgMigrations();
+  } else {
+    console.warn("⚠ ZC_TELEMETRY_BACKEND is sqlite — cross-project promotion needs Postgres. Skipping L2 surfacing.");
+    summary.error = "PG required for cross-project query; set ZC_TELEMETRY_BACKEND=postgres|dual";
+    db.close();
+    summary.ended_at = new Date().toISOString();
+    console.log(JSON.stringify(summary, null, 2));
+    process.exit(0);
   }
 
-  const skills = await listActiveSkills(db);
-  if (skills.length === 0) {
-    console.log("No active skills — nothing to mutate.");
-    summary.cycles = [];
-  } else {
-    const targets = selectUnderperformingSkills(db, skills, args.topN);
-    console.log(`Selected ${targets.length} underperforming skill(s) for mutation: ${targets.map((t) => t.skill_id).join(", ")}`);
-    const mutator = await getMutator();
-    console.log(`Using mutator: ${mutator.id}`);
+  // ─── L2: cross-project promotion candidate surfacing ────────────────────
+  const { findGlobalPromotionCandidates } = await import("../dist/skills/storage_pg.js");
+  const candidates = await findGlobalPromotionCandidates(args.threshold, args.minProjects);
+  summary.candidates_found = candidates.length;
+  console.log(`Found ${candidates.length} cross-project promotion candidate(s).`);
 
-    for (const skill of targets) {
-      if (args.dryRun) {
-        summary.cycles.push({
-          skill_id: skill.skill_id,
-          dry_run: true,
-          baseline_only: true,
-        });
-        continue;
+  if (!args.dryRun && candidates.length > 0) {
+    const { enqueuePromotion } = await import("../dist/skills/promotion_queue.js");
+    let queued = 0;
+    for (const c of candidates) {
+      const r = await enqueuePromotion(db, {
+        candidate_skill_id: c.best_skill_id,
+        proposed_target:    "global",
+        surfaced_by:        "cron",
+        best_avg:           c.best_avg,
+        global_avg:         c.global_avg,
+        project_count:      c.project_count,
+      });
+      if (r.inserted) {
+        queued++;
+        console.log(`  + queued: ${c.best_skill_id} (best_avg=${c.best_avg.toFixed(3)} > ${c.global_avg.toFixed(3)} on ${c.project_count} project(s))`);
+      } else {
+        console.log(`  · already queued: ${c.best_skill_id}`);
       }
-      console.log(`\n--- Cycle: ${skill.skill_id} ---`);
-      const result = await runMutationCycle(db, skill, { mutator });
-      summary.cycles.push(result);
-      summary.total_cost_usd += result.total_cost_usd;
-      console.log(`  baseline=${result.baseline_score.toFixed(3)} best=${result.best_candidate_score.toFixed(3)} promoted=${result.promoted}`);
-      if (result.reason) console.log(`  reason: ${result.reason}`);
+    }
+    summary.candidates_queued = queued;
+
+    // Optional: broadcast an ALERT so the operator sees pending review on next session
+    if (queued > 0 && process.env.ZC_NIGHTLY_BROADCAST_ALERT !== "0") {
+      try {
+        const { broadcastFact } = await import("../dist/memory.js");
+        broadcastFact(PROJECT_PATH, "STATUS", "cron-nightly-mutator", {
+          state:   "info",
+          summary: `${queued} skill(s) pending global-promotion review. Run zc_skill_pending_promotions to view, then zc_skill_approve_promotion / reject as appropriate.`,
+          importance: 4,
+        });
+      } catch (e) {
+        console.warn(`  (broadcast failed: ${e.message})`);
+      }
+    }
+  } else if (args.dryRun) {
+    console.log("(dry-run: nothing queued)");
+    for (const c of candidates) {
+      console.log(`  would queue: ${c.best_skill_id} (best_avg=${c.best_avg.toFixed(3)} > ${c.global_avg.toFixed(3)} on ${c.project_count} project(s))`);
     }
   }
 
-  // Cross-project promotion check (PG only)
-  if (summary.backend === "postgres" || summary.backend === "dual") {
-    try {
-      const { findGlobalPromotionCandidates } = await import("../dist/skills/storage_pg.js");
-      const cands = await findGlobalPromotionCandidates(0.10, 2);
-      summary.global_candidates = cands;
-      if (cands.length > 0) {
-        console.log(`\n--- Cross-project promotion candidates ---`);
-        for (const c of cands) {
-          console.log(`  ${c.name} — best ${c.best_skill_id} (avg ${c.best_avg.toFixed(3)} > global ${c.global_avg.toFixed(3)}) on ${c.project_count} project(s)`);
-        }
-      }
-    } catch (e) {
-      console.warn(`Cross-project query failed (non-fatal): ${e.message}`);
+  // ─── Optional: legacy v0.18.0 in-process cycles ─────────────────────────
+  // Only runs when ZC_NIGHTLY_RUN_PROJECT_LEVEL_TOO=1. Useful as a disaster-
+  // recovery path if L1 (real-time mutator) is broken.
+  if (process.env.ZC_NIGHTLY_RUN_PROJECT_LEVEL_TOO === "1") {
+    console.log("\n⚠ ZC_NIGHTLY_RUN_PROJECT_LEVEL_TOO=1 — running in-process project-level cycles.");
+    const { listActiveSkills } = await import("../dist/skills/storage_dual.js");
+    const { selectUnderperformingSkills, runMutationCycle } = await import("../dist/skills/orchestrator.js");
+    const { getMutator } = await import("../dist/skills/mutator.js");
+
+    const skills = await listActiveSkills(db);
+    const targets = await selectUnderperformingSkills(db, skills, 3);
+    const mutator = await getMutator(undefined, { projectPath: PROJECT_PATH });
+    console.log(`Using mutator: ${mutator.id} on ${targets.length} skill(s)`);
+    for (const t of targets) {
+      const r = await runMutationCycle(db, t, { mutator, projectPath: PROJECT_PATH });
+      summary.cycles.push(r);
     }
   }
 
   db.close();
-  summary.ended_at         = new Date().toISOString();
-  summary.total_duration_ms = Date.now() - startedAt.getTime();
-
-  console.log(`\n=== Nightly mutation summary ===`);
+  summary.ended_at = new Date().toISOString();
+  console.log("\n=== Nightly cron summary ===");
   console.log(JSON.stringify(summary, null, 2));
   process.exit(0);
 } catch (e) {
   summary.error = e.message;
   summary.ended_at = new Date().toISOString();
-  console.error("Nightly cycle failed:", e);
+  console.error("Nightly cron failed:", e);
   console.error(JSON.stringify(summary, null, 2));
   process.exit(1);
 }

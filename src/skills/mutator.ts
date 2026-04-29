@@ -42,6 +42,7 @@ export interface Mutator {
 
 /** Allowlist of known mutator ids — see RT-S2-05 for the security rationale. */
 export const KNOWN_MUTATORS = new Set([
+  "cli-claude",             // v0.18.1 — uses Pro-plan Claude CLI agent (no API key)
   "realtime-sonnet",
   "batch-sonnet",
   "local-mock",
@@ -60,10 +61,33 @@ export function resolveMutatorId(envOverride?: string): string {
   return raw;
 }
 
-/** Factory — returns the mutator instance matching the env-resolved id. */
-export async function getMutator(envOverride?: string): Promise<Mutator> {
+/**
+ * Factory — returns the mutator instance matching the env-resolved id.
+ *
+ * Some mutators (`cli-claude`) need extra context (the project path so they
+ * know which broadcast channel to listen on). `factoryDeps` lets the caller
+ * thread that context in. Plain mutators ignore it.
+ */
+export interface MutatorFactoryDeps {
+  /** Required for cli-claude. */
+  projectPath?: string;
+  /** Override role used by cli-claude when enqueuing tasks. Default 'mutator'. */
+  cliClaudeRole?: string;
+}
+
+export async function getMutator(envOverride?: string, deps: MutatorFactoryDeps = {}): Promise<Mutator> {
   const id = resolveMutatorId(envOverride);
   switch (id) {
+    case "cli-claude": {
+      const { CliClaudeMutator } = await import("./mutators/cli_claude.js");
+      if (!deps.projectPath) {
+        throw new Error(
+          "cli-claude mutator requires deps.projectPath — pass it via getMutator(envOverride, {projectPath}). " +
+          "Falling back to local-mock if you don't have a project context."
+        );
+      }
+      return new CliClaudeMutator({ project_path: deps.projectPath, role: deps.cliClaudeRole });
+    }
     case "realtime-sonnet": {
       const { RealtimeSonnetMutator } = await import("./mutators/realtime_sonnet.js");
       return new RealtimeSonnetMutator();
