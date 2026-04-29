@@ -7,8 +7,54 @@
  * the HTML wrapper is throwaway, the JSON shape is the contract.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join, basename } from "node:path";
+import { homedir } from "node:os";
+
 function escapeHtml(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/**
+ * v0.18.3 — Resolve project_hash → human-readable project name.
+ *
+ * The dashboard shows pending mutation results from ALL projects in one
+ * stream. Without a name resolver, each row only shows the 16-char hash —
+ * functional but unreadable. We map hash → project basename via:
+ *
+ *   1. ZC_A2A_REGISTRY_PATH env var (operator override)
+ *   2. <home>/AI_projects/A2A_dispatcher/data/agents.json (default location)
+ *   3. ../A2A_dispatcher/data/agents.json (sibling-of-cwd lookup)
+ *
+ * Returns a Map<projectHash, basename(projectPath)>. If the registry can't
+ * be read, returns an empty map and the dashboard falls back to showing
+ * the hash. Multi-project: the same registry file holds an entry per
+ * project, so one read serves the whole dashboard.
+ */
+export function loadProjectNameMap(): Map<string, string> {
+  const candidates = [
+    process.env.ZC_A2A_REGISTRY_PATH,
+    join(homedir(), "AI_projects", "A2A_dispatcher", "data", "agents.json"),
+    join(process.cwd(), "..", "A2A_dispatcher", "data", "agents.json"),
+  ].filter((p): p is string => Boolean(p));
+
+  const map = new Map<string, string>();
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      const data = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+      for (const [hash, entry] of Object.entries(data)) {
+        const projectPath = (entry as { _meta?: { projectPath?: string } } | null)?._meta?.projectPath;
+        if (typeof projectPath === "string" && projectPath.length > 0) {
+          // basename works for both unix and windows-style paths
+          const name = basename(projectPath.replace(/\\/g, "/"));
+          if (name) map.set(hash, name);
+        }
+      }
+      return map;  // first valid registry wins
+    } catch { /* try next */ }
+  }
+  return map;
 }
 
 interface MutationCandidatePreview {
@@ -48,6 +94,8 @@ export function renderDashboardHtml(): string {
   .result-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
   .result-id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9rem; color: #38bdf8; }
   .skill-id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85rem; color: #a78bfa; }
+  .project-name { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #064e3b; color: #d1fae5; font-weight: 600; font-size: 0.85rem; cursor: help; }
+  .project-name.unresolved { background: #1f2937; color: #94a3b8; font-weight: 400; }
   .meta { color: #94a3b8; font-size: 0.85rem; margin-bottom: 8px; }
   .meta code { background: #1f2937; padding: 1px 4px; border-radius: 3px; }
   details { margin-bottom: 6px; }
@@ -112,7 +160,7 @@ export function renderDashboardHtml(): string {
 </div>
 
 <footer>
-  v0.18.2 Sprint 2.6 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
+  v0.18.3 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
   Notifications poll every 5s; pending list every 10s.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>
@@ -164,14 +212,21 @@ function enableNotifications() {
 /**
  * Render the inner-HTML fragment for the #pending div. Called every 10s by
  * HTMX, swaps innerHTML so all pending reviews are visible at once.
+ *
+ * v0.18.3: accepts a project_hash → name map (built once per request via
+ * loadProjectNameMap) so each row can show the project basename instead
+ * of just the 16-char hash.
  */
-export function renderPendingFragment(rows: Array<Record<string, unknown>>): string {
+export function renderPendingFragment(
+  rows: Array<Record<string, unknown>>,
+  projectNameMap: Map<string, string> = new Map(),
+): string {
   if (rows.length === 0) return `<p class="empty">No mutation results pending review. The mutator is idle.</p>`;
-  const sections = rows.map(renderResultSection);
+  const sections = rows.map((r) => renderResultSection(r, projectNameMap));
   return sections.join("\n");
 }
 
-function renderResultSection(row: Record<string, unknown>): string {
+function renderResultSection(row: Record<string, unknown>, projectNameMap: Map<string, string>): string {
   const result_id      = String(row.result_id);
   const skill_id       = String(row.skill_id);
   const headline       = String(row.headline ?? "");
@@ -182,6 +237,8 @@ function renderResultSection(row: Record<string, unknown>): string {
   const created_at     = String(row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at);
   const original_task  = row.original_task_id ? String(row.original_task_id) : null;
   const original_role  = row.original_role ? String(row.original_role) : null;
+  const project_hash   = String(row.project_hash ?? "");
+  const project_name   = projectNameMap.get(project_hash) ?? null;
 
   let bodies: MutationCandidatePreview[] = [];
   try { bodies = JSON.parse(String(row.bodies)) as MutationCandidatePreview[]; } catch { /* corrupt row */ }
@@ -197,6 +254,13 @@ function renderResultSection(row: Record<string, unknown>): string {
     </details>
   `).join("");
 
+  // v0.18.3: project name resolved from agents.json registry; falls back to
+  // the truncated hash when the registry isn't accessible (e.g. dashboard
+  // running in a docker container that can't read the host's data/agents.json)
+  const projectLabel = project_name
+    ? `<span class="project-name" title="project_hash: ${escapeHtml(project_hash)}">${escapeHtml(project_name)}</span>`
+    : `<span class="project-name unresolved" title="No registry entry for hash ${escapeHtml(project_hash)} — set ZC_A2A_REGISTRY_PATH if your dispatcher data dir is non-standard">project:${escapeHtml(project_hash.slice(0, 8))}…</span>`;
+
   return `
 <div class="result" data-result-id="${escapeHtml(result_id)}">
   <div class="result-header">
@@ -204,6 +268,7 @@ function renderResultSection(row: Record<string, unknown>): string {
     <span class="skill-id">${escapeHtml(skill_id)}</span>
   </div>
   <div class="meta">
+    project: ${projectLabel}<br>
     ${escapeHtml(headline)}<br>
     proposer: <code>${escapeHtml(proposer_model)}</code> (${escapeHtml(proposer_role)}) ·
     candidates: <strong>${candidate_count}</strong> ·

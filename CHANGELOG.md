@@ -4,6 +4,59 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.3] — 2026-04-29 — Operator UX patch: dashboard project names + sensible env defaults
+
+Two small ergonomics wins after Sprint 2.6 dogfooding revealed friction.
+
+### Added — multi-project dashboard readability
+
+The dashboard already aggregates pending mutation_results across **all** projects
+in your portfolio (single `localhost:3099/dashboard` tab serves everything; each
+row's approve/reject flow correctly routes to its own project). But before this
+patch, each row's project was identifiable only by the 16-char SHA-256 hash
+embedded in the skill_id — functional but unreadable.
+
+Now: each row shows a green `project: Test_Agent_Coordination` badge resolved
+from the dispatcher's `agents.json` registry. Hover to see the underlying hash.
+Falls back to a grey `project:aafb4b02…` for projects whose registry entry
+isn't accessible (e.g. dashboard running in docker with no host mount).
+
+- New helper `loadProjectNameMap()` in `src/dashboard/render.ts` — reads agents.json from one of three candidate paths (env override + two defaults), builds `Map<projectHash, basename(projectPath)>`
+- `renderPendingFragment` accepts the map and renders project names per row
+- New env var `ZC_A2A_REGISTRY_PATH` for non-standard dispatcher data dirs
+
+### Changed — `start-agents.ps1` no longer requires manual env-var setup
+
+Previously you had to remember to run:
+```powershell
+$env:ZC_L1_MUTATION_ENABLED = "1"
+$env:ZC_TELEMETRY_BACKEND   = "dual"
+```
+before launching agents — easy to forget, easy to misconfigure. Now `start-agents.ps1`
+sets sensible defaults internally with three layers of precedence:
+
+1. **Operator-set `$env:ZC_*` in shell BEFORE invocation** — never overwritten
+2. **`-NoL1Mutation` / `-Backend <mode>` switches** — explicit per-invocation override
+3. **Auto-detected defaults** — `ZC_L1_MUTATION_ENABLED=1`; `ZC_TELEMETRY_BACKEND=dual` if PG creds detected, else `sqlite`
+
+Bare `start-agents.ps1 -Project <p> -Session <s>` now Just Works for the
+autonomous loop on any machine that has PG configured. No more manual env-var
+dance before each launch.
+
+**Security review of default-on L1**: the L1 trigger has its own runtime
+guardrails (cooldown 6h, ≥3 failures in last 10 runs, daily cap 5/project).
+Every promotion is operator-gated via the dashboard or `zc_mutation_approve`
+MCP tool. The mutator agent has narrow capabilities: no file edits, no
+commits, no code execution — markdown candidate generation only. Prompt
+context is RT-S2-07 secret-scanned before submission. There's no security
+cost to default-on; the kill switch (`-NoL1Mutation`) is purely operator
+preference. **`ZC_POSTGRES_PASSWORD` is NOT defaulted** — must come from
+the operator's `.env` / secret store / shell. We only auto-detect whether
+it's set in order to pick `dual` vs `sqlite-only`, never to inject a value.
+
+Each detected default is logged at launch time with its source ("auto", "operator-set",
+"per-flag") so the operator can immediately see what's wired.
+
 ## [0.18.2] — 2026-04-29 — Sprint 2.6: operator dashboard + auto-reassign + retry-cap safeguard
 
 Closes the human-in-the-loop gap on the autonomous self-improving skills cycle.

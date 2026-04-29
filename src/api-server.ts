@@ -239,7 +239,7 @@ export async function createApiServer(storeOverride?: Store) {
   });
 
   app.get("/dashboard/pending", async (_request, reply) => {
-    const { renderPendingFragment } = await import("./dashboard/render.js");
+    const { renderPendingFragment, loadProjectNameMap } = await import("./dashboard/render.js");
     const { withClient } = await import("./pg_pool.js");
     try {
       const rows = await withClient(async (c) => {
@@ -253,7 +253,10 @@ export async function createApiServer(storeOverride?: Store) {
         );
         return res.rows;
       });
-      reply.type("text/html").send(renderPendingFragment(rows));
+      // v0.18.3: resolve project_hash → name once per request (sync read of
+      // agents.json; cheap enough for a 10s poll, no caching needed yet).
+      const nameMap = loadProjectNameMap();
+      reply.type("text/html").send(renderPendingFragment(rows, nameMap));
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to load pending: ${(e as Error).message}</div>`);
     }
