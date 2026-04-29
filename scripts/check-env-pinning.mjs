@@ -98,6 +98,10 @@ const OPERATIONAL = new Set([
   "ZC_API_PORT", "ZC_API_HOST", "ZC_API_CORS_ORIGINS",
   // Store selection (operator deployment choice)
   "ZC_STORE", "ZC_PG_POOL_SIZE", "ZC_PG_URL",
+  // v0.18.0 Sprint 2 — mutation engine model selector. Allowlist enforced
+  // at runtime in src/skills/mutator.ts; unknown values fall back to
+  // local-mock + AUDIT log per RT-S2-05.
+  "ZC_MUTATOR_MODEL",
 ]);
 
 // ─── Implementation ───────────────────────────────────────────────────────────

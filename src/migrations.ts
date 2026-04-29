@@ -648,6 +648,95 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 20,
+    description: "v0.18.0 Sprint 2: skills table — versioned hash-protected skill registry",
+    up: (db) => {
+      // Each skill is a (name, version, scope) tuple with HMAC-protected body.
+      // Soft-delete via archived_at lets the mutation engine version-bump
+      // without losing history. UNIQUE active row ensures only one
+      // (name, scope) is "live" at a time.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skills (
+          skill_id        TEXT PRIMARY KEY,
+          name            TEXT NOT NULL,
+          version         TEXT NOT NULL,
+          scope           TEXT NOT NULL,
+          description     TEXT NOT NULL,
+          frontmatter     TEXT NOT NULL,           -- JSON-serialized SkillFrontmatter
+          body            TEXT NOT NULL,
+          body_hmac       TEXT NOT NULL,
+          source_path     TEXT,
+          promoted_from   TEXT,
+          created_at      TEXT NOT NULL,
+          archived_at     TEXT,
+          archive_reason  TEXT
+        );
+      `);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_active ON skills(name, scope) WHERE archived_at IS NULL;`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_skills_name_scope ON skills(name, scope);`);
+    },
+  },
+
+  {
+    id: 21,
+    description: "v0.18.0 Sprint 2: skill_runs — execution telemetry per skill invocation",
+    up: (db) => {
+      // Each invocation of a skill produces one row. outcome_score is the
+      // composite (accuracy + cost + speed) used by the mutation engine
+      // to rank candidates. failure_trace captures the structured failure
+      // shape so the mutator has signal to work with.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill_runs (
+          run_id         TEXT PRIMARY KEY,
+          skill_id       TEXT NOT NULL,
+          session_id     TEXT NOT NULL,
+          task_id        TEXT,
+          inputs         TEXT NOT NULL,           -- JSON
+          outcome_score  REAL,
+          total_cost     REAL,
+          total_tokens   INTEGER,
+          duration_ms    INTEGER,
+          status         TEXT NOT NULL CHECK(status IN ('succeeded','failed','timeout')),
+          failure_trace  TEXT,
+          ts             TEXT NOT NULL
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sr_skill_ts ON skill_runs(skill_id, ts);`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sr_status ON skill_runs(status, ts);`);
+    },
+  },
+
+  {
+    id: 22,
+    description: "v0.18.0 Sprint 2: skill_mutations — proposal + replay + promotion ledger",
+    up: (db) => {
+      // Each candidate produced by the mutation engine gets a row.
+      // candidate_hmac proves the body wasn't modified between proposal
+      // and replay (RT-S2-09). promoted=true rows have promoted_to_skill_id
+      // pointing at the new active row in skills.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill_mutations (
+          mutation_id           TEXT PRIMARY KEY,
+          parent_skill_id       TEXT NOT NULL,
+          candidate_body        TEXT NOT NULL,
+          candidate_hmac        TEXT NOT NULL,
+          proposed_by           TEXT NOT NULL,
+          judged_by             TEXT,
+          judge_score           REAL,
+          judge_rationale       TEXT,
+          replay_score          REAL,
+          promoted              INTEGER NOT NULL DEFAULT 0,  -- 0/1 boolean
+          promoted_to_skill_id  TEXT,
+          created_at            TEXT NOT NULL,
+          resolved_at           TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sm_parent ON skill_mutations(parent_skill_id, created_at);`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sm_promoted ON skill_mutations(promoted, created_at);`);
+    },
+  },
+
 ];
 
 /**

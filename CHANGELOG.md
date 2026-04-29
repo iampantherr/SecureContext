@@ -4,6 +4,108 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.0] — 2026-04-29 — Sprint 2 baseline: skill mutation engine + replay + agentskills.io interop
+
+The self-improving skill loop. Skills become first-class hash-protected
+artifacts; replay against synthetic fixtures produces composite outcome
+scores; mutators propose candidate variants; winners promote atomically.
+Per-project skills override global at resolve time. Cross-project
+promotion candidates surface via `findGlobalPromotionCandidates`.
+
+This is the **Sprint 2 baseline** — verified end-to-end with both unit
+tests and a live cross-project demo against Postgres. **v0.18.1 (next)**
+adds the CLI-based runtime mutator + outcome-trigger guardrails + operator-
+gated global promotion queue, all without requiring an Anthropic API key.
+
+### Added — skill subsystem (`src/skills/`)
+
+- `types.ts` (192 lines) — Skill, SkillRun, SkillMutation, MutationContext type graph
+- `loader.ts` (323 lines) — markdown frontmatter parser + HMAC-SHA256 body sign
+- `storage.ts` (259 lines) — SQLite CRUD + tamper detection (SkillTamperedError)
+- `storage_pg.ts` (248 lines) — Postgres mirror for skills_pg / skill_runs_pg / skill_mutations_pg
+- `storage_dual.ts` (146 lines) — backend-aware dispatch (sqlite | postgres | dual)
+- `scoring.ts` (246 lines) — composite outcome score (accuracy + cost + speed) + acceptance
+- `replay.ts` (234 lines) — synthetic-fixture replay harness with HMAC-verify gate
+- `mutator.ts` (228 lines) — pluggable Mutator interface + helpers
+- `mutators/local_mock.ts` (71 lines) — deterministic test mutator
+- `mutators/realtime_sonnet.ts` (125 lines) — Anthropic Messages API direct
+- `mutators/batch_sonnet.ts` (159 lines) — Anthropic Batch API (50% discount)
+- `orchestrator.ts` (256 lines) — full select→mutate→replay→promote cycle
+- `format/agentskills_io.ts` (144 lines) — agentskills.io interop import/export
+
+### Added — cron primitive (`src/cron/`)
+
+- `scheduler.ts` (190 lines) — in-process scheduler with persistence, daily/interval triggers, history bound
+
+### Added — 3 SQLite migrations (20-22) and 3 PG migrations (6-8)
+
+- `skills` / `skills_pg` — versioned hash-protected skill registry (UNIQUE active per name+scope)
+- `skill_runs` / `skill_runs_pg` — execution telemetry with composite outcome score
+- `skill_mutations` / `skill_mutations_pg` — proposal + replay + promotion ledger
+
+### Added — 7 new MCP tools
+
+| Tool | Purpose |
+|---|---|
+| `zc_skill_list` | List active skills with recent score |
+| `zc_skill_show` | Full skill detail (HMAC-verified) |
+| `zc_skill_score` | Aggregate score + acceptance check |
+| `zc_skill_run_replay` | Replay against fixtures via LocalDeterministicExecutor |
+| `zc_skill_propose_mutation` | Run one mutation cycle on demand |
+| `zc_skill_export` | Export as agentskills.io markdown |
+| `zc_skill_import` | Accept agentskills.io markdown → store as skill |
+
+### Added — entrypoint scripts
+
+- `scripts/run-nightly-mutations.mjs` — OS cron entrypoint (Linux cron / Windows Task Scheduler)
+- `scripts/sprint2-cross-project-demo.mjs` — live cross-project promotion demo (verified)
+- `scripts/sprint2-live-demo.mjs` — single-project mutation cycle demo (verified)
+
+### Added — RT-S2-* security tests
+
+- `RT-S2-05`: ZC_MUTATOR_MODEL allowlist falls back to local-mock on unknown values
+- `RT-S2-07`: pre-submission secret_scanner rejects API-key / AWS-key payloads
+- `RT-S2-08`: skill body HMAC mismatch → SkillTamperedError on storage read
+- `RT-S2-09`: candidate body HMAC verified before replay; mismatch → marked failed
+
+### Documentation
+
+- `docs/SKILLS_WALKTHROUGH.md` (~250 lines) — comprehensive usage guide
+
+### Test suite: 786/786 (was 645)
+
+- 132 new Sprint 2 unit tests
+- 9 new PG-mirror integration tests (require live PG)
+- All quality gates green: ESLint 0 errors, env-pinning linter 0 unclassified
+- Live cross-project demo: 9/9 steps pass against real Postgres
+
+### Migration notes
+
+- 3 new SQLite migrations (20-22) auto-apply on first run
+- 3 new PG migrations (6-8) require `ZC_TELEMETRY_BACKEND=postgres|dual` for activation
+- New env var `ZC_MUTATOR_MODEL` (allowlist-enforced; defaults to `local-mock`)
+- No breaking changes — Sprint 2 additions are additive
+
+### Architectural decisions ratified (D1-D6)
+
+- D1: Storage = dual (SQLite per-project default + PG centralized; both supported in this release)
+- D2: Skill scope = hierarchical (per-project overrides global at resolve time)
+- D3: Replay benchmark source = synthetic fixtures first (real-historical replay deferred to Sprint 2.5)
+- D4: Mutation engine = Sonnet 4.6 batch primary + realtime fallback + LocalMock for tests
+- D5: Per-tool-call cost storage (skill_runs.total_cost rolls up)
+- D6: Existing learnings/ JSONL kept; auto-feedback loop from v0.17.2 preserved
+
+### Sprint 2.5 deferrals
+
+Tracked in `C:\Users\Amit\AI_projects\.harness-planning\ARCHITECTURAL_LESSONS.md`:
+- S2.5-1 Subprocess sandbox executor (RT-S2-03/04)
+- S2.5-2 Real-historical replay
+- S2.5-3 Override confirmation prompt (RT-S2-06)
+- S2.5-4 Cross-project auto-promotion
+- S2.5-5 Compacted-segment HMAC (RT-S2-08 for compaction)
+- S2.5-7 zc_unredact tool
+- S2.5-8 Skill injection scanner (RT-S2-01 hardening)
+
 ## [0.17.2] — 2026-04-20 — Architectural lints (L1+L3) + learning-loop closure (L4)
 
 Pre-Sprint-2 hardening round. Closes three classes of bugs identified by

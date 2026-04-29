@@ -3,8 +3,8 @@
 > **Persistent memory, verifiable telemetry, and work-stealing coordination for multi-agent Claude Code sessions.**
 > Built on the principle: *cybersecurity into the architecture, not bolted on.* HMAC-chained audit trail, per-agent cryptographic identity, Postgres Row-Level Security, atomic work distribution, closed learning loop. Zero cloud sync. MIT license.
 
-[![Version](https://img.shields.io/badge/version-0.17.2-blue)](package.json)
-[![Tests](https://img.shields.io/badge/tests-645%20passed-brightgreen)](src)
+[![Version](https://img.shields.io/badge/version-0.18.0-blue)](package.json)
+[![Tests](https://img.shields.io/badge/tests-786%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -36,7 +36,7 @@ Four pillars:
 | Token overhead per session (vs. native Claude re-paste) | **~87% lower** |
 | Claude Opus cost per session (tool-call overhead only) | **~$0.16** vs. ~$2–5 native |
 | Recall cache hit saves | **~800 tokens per call** (~$0.06 on Opus) |
-| Unit + integration tests | **645 passing** |
+| Unit + integration tests | **786 passing** |
 | Red-team attack IDs verified | **60+ (RT-S0 through RT-S4)** |
 | Hash-chain forgery resistance | Cryptographic (per-agent HKDF subkey) |
 | Agents per role (work-stealing pool) | **1 to 20** (tested 50 × 100 no double-claim) |
@@ -91,7 +91,22 @@ When `recordOutcome({outcomeKind: "rejected" | "failed" | "insufficient" | "erro
 
 Future sessions surface those learnings via `zc_search(["past failures for X"])` — the loop is now structural, not behavioral.
 
-### 6. Architectural Quality Gates
+### 6. Self-Improving Skills (v0.18.0 Sprint 2)
+
+Skills are versioned, hash-protected markdown procedures that agents discover at session start and follow when doing work. They improve themselves over time:
+
+- **Two-scope hierarchy**: per-project skills override global. Per-project optimizations don't pollute other projects.
+- **Composite outcome scoring**: every skill execution records `accuracy + cost + speed` into `skill_runs`. Failure traces feed the mutator.
+- **Pluggable mutators**: `local-mock` (free, deterministic), `realtime-sonnet` (Anthropic API direct), `batch-sonnet` (50% discount via Batch API). Allowlist-enforced via `ZC_MUTATOR_MODEL` env var (RT-S2-05).
+- **Synthetic-fixture replay**: candidates are validated against hand-crafted fixtures before promotion. Pass/fail + accuracy gate prevents regressions.
+- **Atomic promotion**: when a candidate beats parent by ≥10% AND meets acceptance criteria, parent is archived and new version is inserted in one transaction.
+- **Cross-project promotion**: `findGlobalPromotionCandidates` walks `skill_runs_pg` to surface per-project versions consistently outperforming global. Operator approves before global publishes.
+- **Audit trail**: every candidate (promoted or not) lands in `skill_mutations`. `body_hmac` verified at every load (RT-S2-08); `candidate_hmac` verified at every replay (RT-S2-09).
+- **agentskills.io interop**: lossless export/import via the open standard.
+
+7 new MCP tools: `zc_skill_list`, `zc_skill_show`, `zc_skill_score`, `zc_skill_run_replay`, `zc_skill_propose_mutation`, `zc_skill_export`, `zc_skill_import`. See [docs/SKILLS_WALKTHROUGH.md](docs/SKILLS_WALKTHROUGH.md) for the full lifecycle + cron setup + mutator selection.
+
+### 7. Architectural Quality Gates
 
 Three automated checks prevent whole classes of regression:
 
@@ -236,7 +251,7 @@ Three containers come up: `securecontext-postgres` (PG + pgvector), `secureconte
 Verify:
 ```bash
 curl http://localhost:3099/health
-# {"status":"ok","version":"0.17.2","store":"postgres","ollamaAvailable":true,"searchMode":"hybrid (BM25 + vector)"}
+# {"status":"ok","version":"0.18.0","store":"postgres","ollamaAvailable":true,"searchMode":"hybrid (BM25 + vector)"}
 ```
 
 Register with Claude:
@@ -390,6 +405,7 @@ Red-team categories:
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history. Highlights from the last quarter:
 
+- **[v0.18.0](CHANGELOG.md#0180)** (2026-04-29) — **Sprint 2 baseline**: skill mutation engine. Versioned hash-protected skills, synthetic-fixture replay harness, pluggable mutators (`local-mock`, `realtime-sonnet`, `batch-sonnet`), composite outcome scoring, atomic promotion, cross-project promotion candidates. 7 new MCP tools, 132 new tests, 786/786 passing. Postgres mirror for multi-machine consistency. agentskills.io interop.
 - **[v0.17.2](CHANGELOG.md#0172)** (2026-04-20) — L1 env-pinning linter + L3 no-floating-promises ESLint + L4 outcome → failures.jsonl auto-feedback. Closes 3 architectural-bug classes pre-Sprint-2.
 - **[v0.17.1](CHANGELOG.md#0171)** — Agent-idle fixes (claim-drain, Stop-hook queue-drain, dispatcher wake-nudge) + 60s recall cache + Tier 1+2 pricing correctness.
 - **[v0.17.0](CHANGELOG.md#0170)** — Postgres work-stealing queue (`FOR UPDATE SKIP LOCKED`) + complexity-based model router + file-ownership overlap guard + `-WorkerCount N` multi-worker pools.
@@ -410,7 +426,7 @@ Issues and PRs welcome. Before opening a PR:
 
 ```bash
 npm run build
-npm test                  # must be 645/645 (or updated)
+npm test                  # must be 786/786 (or updated)
 npm run lint              # 0 errors
 npm run check:env         # 0 unclassified
 node security-tests/run-all.mjs  # all red-team IDs pass

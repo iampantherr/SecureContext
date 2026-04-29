@@ -725,6 +725,95 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_skill_list",
+    description:
+      "v0.18.0 Sprint 2 — List all active skills in this project (per-project + global). " +
+      "Each entry shows name, version, scope, description, and recent run-aggregate score. " +
+      "Use this as the entry point before zc_skill_show / zc_skill_propose_mutation.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "zc_skill_show",
+    description:
+      "v0.18.0 — Show full skill: frontmatter (acceptance_criteria, fixtures) + body markdown. " +
+      "Resolves per-project version first, falls back to global. Verifies HMAC at load — " +
+      "skills with mismatched body_hmac return an error rather than the body.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Skill name (e.g. 'audit_file')" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "zc_skill_score",
+    description:
+      "v0.18.0 — Compute aggregate score for a skill from its recent skill_runs " +
+      "(default last 20). Returns avg_score, pass_rate, avg_cost_usd, avg_duration_ms, " +
+      "and whether the skill currently meets its acceptance_criteria.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Skill name" },
+        window: { type: "number", description: "How many recent runs to aggregate (default 20)" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "zc_skill_run_replay",
+    description:
+      "v0.18.0 — Replay a skill against its synthetic fixtures and return per-fixture results " +
+      "+ aggregate. Useful for inspecting why a candidate would or wouldn't be promoted. " +
+      "Uses the LocalDeterministicExecutor (no LLM cost) for v0.18.0.",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string", description: "Skill name" } },
+      required: ["name"],
+    },
+  },
+  {
+    name: "zc_skill_propose_mutation",
+    description:
+      "v0.18.0 — Run ONE on-demand mutation cycle on a skill: invoke the configured mutator " +
+      "(via ZC_MUTATOR_MODEL — defaults to local-mock), generate 5 candidates, replay each " +
+      "against fixtures, decide promotion. Records EVERY candidate in skill_mutations regardless " +
+      "of outcome. Returns the cycle result (baseline, best candidate score, promoted, reason).",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string", description: "Skill name to mutate" } },
+      required: ["name"],
+    },
+  },
+  {
+    name: "zc_skill_export",
+    description:
+      "v0.18.0 — Export a skill as agentskills.io-format markdown for sharing with the " +
+      "broader ecosystem. SC-specific metadata (acceptance_criteria, fixtures, scope) is " +
+      "preserved in the metadata block so a round-trip back through zc_skill_import is lossless.",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string", description: "Skill name to export" } },
+      required: ["name"],
+    },
+  },
+  {
+    name: "zc_skill_import",
+    description:
+      "v0.18.0 — Import agentskills.io markdown as a new skill. Reconstructs the Skill, " +
+      "computes a fresh body_hmac (against this machine's secret), and inserts into the " +
+      "skills table. SC-specific metadata in the source's metadata block is honored.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        markdown: { type: "string", description: "agentskills.io-format markdown text" },
+        scope:    { type: "string", description: "Default scope when source has none. 'global' or 'project:<hash>'." },
+      },
+      required: ["markdown"],
+    },
+  },
+  {
     name: "zc_enqueue_task",
     description:
       "v0.17.0 §8.2 — Enqueue a task into the work-stealing queue (task_queue_pg). " +
@@ -1846,6 +1935,196 @@ async function dispatchToolCall(
         lines.push(``);
         lines.push(rec.reason);
         return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      // ── v0.18.0 Sprint 2 — Skill mutation engine MCP tools ─────────────────
+      // Pure SQLite path (skill data volume is small; PG mirror deferred).
+      case "zc_skill_list": {
+        const { DatabaseSync: SLDb } = await import("node:sqlite");
+        const { mkdirSync: slMkd } = await import("node:fs");
+        const { join: slJoin } = await import("node:path");
+        const { createHash: slHash } = await import("node:crypto");
+        slMkd(Config.DB_DIR, { recursive: true });
+        const slDbFile = slJoin(Config.DB_DIR, `${slHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const slDb = new SLDb(slDbFile);
+        slDb.exec("PRAGMA journal_mode = WAL");
+        const { listActiveSkills, getRecentSkillRuns } = await import("./skills/storage.js");
+        const { aggregateScore } = await import("./skills/scoring.js");
+        const skills = await listActiveSkills(slDb);
+        const lines: string[] = [`## Active skills (${skills.length})`];
+        for (const s of skills) {
+          const recent = getRecentSkillRuns(slDb, s.skill_id, 20);
+          const agg = aggregateScore(recent);
+          lines.push(`- **${s.frontmatter.name}** v${s.frontmatter.version} [${s.frontmatter.scope}] — ${s.frontmatter.description}`);
+          if (agg.n > 0) lines.push(`  recent: avg_score=${agg.avg_score.toFixed(3)}, pass_rate=${agg.pass_rate.toFixed(2)}, n=${agg.n}`);
+          else           lines.push(`  recent: (no runs yet)`);
+        }
+        if (skills.length === 0) lines.push(`(no active skills — install via zc_skill_import or write to <project>/.claude/skills/<name>.md)`);
+        slDb.close();
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_skill_show": {
+        const { name } = args as { name: string };
+        const { DatabaseSync: SsDb } = await import("node:sqlite");
+        const { mkdirSync: ssMkd } = await import("node:fs");
+        const { join: ssJoin } = await import("node:path");
+        const { createHash: ssHash } = await import("node:crypto");
+        ssMkd(Config.DB_DIR, { recursive: true });
+        const ssDbFile = ssJoin(Config.DB_DIR, `${ssHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const ssDb = new SsDb(ssDbFile);
+        ssDb.exec("PRAGMA journal_mode = WAL");
+        const { resolveSkill } = await import("./skills/storage.js");
+        const projectScope = `project:${ssHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        try {
+          const skill = await resolveSkill(ssDb, name, projectScope);
+          ssDb.close();
+          if (!skill) return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true };
+          const fm = JSON.stringify(skill.frontmatter, null, 2);
+          return { content: [{ type: "text", text: `## ${skill.skill_id}\n\n### frontmatter\n\`\`\`json\n${fm}\n\`\`\`\n\n### body\n\n${skill.body}` }] };
+        } catch (e) {
+          ssDb.close();
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      case "zc_skill_score": {
+        const { name, window } = args as { name: string; window?: number };
+        const { DatabaseSync: ScDb } = await import("node:sqlite");
+        const { mkdirSync: scMkd } = await import("node:fs");
+        const { join: scJoin } = await import("node:path");
+        const { createHash: scHash } = await import("node:crypto");
+        scMkd(Config.DB_DIR, { recursive: true });
+        const scDbFile = scJoin(Config.DB_DIR, `${scHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const scDb = new ScDb(scDbFile);
+        scDb.exec("PRAGMA journal_mode = WAL");
+        const { resolveSkill, getRecentSkillRuns } = await import("./skills/storage.js");
+        const { aggregateScore, checkAcceptance } = await import("./skills/scoring.js");
+        const projectScope = `project:${scHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const skill = await resolveSkill(scDb, name, projectScope);
+        if (!skill) { scDb.close(); return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true }; }
+        const runs = getRecentSkillRuns(scDb, skill.skill_id, window ?? 20);
+        const agg = aggregateScore(runs);
+        const accept = checkAcceptance(agg, skill.frontmatter.acceptance_criteria);
+        scDb.close();
+        const lines: string[] = [`## Score for ${skill.skill_id}`];
+        lines.push(`- avg_score:        ${agg.avg_score.toFixed(3)}`);
+        lines.push(`- pass_rate:        ${agg.pass_rate.toFixed(3)}`);
+        lines.push(`- avg_cost_usd:     $${agg.avg_cost_usd.toFixed(6)}`);
+        lines.push(`- avg_duration_ms:  ${agg.avg_duration_ms.toFixed(0)}`);
+        lines.push(`- runs sampled:     ${agg.n}`);
+        lines.push(`- meets acceptance: ${accept.eligible}`);
+        if (!accept.eligible) lines.push(`  reasons: ${accept.reasons.join("; ")}`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_skill_run_replay": {
+        const { name } = args as { name: string };
+        const { DatabaseSync: SrrDb } = await import("node:sqlite");
+        const { mkdirSync: srrMkd } = await import("node:fs");
+        const { join: srrJoin } = await import("node:path");
+        const { createHash: srrHash } = await import("node:crypto");
+        srrMkd(Config.DB_DIR, { recursive: true });
+        const srrDbFile = srrJoin(Config.DB_DIR, `${srrHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const srrDb = new SrrDb(srrDbFile);
+        srrDb.exec("PRAGMA journal_mode = WAL");
+        const { resolveSkill } = await import("./skills/storage.js");
+        const { replaySkill, LocalDeterministicExecutor } = await import("./skills/replay.js");
+        const projectScope = `project:${srrHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const skill = await resolveSkill(srrDb, name, projectScope);
+        srrDb.close();
+        if (!skill) return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true };
+        if ((skill.frontmatter.fixtures ?? []).length === 0) {
+          return { content: [{ type: "text", text: `Skill '${name}' has no fixtures — nothing to replay.` }] };
+        }
+        const r = await replaySkill(skill, new LocalDeterministicExecutor());
+        const lines: string[] = [`## Replay results for ${skill.skill_id}`];
+        lines.push(`- agg_score:       ${r.agg_score.toFixed(3)}`);
+        lines.push(`- pass_rate:       ${r.pass_rate.toFixed(3)}`);
+        lines.push(`- avg_cost_usd:    $${r.avg_cost_usd.toFixed(6)}`);
+        lines.push(`- avg_duration_ms: ${r.avg_duration_ms.toFixed(0)}`);
+        lines.push(``);
+        lines.push(`### per fixture`);
+        for (const f of r.per_fixture) {
+          lines.push(`- **${f.fixture_id}** [${f.status}] accuracy=${f.accuracy.toFixed(3)} composite=${f.composite.toFixed(3)} dur=${f.duration_ms}ms`);
+          if (f.failed_keys.length > 0) lines.push(`  failed_keys: ${f.failed_keys.join(", ")}`);
+          if (f.failure_trace)         lines.push(`  trace: ${f.failure_trace}`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_skill_propose_mutation": {
+        const { name } = args as { name: string };
+        const { DatabaseSync: SpmDb } = await import("node:sqlite");
+        const { mkdirSync: spmMkd } = await import("node:fs");
+        const { join: spmJoin } = await import("node:path");
+        const { createHash: spmHash } = await import("node:crypto");
+        spmMkd(Config.DB_DIR, { recursive: true });
+        const spmDbFile = spmJoin(Config.DB_DIR, `${spmHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const spmDb = new SpmDb(spmDbFile);
+        spmDb.exec("PRAGMA journal_mode = WAL");
+        const { resolveSkill } = await import("./skills/storage.js");
+        const { runMutationCycle } = await import("./skills/orchestrator.js");
+        const projectScope = `project:${spmHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const skill = await resolveSkill(spmDb, name, projectScope);
+        if (!skill) { spmDb.close(); return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true }; }
+        const result = await runMutationCycle(spmDb, skill);
+        spmDb.close();
+        const lines: string[] = [`## Mutation cycle: ${skill.skill_id}`];
+        lines.push(`- baseline_score:       ${result.baseline_score.toFixed(3)}`);
+        lines.push(`- candidates_generated: ${result.candidates_count}`);
+        lines.push(`- best_candidate_score: ${result.best_candidate_score.toFixed(3)}`);
+        lines.push(`- total_cost_usd:       $${result.total_cost_usd.toFixed(6)}`);
+        lines.push(`- duration_ms:          ${result.duration_ms}`);
+        lines.push(`- promoted:             ${result.promoted}`);
+        if (result.new_skill_id)      lines.push(`  new_skill_id:      ${result.new_skill_id}`);
+        if (result.archived_skill_id) lines.push(`  archived_skill_id: ${result.archived_skill_id}`);
+        if (result.reason)            lines.push(`  reason:            ${result.reason}`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_skill_export": {
+        const { name } = args as { name: string };
+        const { DatabaseSync: SeDb } = await import("node:sqlite");
+        const { mkdirSync: seMkd } = await import("node:fs");
+        const { join: seJoin } = await import("node:path");
+        const { createHash: seHash } = await import("node:crypto");
+        seMkd(Config.DB_DIR, { recursive: true });
+        const seDbFile = seJoin(Config.DB_DIR, `${seHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const seDb = new SeDb(seDbFile);
+        seDb.exec("PRAGMA journal_mode = WAL");
+        const { resolveSkill } = await import("./skills/storage.js");
+        const { exportToAgentSkillsIo } = await import("./skills/format/agentskills_io.js");
+        const projectScope = `project:${seHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const skill = await resolveSkill(seDb, name, projectScope);
+        seDb.close();
+        if (!skill) return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true };
+        return { content: [{ type: "text", text: exportToAgentSkillsIo(skill) }] };
+      }
+
+      case "zc_skill_import": {
+        const { markdown, scope } = args as { markdown: string; scope?: string };
+        const { DatabaseSync: SiDb } = await import("node:sqlite");
+        const { mkdirSync: siMkd } = await import("node:fs");
+        const { join: siJoin } = await import("node:path");
+        const { createHash: siHash } = await import("node:crypto");
+        siMkd(Config.DB_DIR, { recursive: true });
+        const siDbFile = siJoin(Config.DB_DIR, `${siHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const siDb = new SiDb(siDbFile);
+        siDb.exec("PRAGMA journal_mode = WAL");
+        const { upsertSkill } = await import("./skills/storage.js");
+        const { importFromAgentSkillsIo } = await import("./skills/format/agentskills_io.js");
+        const projectScope = `project:${siHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        try {
+          const defaultScope = (scope ?? projectScope) as `project:${string}` | "global";
+          const skill = await importFromAgentSkillsIo(markdown, defaultScope);
+          await upsertSkill(siDb, skill);
+          siDb.close();
+          return { content: [{ type: "text", text: `Imported skill ${skill.skill_id} (body_hmac=${skill.body_hmac.slice(0,12)}…).` }] };
+        } catch (e) {
+          siDb.close();
+          return { content: [{ type: "text", text: `Import error: ${(e as Error).message}` }], isError: true };
+        }
       }
 
       // ── v0.17.0 §8.2 — work-stealing queue MCP tools ──────────────────────

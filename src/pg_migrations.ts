@@ -240,6 +240,103 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 6,
+    description: "v0.18.0 Sprint 2: skills_pg — versioned hash-protected skill registry (mirror of SQLite migration 20)",
+    up: async (client) => {
+      // Mirrors SQLite skills table 1:1 so a skill can be promoted from
+      // per-project (lives in SQLite) → global (lives in PG, queryable from
+      // any machine with shared PG). Cross-project promotion (S2.5-4) walks
+      // this PG table to find candidates.
+      //
+      // Note on JSONB: frontmatter is stored as JSONB (richer than SQLite
+      // TEXT) so future querying ("which skills have requires_network=true?")
+      // is index-able.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skills_pg (
+          skill_id        TEXT PRIMARY KEY,
+          name            TEXT NOT NULL,
+          version         TEXT NOT NULL,
+          scope           TEXT NOT NULL,
+          description     TEXT NOT NULL,
+          frontmatter     JSONB NOT NULL,
+          body            TEXT NOT NULL,
+          body_hmac       TEXT NOT NULL,
+          source_path     TEXT,
+          promoted_from   TEXT,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          archived_at     TIMESTAMPTZ,
+          archive_reason  TEXT
+        )
+      `);
+      // Active-row uniqueness: only one (name, scope) live at a time
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_pg_active
+          ON skills_pg(name, scope)
+          WHERE archived_at IS NULL
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skills_pg_name_scope ON skills_pg(name, scope)`);
+      // Cross-project promotion lookup
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skills_pg_name ON skills_pg(name) WHERE archived_at IS NULL`);
+    },
+  },
+
+  {
+    id: 7,
+    description: "v0.18.0 Sprint 2: skill_runs_pg — execution telemetry (mirror of SQLite migration 21)",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_runs_pg (
+          run_id         TEXT PRIMARY KEY,
+          skill_id       TEXT NOT NULL,
+          project_hash   TEXT NOT NULL,
+          session_id     TEXT NOT NULL,
+          task_id        TEXT,
+          inputs         JSONB NOT NULL,
+          outcome_score  NUMERIC(8,6),
+          total_cost     NUMERIC(18,8),
+          total_tokens   INTEGER,
+          duration_ms    INTEGER,
+          status         TEXT NOT NULL CHECK (status IN ('succeeded','failed','timeout')),
+          failure_trace  TEXT,
+          ts             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sr_pg_skill_ts  ON skill_runs_pg(skill_id, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sr_pg_status   ON skill_runs_pg(status, ts)`);
+      // Cross-project query: find runs of a skill across projects
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sr_pg_skill_project ON skill_runs_pg(skill_id, project_hash, ts DESC)`);
+    },
+  },
+
+  {
+    id: 8,
+    description: "v0.18.0 Sprint 2: skill_mutations_pg — proposal+replay+promotion ledger (mirror of SQLite migration 22)",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_mutations_pg (
+          mutation_id           TEXT PRIMARY KEY,
+          parent_skill_id       TEXT NOT NULL,
+          project_hash          TEXT NOT NULL,
+          candidate_body        TEXT NOT NULL,
+          candidate_hmac        TEXT NOT NULL,
+          proposed_by           TEXT NOT NULL,
+          judged_by             TEXT,
+          judge_score           NUMERIC(8,6),
+          judge_rationale       TEXT,
+          replay_score          NUMERIC(8,6),
+          promoted              BOOLEAN NOT NULL DEFAULT FALSE,
+          promoted_to_skill_id  TEXT,
+          created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          resolved_at           TIMESTAMPTZ
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sm_pg_parent   ON skill_mutations_pg(parent_skill_id, created_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sm_pg_promoted ON skill_mutations_pg(promoted, created_at)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sm_pg_project  ON skill_mutations_pg(project_hash, created_at DESC)`);
+    },
+  },
+
 ];
 
 /**
