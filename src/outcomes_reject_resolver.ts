@@ -88,18 +88,44 @@ async function findRejectedMerge(
 ): Promise<{ id: number; agent_id: string; created_at: string } | null> {
   if (!task) return null;
   return await withClient(async (c) => {
-    const r = await c.query<{ id: number; agent_id: string; created_at: string }>(
-      `SELECT id, agent_id, created_at
-         FROM broadcasts
-        WHERE project_hash = $1
-          AND type = 'MERGE'
-          AND task = $2
-          AND id < $3
-        ORDER BY id DESC
-        LIMIT 1`,
+    // v0.19.1 — two-pass match.
+    //
+    // Strategy 1 (strict): MERGE with the same task field. Best precision.
+    const exact = await c.query<{ id: number; agent_id: string; created_at: string }>(
+      `SELECT id, agent_id, created_at FROM broadcasts
+        WHERE project_hash = $1 AND type = 'MERGE' AND task = $2 AND id < $3
+        ORDER BY id DESC LIMIT 1`,
       [projectHash, task, rejectId],
     );
-    return r.rows[0] ?? null;
+    if (exact.rows[0]) return exact.rows[0];
+
+    // Strategy 2 (fallback): in real-world traces, workers don't always set
+    // the task field on MERGE — they broadcast `{type:'MERGE', summary:'…'}`
+    // without echoing the task. Fall back to the most recent MERGE in the
+    // same project that came AFTER the matching ASSIGN and BEFORE this REJECT.
+    // This is correct as long as the orchestrator REJECTs in roughly the same
+    // order as workers MERGE — which is the standard A2A pattern.
+    //
+    // Bound by id range: must come after an ASSIGN with this task, must come
+    // before this REJECT, must be within 100 broadcasts (sanity bound — if
+    // the merge is 100+ broadcasts old, the orchestrator is REJECTing
+    // something stale and we shouldn't auto-bind).
+    const fallback = await c.query<{ id: number; agent_id: string; created_at: string }>(
+      `WITH assign AS (
+         SELECT id AS assign_id FROM broadcasts
+          WHERE project_hash = $1 AND type = 'ASSIGN' AND task = $2 AND id < $3
+          ORDER BY id DESC LIMIT 1
+       )
+       SELECT b.id, b.agent_id, b.created_at FROM broadcasts b, assign
+        WHERE b.project_hash = $1
+          AND b.type = 'MERGE'
+          AND b.id > assign.assign_id
+          AND b.id < $3
+          AND b.id > ($3 - 100)
+        ORDER BY b.id DESC LIMIT 1`,
+      [projectHash, task, rejectId],
+    );
+    return fallback.rows[0] ?? null;
   });
 }
 
@@ -307,16 +333,37 @@ async function rememberRejection(
   reason:         string | undefined,
   summary:        string | undefined,
 ): Promise<boolean> {
+  // v0.19.1 — write to PG working_memory directly.
+  //
+  // Original implementation used rememberFact() from memory.ts which writes
+  // to a per-project SQLite DB. That works when the resolver runs natively
+  // (e.g. local MCP server in dev). It DOES NOT work when the API server
+  // runs in Docker: the resolver writes to the CONTAINER's
+  // /home/securecontext/.claude/zc-ctx/sessions/<hash>.db, but the agent's
+  // MCP server (running on the HOST) reads from
+  // C:\Users\<user>\.claude\zc-ctx\sessions\<hash>.db. Two different DBs;
+  // the fact never reaches the agent.
+  //
+  // Fix: write to PG working_memory which both sides can reach. The agent's
+  // MCP server already federates SQLite + PG on recall (per memory.ts
+  // recallSharedChannel logic), so the fact will surface in zc_recall_context.
   try {
-    // Lazy import to avoid pulling memory.ts into telemetry-only code paths
-    const { rememberFact } = await import("./memory.js");
+    const projectHash = projectHashOf(projectPath);
     const shortTask = task.replace(/[^a-z0-9]+/gi, "_").slice(0, 40);
     const key = `reject_${shortTask}_${Date.now().toString(36)}`;
     const value = `Last attempt at "${task}" was REJECTED by orchestrator. ` +
       `Reason: ${reason ?? summary ?? "unspecified"}. ` +
       `Agent: ${rejectedAgent}. ` +
       `Before retrying, address the rejection criteria explicitly in your MERGE summary.`;
-    rememberFact(projectPath, key, value, 4, rejectedAgent, "EXTRACTED");
+    await withClient(async (c) => {
+      await c.query(
+        `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (project_hash, key, agent_id) DO UPDATE
+           SET value = EXCLUDED.value, importance = EXCLUDED.importance, created_at = EXCLUDED.created_at`,
+        [projectHash, key.slice(0, 100), value.slice(0, 500), 4, rejectedAgent],
+      );
+    });
     return true;
   } catch (e) {
     logger.error("outcomes", "reject_resolver_memory_write_failed", {
