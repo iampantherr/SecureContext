@@ -4,6 +4,43 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.6] — 2026-04-30 — Remove leftover always-on `mutator` (Sprint 2.6/2.7 design conflict)
+
+One-line cleanup. Sprint 2.6 made `mutator` an always-on role as a safety
+net (so the L1 trigger had a worker to enqueue to). Sprint 2.7 replaced
+that with per-pool auto-spawn (`mutator-engineering`, `mutator-marketing`,
+etc.) — the dispatcher detects queued tasks for any `mutator-<pool>` role
+with no live worker and spawns it on demand, then auto-retires after idle.
+
+But the v0.18.4 commit forgot to remove the always-on default. So bare
+`start-agents.ps1` was launching an extra `mutator` Claude window that
+polled `role='mutator'` — a queue that the L1 trigger never writes to
+(L1 routes to specific pools like `role='mutator-engineering'`). Result:
+one wasted Claude window per session, sitting idle forever.
+
+### Changed
+
+`A2A_dispatcher/start-agents.ps1`:
+  -    [string[]]$AlwaysOnRoles = @("mutator"),
+  +    [string[]]$AlwaysOnRoles = @(),
+
+### Behavior after this fix
+
+Bare `.\start-agents.ps1 -Project <p> -Session <s>` now launches:
+  - **orchestrator only** (Opus 4.7)
+
+When work happens:
+  - Orchestrator dynamically spawns workers (developer, marketer, etc.) via LAUNCH_ROLE
+  - When a worker reports a skill failure, L1 enqueues to the right pool
+  - Dispatcher auto-spawns `mutator-<pool>` (~30s spawn delay, but no idle cost)
+  - Mutator generates candidates, broadcasts pointer, completes task
+  - Dispatcher auto-retires after idle + queue empty + all results consumed
+
+Operators who DO want a specific role pre-spawned (e.g. a long-lived
+`developer-1` for an active session) can still pass:
+  `-Roles developer`        — adds for this run
+  `-AlwaysOnRoles developer` — overrides the default with a custom set
+
 ## [0.18.5] — 2026-04-29 — Edit skill frontmatter from the dashboard (no SQL, no re-import file dance)
 
 Operator-UX patch for the data-collection foundation. Previously, updating
