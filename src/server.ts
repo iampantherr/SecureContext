@@ -918,6 +918,20 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_orchestrator_advisory",
+    description:
+      "v0.18.8 Loop A — Returns a session-start efficiency advisory for the orchestrator. " +
+      "Reads last 7 days of tool_calls_pg for the current project, identifies 1-2 actionable " +
+      "patterns (e.g., 'workers used Read 12× without zc_file_summary — suggest using it'), " +
+      "returns a short string the orchestrator should include in its initial broadcasts so " +
+      "all workers see efficiency hints. Returns null if not enough signal (<10 SC calls in 7d).",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "zc_skill_edit_frontmatter",
     description:
       "v0.18.5 Sprint 2.7 — Edit a skill's frontmatter (description, intended_roles, " +
@@ -2629,6 +2643,22 @@ async function dispatchToolCall(
           };
         } catch (e) {
           mrDb.close();
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      // ── v0.18.8 Loop A — Orchestrator efficiency advisory ────────────────
+      case "zc_orchestrator_advisory": {
+        try {
+          const { createHash } = await import("node:crypto");
+          const projectHash = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+          const { buildOrchestratorAdvisory } = await import("./dashboard/savings_snapshotter.js");
+          const advisory = await buildOrchestratorAdvisory(projectHash);
+          if (!advisory) {
+            return { content: [{ type: "text", text: "(no advisory: <10 SC calls in last 7d, or no actionable patterns detected)" }] };
+          }
+          return { content: [{ type: "text", text: advisory }] };
+        } catch (e) {
           return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
         }
       }

@@ -348,8 +348,11 @@ export async function createApiServer(storeOverride?: Store) {
         return res.rows;
       });
       const { loadProjectNameMap } = await import("./dashboard/render.js");
+      const { fetchSkillEfficiency } = await import("./dashboard/savings_snapshotter.js");
       const nameMap = loadProjectNameMap();
-      reply.type("text/html").send(renderSkillsListFragment(rows, nameMap));
+      // v0.18.8 Loop B — pull per-skill avg cost (cross-project; we filter by skill_id, not project)
+      const effMap = await fetchSkillEfficiency("");
+      reply.type("text/html").send(renderSkillsListFragment(rows, nameMap, effMap));
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to load skills: ${escapeHtml((e as Error).message)}</div>`);
     }
@@ -406,6 +409,71 @@ export async function createApiServer(storeOverride?: Store) {
       reply.type("text/html").send(renderSavingsHtml(summary, projectName));
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to compute savings: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.18.8 — snapshotter trigger (called by dispatcher tick). No-auth (local).
+  // Supports ?force=true + ?cadence=<4h|daily> + ?anchor=<ISO> for explicit
+  // backfills (testing or manual recovery).
+  app.post("/dashboard/savings/snapshot", async (request, reply) => {
+    const q = request.query as Record<string, unknown>;
+    try {
+      if (q.force === "true" || q.force === "1") {
+        const { runSnapshotter } = await import("./dashboard/savings_snapshotter.js");
+        const cadence = (String(q.cadence ?? "4h") === "daily" ? "daily" : "4h") as "4h" | "daily";
+        const anchor = q.anchor ? new Date(String(q.anchor)) : undefined;
+        const result = await runSnapshotter(cadence, { force: true, anchor });
+        reply.send({ ok: true, mode: "force", ...result });
+      } else {
+        const { maybeRunSnapshotter } = await import("./dashboard/savings_snapshotter.js");
+        await maybeRunSnapshotter();
+        reply.send({ ok: true, mode: "cooldown-checked" });
+      }
+    } catch (e) {
+      reply.send({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  // v0.18.8 — trend data + per-agent + anti-patterns for the project's panel
+  app.get("/dashboard/savings/trend", async (request, reply) => {
+    const q = request.query as Record<string, unknown>;
+    const projectHash = String(q.project ?? "").trim();
+    const cadence     = (String(q.cadence ?? "daily") === "4h" ? "4h" : "daily") as "4h" | "daily";
+    const count       = Math.max(1, Math.min(60, parseInt(String(q.count ?? (cadence === "daily" ? 30 : 24)), 10) || 30));
+    if (!/^[0-9a-f]{16}$/.test(projectHash)) {
+      reply.type("text/html").send(`<div class="empty">Pick a project for trend data.</div>`);
+      return;
+    }
+    try {
+      const { fetchTrend, renderTrendSparkline, detectAntiPatterns,
+              renderAntiPatterns, renderPerAgentBreakdown } = await import("./dashboard/savings_snapshotter.js");
+      const points = await fetchTrend(projectHash, cadence, count);
+
+      // Latest snapshot for per_agent breakdown
+      let perAgentHtml = "";
+      try {
+        const { withClient } = await import("./pg_pool.js");
+        const latest = await withClient(async (c) => {
+          const res = await c.query<{ per_agent: unknown }>(
+            `SELECT per_agent FROM token_savings_snapshots_pg
+              WHERE project_hash = $1 AND cadence = $2
+              ORDER BY period_start DESC LIMIT 1`,
+            [projectHash, cadence],
+          );
+          return res.rows[0]?.per_agent;
+        });
+        if (latest) {
+          const perAgent = typeof latest === "string" ? JSON.parse(latest) : (latest as Record<string, never>);
+          perAgentHtml = renderPerAgentBreakdown(perAgent);
+        }
+      } catch { /* tolerate */ }
+
+      const antiPatterns     = await detectAntiPatterns(projectHash);
+      const antiPatternsHtml = renderAntiPatterns(antiPatterns);
+      const trendHtml        = renderTrendSparkline(points);
+      reply.type("text/html").send(trendHtml + perAgentHtml + antiPatternsHtml);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load trend: ${escapeHtml((e as Error).message)}</div>`);
     }
   });
 

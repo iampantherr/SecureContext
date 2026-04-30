@@ -870,6 +870,41 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 27,
+    description: "v0.18.8 Sprint 2.8: token_savings_snapshots — 4h + daily rollups of per-project SC tool usage + estimated savings",
+    up: (db) => {
+      // Aggregate of tool_calls_pg for fast trend queries. Two cadences:
+      //   - cadence='4h'   : one row per project per 4-hour window (last 24h granularity)
+      //   - cadence='daily': one row per project per UTC day (long-range trend)
+      // The savings panel uses 4h for "last 24 hours" detail view and
+      // daily for "last 30 days" sparkline. 4-hourly aligns with typical
+      // Claude Code work-session blocks (not too frequent, not too sparse).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS token_savings_snapshots (
+          snapshot_id      TEXT PRIMARY KEY,
+          project_hash     TEXT NOT NULL,
+          cadence          TEXT NOT NULL CHECK (cadence IN ('4h','daily')),
+          period_start     TEXT NOT NULL,            -- ISO timestamp; bucket start (UTC-aligned: 00,04,08,12,16,20 for 4h; 00 for daily)
+          period_end       TEXT NOT NULL,            -- ISO timestamp; bucket end exclusive
+          total_calls            INTEGER NOT NULL,
+          total_actual_tokens    INTEGER NOT NULL,
+          total_actual_cost_usd  REAL    NOT NULL,
+          total_estimated_native_tokens INTEGER NOT NULL,
+          total_saved_tokens     INTEGER NOT NULL,
+          total_saved_cost_usd   REAL    NOT NULL,
+          reduction_pct          REAL    NOT NULL,
+          confidence             TEXT    NOT NULL,
+          per_tool               TEXT    NOT NULL,    -- JSON breakdown
+          per_agent              TEXT    NOT NULL,    -- JSON: {agent_id: {calls, saved_tokens, reduction_pct}}
+          created_at             TEXT    NOT NULL,
+          UNIQUE(project_hash, cadence, period_start)
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_savings_snapshots_project ON token_savings_snapshots(project_hash, cadence, period_start DESC);`);
+    },
+  },
+
 ];
 
 /**

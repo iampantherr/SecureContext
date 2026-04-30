@@ -4,6 +4,151 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.8] — 2026-04-30 — Sprint 2.8: persistent savings snapshots + trend + feedback loops
+
+Closes the "v0.18.7 panel only shows the current window" gap. Savings data
+is now **persisted** every 4h and daily, surfaced as a 30-day sparkline,
+broken down per agent, scanned for anti-patterns, and fed back into the
+orchestrator's session-start advisory and the skills list. The dashboard
+goes from "current snapshot of efficiency" to "trend + diagnosis + advice."
+
+### Added — `src/dashboard/savings_snapshotter.ts`
+
+  - `bucketBounds(t, cadence)` — UTC-aligned 4h + daily window math
+  - `buildSnapshot(projectHash, anchor, cadence)` — aggregates per-tool +
+    per-agent rollups from `tool_calls_pg` over a closed bucket
+  - `runSnapshotter(cadence, opts)` — idempotent UPSERT (re-running a
+    bucket overwrites with same values; safe on retries)
+  - `maybeRunSnapshotter()` — cooldown-checked entry point: 4h cadence
+    runs at most every 4h, daily cadence at most every 24h
+  - `fetchTrend(projectHash, cadence, count)` — last N points for sparkline
+  - `detectAntiPatterns(projectHash)` — 3 conservative detectors:
+    - `unread_summary` (≥10 zc_summarize_session calls with no following
+      zc_recall_context) → severity=warn
+    - `duplicate_recall` (≥3 zc_recall_context within 30s) → severity=warn
+    - `expensive_skill` (skill avg cost > 1.5× project median, ≥5 runs) → severity=info
+  - `buildOrchestratorAdvisory(projectHash)` — Loop A: returns text
+    rendered into `zc_orchestrator_advisory` MCP tool output
+  - `fetchSkillEfficiency(projectHash)` — Loop B: per-skill avg cost +
+    run count, joined into the dashboard skills list
+  - `renderTrendSparkline(points)` — server-rendered inline SVG, no JS deps
+  - `renderPerAgentBreakdown(perAgent)` — top-N sorted desc, collapsible
+  - `renderAntiPatterns(patterns)` — chip strip with severity classes
+
+### Schema — migrations 27 (SQLite) + 13 (PG)
+
+```sql
+-- both backends, abridged
+CREATE TABLE token_savings_snapshots (
+  snapshot_id      TEXT PRIMARY KEY,
+  project_hash     TEXT NOT NULL,
+  cadence          TEXT NOT NULL CHECK (cadence IN ('4h','daily')),
+  period_start     TIMESTAMPTZ NOT NULL,
+  period_end       TIMESTAMPTZ NOT NULL,
+  total_calls            BIGINT NOT NULL,
+  total_actual_tokens    BIGINT NOT NULL,
+  total_estimated_native_tokens BIGINT NOT NULL,
+  total_saved_tokens     BIGINT NOT NULL,
+  reduction_pct          NUMERIC(6,2) NOT NULL,
+  confidence             TEXT NOT NULL,
+  per_tool               JSONB NOT NULL,
+  per_agent              JSONB NOT NULL,
+  created_at             TIMESTAMPTZ NOT NULL,
+  UNIQUE(project_hash, cadence, period_start)
+);
+```
+
+### Added — HTTP routes
+
+  - `POST /dashboard/savings/snapshot` — runs the snapshotter once;
+    accepts `?force=true&cadence=<4h|daily>&anchor=<ISO>` for backfills
+    + tests; returns `{ok:true, "4h":{...}, daily:{...}}` summary
+  - `GET /dashboard/savings/trend?project=<hash>&cadence=<4h|daily>&count=<N>`
+    — returns rendered HTML fragment (sparkline + per-agent + anti-patterns)
+  - Updated `/dashboard/skills` — joins `fetchSkillEfficiency()` so each
+    skill row shows "avg cost: N tokens/run · M runs"
+
+### Added — MCP tool `zc_orchestrator_advisory`
+
+Loop A: orchestrator calls this once at session start (after
+`zc_recall_context`). Returns ~500-token markdown with: 7-day
+saved_tokens trend, top-3 most expensive tools, current confidence
+level, list of detected anti-patterns. Inserted into orchestrator
+prompt via `start-agents.ps1`:
+
+> "EFFICIENCY ADVISORY (v0.18.8): At session start, after
+> `zc_recall_context`, call `zc_orchestrator_advisory()` once and
+> use the output to plan token-aware delegation."
+
+### Dispatcher integration (A2A_dispatcher commit forthcoming)
+
+`dispatcher.mjs` health-check tick fires
+`POST /dashboard/savings/snapshot` (non-fatal try/catch). Cooldown
+gates prevent over-running; safe to fire on every tick.
+
+### Dashboard UI
+
+  - **Trend panel** below the savings panel: cadence selector
+    (4h / daily), 30-day sparkline, per-agent breakdown, anti-pattern chips
+  - **Skill efficiency column**: cost-per-run + run count for each skill
+    in the Skills list
+  - Footer bumped to v0.18.8
+
+### Counterfactual baselines (unchanged from v0.18.7)
+
+Same per-tool baselines as v0.18.7, still tunable via `ZC_SAVINGS_*_BASELINE`.
+
+### Future work — flagged for Sprint 2.9
+
+  - **Loop C — counterfactual baseline auto-tune.** Per-project per-tool
+    baseline calibration from observed pre-SC traces. Saved to memory
+    under key `future-loop-c-baseline-autotune`. Out of scope for v0.18.8
+    per operator direction ("ship as v0.18.8 right now").
+
+### Tests
+
+**839 passing** (was 828; +11 net Sprint 2.8). New file
+`src/dashboard/savings_snapshotter.test.ts` covers:
+
+  - `renderTrendSparkline`: empty state, SVG path, single-point graceful
+    handling, all-zero `saved_tokens` (no NaN, no division by zero)
+  - `renderPerAgentBreakdown`: empty state, top-N sorted desc, XSS guard
+  - `renderAntiPatterns`: empty state, severity chip classes, count header
+
+PG-backed paths (snapshotter, fetchTrend, detectAntiPatterns,
+buildOrchestratorAdvisory, fetchSkillEfficiency) gated behind
+`ZC_POSTGRES_*` env (skipped in CI; covered E2E below).
+
+### E2E verification (live)
+
+Documented in `docs/SPRINT_2_8_TEST_REPORT.md`. Highlights:
+
+  - Schema migrations 27 + 13 applied live; PG mig 13 row verified by
+    introspection query
+  - Force-snapshot endpoint produced math-verified row: 3 synthetic SC
+    calls (zc_recall_context + zc_search + zc_file_summary) →
+    `actual=4,500 native_eq=60,000 saved=55,500 reduction_pct=92.50`
+  - Browser smoke (Playwright): project dropdown populated, savings panel
+    renders, trend SVG visible, cadence-switch works, skill efficiency
+    column displays
+  - Synthetic test data cleaned (`aaaa1111bbbb2222`); final docker
+    rebuild confirmed v0.18.8 footer
+
+### Bugs fixed mid-sprint
+
+  1. **Test assertion mismatch on all-zero `saved_tokens`** — initial
+     assertion `expect(html).toContain("0 tokens saved")` failed because
+     the actual SVG render includes `<strong>0</strong> tokens saved`.
+     Tightened to regex match (`/>0<\/strong>\s*tokens saved/`). 11/11
+     now pass.
+  2. **Cadence-aware schema refactor mid-sprint** — initial design used
+     `snapshot_date DATE` (daily-only) but operator clarified "do 4
+     hourly cadence not hourly. And then have daily metrics." Refactored
+     to `cadence TEXT CHECK (cadence IN ('4h','daily'))` +
+     `UNIQUE(project_hash, cadence, period_start)`; snapshotter rewrote
+     with `bucketBounds()` helper supporting both. Two cooldowns: 4h /
+     24h.
+
 ## [0.18.7] — 2026-04-30 — Token savings panel: live SC-vs-native estimate per project
 
 Replaces the Sprint-2.7 placeholder panel with a real operator-facing

@@ -436,6 +436,35 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 13,
+    description: "v0.18.8 Sprint 2.8: token_savings_snapshots_pg — 4h + daily rollups with per_tool + per_agent JSONB",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS token_savings_snapshots_pg (
+          snapshot_id      TEXT PRIMARY KEY,
+          project_hash     TEXT NOT NULL,
+          cadence          TEXT NOT NULL CHECK (cadence IN ('4h','daily')),
+          period_start     TIMESTAMPTZ NOT NULL,
+          period_end       TIMESTAMPTZ NOT NULL,
+          total_calls            INTEGER NOT NULL,
+          total_actual_tokens    BIGINT  NOT NULL,
+          total_actual_cost_usd  NUMERIC(18,8) NOT NULL,
+          total_estimated_native_tokens BIGINT NOT NULL,
+          total_saved_tokens     BIGINT  NOT NULL,
+          total_saved_cost_usd   NUMERIC(18,8) NOT NULL,
+          reduction_pct          NUMERIC(5,2)  NOT NULL,
+          confidence             TEXT NOT NULL CHECK (confidence IN ('low','medium','high')),
+          per_tool               JSONB NOT NULL,
+          per_agent              JSONB NOT NULL,
+          created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(project_hash, cadence, period_start)
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_savings_snapshots_pg_project ON token_savings_snapshots_pg(project_hash, cadence, period_start DESC)`);
+    },
+  },
+
 ];
 
 /**

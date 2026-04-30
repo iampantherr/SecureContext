@@ -247,6 +247,11 @@ export function renderDashboardHtml(): string {
   .skill-edit-form details.fixtures-readonly summary { cursor: pointer; color: #94a3b8; font-size: 0.85rem; }
   .skill-edit-form hr { border: none; border-top: 1px solid #2a2f37; margin: 16px 0; }
   .skill-edit-response { margin-top: 12px; }
+  /* v0.18.8 — skill efficiency column (Loop B) */
+  .skill-eff { color: #cbd5e1; font-size: 0.82rem; cursor: help; border-bottom: 1px dotted #6b7280; }
+  .skill-eff strong { color: #4ade80; font-family: ui-monospace, monospace; }
+  .skill-eff-none { color: #6b7280; }
+  .skill-eff-none em { font-style: italic; }
   /* v0.18.7 — token savings panel */
   .savings-controls { display: flex; gap: 16px; margin-bottom: 12px; align-items: center; }
   .savings-controls label { font-size: 0.85rem; color: #cbd5e1; display: flex; gap: 6px; align-items: center; }
@@ -264,6 +269,19 @@ export function renderDashboardHtml(): string {
   .savings-methodology summary { cursor: pointer; }
   .savings-methodology ul { margin: 8px 0 0 0; padding-left: 20px; }
   .savings-methodology li { margin-bottom: 4px; }
+  /* v0.18.8 — trend / per-agent / anti-patterns */
+  .trend-panel { margin-top: 16px; padding: 12px; background: #0e1116; border: 1px solid #2a2f37; border-radius: 6px; }
+  .trend-header { font-size: 0.85rem; color: #cbd5e1; margin-bottom: 8px; }
+  .trend-svg { width: 100%; height: 80px; display: block; }
+  .trend-axis { display: flex; justify-content: space-between; font-size: 0.72rem; color: #6b7280; margin-top: 4px; }
+  .trend-empty { color: #94a3b8; font-style: italic; padding: 8px; background: #050709; border-radius: 4px; font-size: 0.85rem; }
+  .per-agent-panel { margin-top: 12px; padding: 8px 12px; background: #0a0d12; border: 1px solid #1f2937; border-radius: 4px; font-size: 0.85rem; }
+  .per-agent-panel summary { cursor: pointer; color: #cbd5e1; font-weight: 600; }
+  .anti-patterns-panel { margin-top: 12px; padding: 8px 12px; background: #050709; border: 1px solid #2a2f37; border-radius: 4px; font-size: 0.85rem; }
+  .anti-patterns-panel summary { cursor: pointer; color: #fbbf24; font-weight: 600; }
+  .anti-pattern { padding: 6px 10px; margin-top: 6px; border-radius: 4px; font-size: 0.85rem; }
+  .anti-pattern.warn-chip { background: #7f1d1d; color: #fecaca; border-left: 3px solid #f87171; }
+  .anti-pattern.info-chip { background: #1f2937; color: #cbd5e1; border-left: 3px solid #fbbf24; }
   .rationale { color: #cbd5e1; font-style: italic; margin-bottom: 6px; padding-left: 12px; border-left: 2px solid #38bdf8; }
   form { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2a2f37; }
   form label { display: block; margin-bottom: 8px; font-size: 0.85rem; color: #cbd5e1; }
@@ -346,6 +364,15 @@ export function renderDashboardHtml(): string {
   <div id="savings-panel">
     <p class="empty">Pick a project above to estimate token savings.</p>
   </div>
+  <div id="savings-trend-controls" style="margin-top:16px; display:none">
+    <label>Trend cadence:
+      <select id="savings-trend-cadence" name="cadence">
+        <option value="daily" selected>Daily (last 30 days)</option>
+        <option value="4h">4-hour buckets (last 24 hours)</option>
+      </select>
+    </label>
+  </div>
+  <div id="savings-trend"></div>
   <script>
     // Lazy-load project options on first render
     (async () => {
@@ -356,11 +383,27 @@ export function renderDashboardHtml(): string {
         if (sel) sel.innerHTML = '<option value="">— pick a project —</option>' + html;
       } catch (e) { /* swallow */ }
     })();
+    // Load trend + per-agent + anti-patterns when project changes
+    document.getElementById('savings-project')?.addEventListener('change', async (e) => {
+      const proj = e.target.value;
+      const trendDiv = document.getElementById('savings-trend');
+      const trendCtrls = document.getElementById('savings-trend-controls');
+      if (!proj) { trendDiv.innerHTML = ''; trendCtrls.style.display = 'none'; return; }
+      trendCtrls.style.display = 'block';
+      const cad = document.getElementById('savings-trend-cadence').value;
+      try {
+        const r = await fetch(\`/dashboard/savings/trend?project=\${encodeURIComponent(proj)}&cadence=\${cad}\`, { cache: 'no-store' });
+        trendDiv.innerHTML = await r.text();
+      } catch (err) { trendDiv.innerHTML = '<div class="error">Failed to load trend.</div>'; }
+    });
+    document.getElementById('savings-trend-cadence')?.addEventListener('change', () => {
+      document.getElementById('savings-project')?.dispatchEvent(new Event('change'));
+    });
   </script>
 </div>
 
 <footer>
-  v0.18.7 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
+  v0.18.8 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
   Notifications poll every 5s; pending list every 10s.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>
@@ -432,6 +475,7 @@ interface SkillRow {
 export function renderSkillsListFragment(
   rows: Array<Record<string, unknown>>,
   projectNameMap: Map<string, string> = new Map(),
+  efficiencyMap: Map<string, { avg_tokens: number; run_count: number }> = new Map(),
 ): string {
   if (rows.length === 0) {
     return `<p class="empty">No active skills found. Use <code>zc_skill_import</code> to add one.</p>`;
@@ -472,6 +516,11 @@ export function renderSkillsListFragment(
       const intendedHtml = intended.length > 0
         ? intended.map((r) => `<code class="role-tag">${escapeHtml(r)}</code>`).join(" ")
         : `<span style="color:#6b7280; font-style:italic">no intended_roles</span>`;
+      // v0.18.8 Loop B — skill efficiency column
+      const eff = efficiencyMap.get(s.skill_id);
+      const effHtml = eff
+        ? `<span class="skill-eff" title="Average across ${eff.run_count} runs in last 30 days">avg cost: <strong>${Math.round(eff.avg_tokens).toLocaleString()}</strong> tokens/run · ${eff.run_count} runs</span>`
+        : `<span class="skill-eff skill-eff-none" title="Insufficient data (need ≥3 runs in last 30 days)">avg cost: <em>n/a</em></span>`;
       return `
         <div class="skill-row" data-skill-id="${escapeHtml(s.skill_id)}">
           <div class="skill-header">
@@ -484,7 +533,8 @@ export function renderSkillsListFragment(
           </div>
           <div class="skill-meta">
             ${escapeHtml(s.description || "(no description)")}<br>
-            roles: ${intendedHtml}
+            roles: ${intendedHtml}<br>
+            ${effHtml}
             ${guidance ? `<br>guidance: <span class="guidance-preview">${escapeHtml(guidance.slice(0, 120))}${guidance.length > 120 ? "…" : ""}</span>` : ""}
           </div>
           <div class="skill-edit-zone"></div>
