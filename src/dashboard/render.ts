@@ -247,6 +247,23 @@ export function renderDashboardHtml(): string {
   .skill-edit-form details.fixtures-readonly summary { cursor: pointer; color: #94a3b8; font-size: 0.85rem; }
   .skill-edit-form hr { border: none; border-top: 1px solid #2a2f37; margin: 16px 0; }
   .skill-edit-response { margin-top: 12px; }
+  /* v0.18.7 — token savings panel */
+  .savings-controls { display: flex; gap: 16px; margin-bottom: 12px; align-items: center; }
+  .savings-controls label { font-size: 0.85rem; color: #cbd5e1; display: flex; gap: 6px; align-items: center; }
+  .savings-controls select { padding: 4px 8px; background: #0a0d12; color: #e6e8eb; border: 1px solid #2a2f37; border-radius: 4px; font-family: inherit; font-size: 0.9rem; }
+  .savings-summary .savings-header { font-size: 0.85rem; color: #94a3b8; margin-bottom: 12px; line-height: 1.5; }
+  .savings-totals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px; }
+  .savings-tile { background: #0e1116; border: 1px solid #2a2f37; border-radius: 6px; padding: 12px; text-align: center; }
+  .savings-tile-num { font-size: 1.4rem; font-weight: 700; color: #4ade80; font-family: ui-monospace, monospace; }
+  .savings-tile-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+  .savings-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-bottom: 12px; }
+  .savings-table th { text-align: left; padding: 6px 10px; background: #1f2937; color: #94a3b8; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; font-weight: 600; border-bottom: 1px solid #2a2f37; }
+  .savings-table td { padding: 6px 10px; border-bottom: 1px solid #1f2937; color: #cbd5e1; }
+  .savings-table td.savings-cell { color: #4ade80; }
+  .savings-methodology { margin-top: 8px; padding: 8px 12px; background: #050709; border: 1px solid #2a2f37; border-radius: 4px; font-size: 0.8rem; color: #94a3b8; }
+  .savings-methodology summary { cursor: pointer; }
+  .savings-methodology ul { margin: 8px 0 0 0; padding-left: 20px; }
+  .savings-methodology li { margin-bottom: 4px; }
   .rationale { color: #cbd5e1; font-style: italic; margin-bottom: 6px; padding-left: 12px; border-left: 2px solid #38bdf8; }
   form { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2a2f37; }
   form label { display: block; margin-bottom: 8px; font-size: 0.85rem; color: #cbd5e1; }
@@ -303,12 +320,47 @@ export function renderDashboardHtml(): string {
 </div>
 
 <div class="panel">
-  <h2 style="opacity:0.6">Token savings (this project, last 7 days)</h2>
-  <p class="empty">Sprint 2.7 — coming soon. Planned panels: token savings (KB hits vs Read), context-restore overhead, mutation cost vs human-edit cost.</p>
+  <h2>Token savings <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(estimated, vs counterfactual native flow)</span></h2>
+  <div class="savings-controls">
+    <label>Project:
+      <select id="savings-project" name="project"
+              hx-get="/dashboard/savings"
+              hx-trigger="change"
+              hx-target="#savings-panel"
+              hx-include="[name='window']">
+        <option value="">— loading projects… —</option>
+      </select>
+    </label>
+    <label>Window:
+      <select name="window"
+              hx-get="/dashboard/savings"
+              hx-trigger="change"
+              hx-target="#savings-panel"
+              hx-include="[name='project']">
+        <option value="session">Last hour (session)</option>
+        <option value="24h">Last 24 hours</option>
+        <option value="7d" selected>Last 7 days</option>
+      </select>
+    </label>
+  </div>
+  <div id="savings-panel">
+    <p class="empty">Pick a project above to estimate token savings.</p>
+  </div>
+  <script>
+    // Lazy-load project options on first render
+    (async () => {
+      try {
+        const r = await fetch('/dashboard/savings/projects', { cache: 'no-store' });
+        const html = await r.text();
+        const sel = document.getElementById('savings-project');
+        if (sel) sel.innerHTML = '<option value="">— pick a project —</option>' + html;
+      } catch (e) { /* swallow */ }
+    })();
+  </script>
 </div>
 
 <footer>
-  v0.18.5 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
+  v0.18.7 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
   Notifications poll every 5s; pending list every 10s.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>

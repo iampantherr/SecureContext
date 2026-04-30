@@ -383,6 +383,58 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ─── v0.18.7 — Token savings panel ──────────────────────────────────────
+  app.get("/dashboard/savings", async (request, reply) => {
+    const q = request.query as Record<string, unknown>;
+    const projectHash = String(q.project ?? "").trim();
+    const window      = String(q.window  ?? "7d").trim();  // "7d" | "24h" | "session" (= 1h proxy)
+    if (!projectHash || !/^[0-9a-f]{16}$/.test(projectHash)) {
+      reply.type("text/html").send(`<div class="empty">Pick a project to compute savings. (No project_hash supplied.)</div>`);
+      return;
+    }
+    const until = new Date();
+    const since = new Date(until);
+    if      (window === "24h")     since.setHours(until.getHours() - 24);
+    else if (window === "session") since.setHours(until.getHours() - 1);
+    else                           since.setDate(until.getDate() - 7);  // default 7d
+
+    try {
+      const { computeSavings, renderSavingsHtml } = await import("./dashboard/token_savings.js");
+      const { loadProjectNameMap } = await import("./dashboard/render.js");
+      const summary = await computeSavings(projectHash, since.toISOString(), until.toISOString());
+      const projectName = loadProjectNameMap().get(projectHash) ?? null;
+      reply.type("text/html").send(renderSavingsHtml(summary, projectName));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to compute savings: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  app.get("/dashboard/savings/projects", async (_request, reply) => {
+    // Returns the list of projects that have ANY tool_calls — for the picker
+    const { withClient } = await import("./pg_pool.js");
+    const { loadProjectNameMap } = await import("./dashboard/render.js");
+    try {
+      const rows = await withClient(async (c) => {
+        const res = await c.query<{ project_hash: string; n: string }>(
+          `SELECT project_hash, COUNT(*)::text AS n
+             FROM tool_calls_pg
+            WHERE ts > now() - interval '30 days'
+            GROUP BY project_hash
+            ORDER BY n DESC LIMIT 20`,
+        );
+        return res.rows;
+      });
+      const nameMap = loadProjectNameMap();
+      const opts = rows.map((r) => {
+        const name = nameMap.get(r.project_hash) ?? `project:${r.project_hash.slice(0, 8)}…`;
+        return `<option value="${escapeHtml(r.project_hash)}">${escapeHtml(name)} (${r.n} calls)</option>`;
+      }).join("");
+      reply.type("text/html").send(opts || `<option value="">(no projects with activity)</option>`);
+    } catch (e) {
+      reply.type("text/html").send(`<option value="">Error loading projects: ${escapeHtml((e as Error).message)}</option>`);
+    }
+  });
+
   app.post("/dashboard/skills/edit", async (request, reply) => {
     const body = request.body as Record<string, unknown>;
     const skill_id        = String(body.skill_id ?? "").trim();
