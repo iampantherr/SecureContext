@@ -420,22 +420,45 @@ export function renderDashboardHtml(): string {
     document.getElementById('savings-trend-cadence')?.addEventListener('change', () => {
       document.getElementById('savings-project')?.dispatchEvent(new Event('change'));
     });
-    // v0.18.9 — auto-refresh every 10s while a project is selected. Re-fires
-    // the existing HTMX project-change handler so both the savings panel and
-    // the trend panel update with fresh data. Cheap (single GET each), and
-    // pauses cleanly when no project is selected.
-    setInterval(() => {
-      const sel = document.getElementById('savings-project');
-      if (sel && sel.value) {
-        // Trigger the HTMX-bound select handler to re-fetch /dashboard/savings.
-        // htmx.trigger() fires hx-trigger="change" on the element, refreshing
-        // both #savings-panel (HTMX swap) and the trend div (our JS listener).
-        if (window.htmx) {
-          window.htmx.trigger(sel, 'change');
-        } else {
-          sel.dispatchEvent(new Event('change'));
-        }
+    // v0.18.9 — auto-refresh every 10s while a project is selected.
+    // Originally tried htmx.trigger(sel, 'change') but HTMX dedupes when
+    // the request URL is unchanged from the last call — so polling the same
+    // project produced zero re-fetches. Switched to htmx.ajax() with explicit
+    // values, which always issues a fresh GET. Refreshes BOTH the savings
+    // panel (HTMX swap) and the trend panel (manual fetch since it's a
+    // separate JS-driven widget).
+    setInterval(async () => {
+      const proj = document.getElementById('savings-project')?.value;
+      if (!proj) return;
+      const win  = document.querySelector('select[name="window"]')?.value || '7d';
+      // 1) Refresh main savings panel
+      if (window.htmx) {
+        window.htmx.ajax('GET', '/dashboard/savings', {
+          target: '#savings-panel',
+          swap: 'innerHTML',
+          values: { project: proj, window: win },
+        });
       }
+      // 2) Refresh trend / per-agent / anti-pattern panel
+      const cad = document.getElementById('savings-trend-cadence')?.value || 'daily';
+      const trendDiv = document.getElementById('savings-trend');
+      if (trendDiv) {
+        try {
+          const r = await fetch(\`/dashboard/savings/trend?project=\${encodeURIComponent(proj)}&cadence=\${cad}\`, { cache: 'no-store' });
+          trendDiv.innerHTML = await r.text();
+        } catch (err) { /* keep last view, don't blank */ }
+      }
+      // 3) Refresh project dropdown counts (so "(N calls)" reflects fresh data)
+      try {
+        const r = await fetch('/dashboard/savings/projects', { cache: 'no-store' });
+        const html = await r.text();
+        const sel = document.getElementById('savings-project');
+        if (sel) {
+          const currentValue = sel.value;
+          sel.innerHTML = '<option value="">— pick a project —</option>' + html;
+          sel.value = currentValue;
+        }
+      } catch (err) { /* keep last view */ }
     }, 10000);
   </script>
 </div>
