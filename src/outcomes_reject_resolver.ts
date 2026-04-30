@@ -140,8 +140,13 @@ async function writeOutcomeRow(
           ) VALUES (
             $1, 'task', $2, 'rejected',
             'orchestrator_reject', 0.95, -0.5, $3::jsonb,
-            now(), 'unchained-v0_19_0', $4, NULL, 'orchestrator'
+            now(), 'unchained-v0_19_0', $4, 'public', 'orchestrator'
           ) RETURNING id`,
+        // classification='public' — orchestrator REJECT broadcasts are routed
+        // through the shared channel and visible to all workers in the project,
+        // so 'public' is correct per the v0.16.0 T3.2 MAC scheme. NOT NULL
+        // constraint added by mig 4 in v0.16.0; previous v0.19.0 RC had NULL
+        // which violated the constraint silently (caught by E2E).
         [outcomeId, task, JSON.stringify(evidence), createHash("sha256").update(outcomeId).digest("hex")],
       );
       void r;
@@ -167,6 +172,14 @@ function appendFailureLearning(
   reason:         string | undefined,
   summary:        string | undefined,
 ): boolean {
+  // Docker note: when the API server runs in a Linux container, projectPath
+  // is the host's Windows path (e.g. "C:\\Users\\Amit\\..."), which the
+  // container can't access. In that case mkdir/append fails with EACCES or
+  // ENOENT — that's expected and not a bug. The outcomes_pg row + working
+  // memory fact are the canonical record; learnings/failures.jsonl is a
+  // nice-to-have for native (non-Docker) deployments + for the
+  // learnings-indexer hook to pick up later. Failure here is downgraded
+  // to INFO log to avoid polluting the ERROR stream.
   try {
     const learningsDir = join(projectPath, "learnings");
     if (!existsSync(learningsDir)) mkdirSync(learningsDir, { recursive: true });
@@ -185,9 +198,17 @@ function appendFailureLearning(
     appendFileSync(file, JSON.stringify(row) + "\n", "utf-8");
     return true;
   } catch (e) {
-    logger.error("outcomes", "reject_resolver_learning_append_failed", {
-      error: (e as Error).message, project_path: projectPath,
-    });
+    const msg = (e as Error).message;
+    const isExpectedDockerFailure = msg.includes("EACCES") || msg.includes("ENOENT");
+    if (isExpectedDockerFailure) {
+      logger.info("outcomes", "reject_resolver_learning_skip_docker", {
+        reason: "container cannot reach host project path", project_path: projectPath,
+      });
+    } else {
+      logger.error("outcomes", "reject_resolver_learning_append_failed", {
+        error: msg, project_path: projectPath,
+      });
+    }
     return false;
   }
 }
