@@ -329,6 +329,118 @@ export async function createApiServer(storeOverride?: Store) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  // ─── v0.18.5 Sprint 2.7 — Skill frontmatter editor ──────────────────────
+  // Lists active skills + provides an inline edit form per skill. Body is
+  // preserved verbatim; only frontmatter fields the operator owns are
+  // editable through this surface (description, intended_roles,
+  // mutation_guidance, acceptance_criteria, tags).
+  app.get("/dashboard/skills", async (_request, reply) => {
+    const { renderSkillsListFragment } = await import("./dashboard/render.js");
+    const { withClient } = await import("./pg_pool.js");
+    try {
+      const rows = await withClient(async (c) => {
+        const res = await c.query<Record<string, unknown>>(
+          `SELECT skill_id, name, version, scope, description, frontmatter
+             FROM skills_pg
+            WHERE archived_at IS NULL
+            ORDER BY scope, name`,
+        );
+        return res.rows;
+      });
+      const { loadProjectNameMap } = await import("./dashboard/render.js");
+      const nameMap = loadProjectNameMap();
+      reply.type("text/html").send(renderSkillsListFragment(rows, nameMap));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load skills: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  app.get("/dashboard/skills/edit", async (request, reply) => {
+    const skillId = String((request.query as Record<string, unknown>)?.skill_id ?? "");
+    if (!skillId) {
+      reply.type("text/html").send(`<div class="error">Missing skill_id query parameter.</div>`);
+      return;
+    }
+    const { renderSkillEditForm } = await import("./dashboard/render.js");
+    const { withClient } = await import("./pg_pool.js");
+    try {
+      const row = await withClient(async (c) => {
+        const res = await c.query<Record<string, unknown>>(
+          `SELECT skill_id, name, version, scope, description, frontmatter, body
+             FROM skills_pg
+            WHERE skill_id = $1`,
+          [skillId],
+        );
+        return res.rows[0] ?? null;
+      });
+      if (!row) {
+        reply.type("text/html").send(`<div class="error">Skill not found: ${escapeHtml(skillId)}</div>`);
+        return;
+      }
+      reply.type("text/html").send(renderSkillEditForm(row));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load skill: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  app.post("/dashboard/skills/edit", async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    const skill_id        = String(body.skill_id ?? "").trim();
+    const confirm_id      = String(body.confirm_id ?? "").trim();
+    const rationale       = String(body.rationale ?? "").trim();
+    if (!skill_id || skill_id !== confirm_id) {
+      reply.type("text/html").send(`<div class="error">❌ Confirmation failed: typed skill_id does not match.</div>`);
+      return;
+    }
+    if (!rationale) {
+      reply.type("text/html").send(`<div class="error">❌ Rationale required.</div>`);
+      return;
+    }
+    // Build patch from form fields. Each field is optional; absence = no change.
+    // Empty string for description/mutation_guidance = clear.
+    const changes: Record<string, unknown> = {};
+    if (typeof body.description === "string") {
+      changes.description = (body.description as string).trim();
+    }
+    if (typeof body.intended_roles === "string") {
+      changes.intended_roles = (body.intended_roles as string).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    }
+    if (typeof body.mutation_guidance === "string") {
+      changes.mutation_guidance = (body.mutation_guidance as string).trim();
+    }
+    if (typeof body.tags === "string") {
+      changes.tags = (body.tags as string).split(",").map((s) => s.trim()).filter(Boolean);
+    }
+    const ac: Record<string, number> = {};
+    if (body.min_outcome_score !== undefined && body.min_outcome_score !== "") {
+      const n = Number(body.min_outcome_score);
+      if (Number.isFinite(n)) ac.min_outcome_score = n;
+    }
+    if (body.min_pass_rate !== undefined && body.min_pass_rate !== "") {
+      const n = Number(body.min_pass_rate);
+      if (Number.isFinite(n)) ac.min_pass_rate = n;
+    }
+    if (Object.keys(ac).length > 0) changes.acceptance_criteria = ac;
+
+    try {
+      const { editSkillFrontmatter } = await import("./dashboard/skill_editor.js");
+      const result = await editSkillFrontmatter({
+        skill_id, changes: changes as Parameters<typeof editSkillFrontmatter>[0]["changes"],
+        rationale, decided_by: "operator-dashboard",
+      });
+      reply.type("text/html").send(
+        `<div class="ok">✓ Frontmatter updated<br>` +
+        `→ <code>${escapeHtml(result.prior_skill_id)}</code> archived<br>` +
+        `→ new active: <code>${escapeHtml(result.new_skill_id)}</code><br>` +
+        `→ fields changed: ${result.changed_fields.map((f) => `<code>${escapeHtml(f)}</code>`).join(", ")}<br>` +
+        `→ revision: <code>${escapeHtml(result.revision_id)}</code><br>` +
+        `(refresh the Skills panel to see the new version.)</div>`,
+      );
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">❌ ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   // ─────────────────────────────────────────────────────────────────────────
   // Working Memory
   // ─────────────────────────────────────────────────────────────────────────

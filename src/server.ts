@@ -918,6 +918,43 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_skill_edit_frontmatter",
+    description:
+      "v0.18.5 Sprint 2.7 — Edit a skill's frontmatter (description, intended_roles, " +
+      "mutation_guidance, acceptance_criteria, tags) without touching the body. Atomic: " +
+      "(1) builds new skill at bumped patch version with merged frontmatter, " +
+      "(2) archives current active version, (3) upserts new, (4) writes skill_revisions " +
+      "audit row (action='manual'), (5) broadcasts STATUS state='skill-frontmatter-edited'. " +
+      "Body is preserved verbatim. Use zc_skill_import for body rewrites. Fields not " +
+      "specified in `changes` are left unchanged. To CLEAR a field, pass an explicit " +
+      "empty value (e.g. mutation_guidance: '' or intended_roles: []).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        skill_id: { type: "string", description: "Full skill_id (name@version@scope) to edit. Becomes the parent of the new bumped-patch version." },
+        changes:  {
+          type: "object",
+          description: "Patch — only specified fields are updated.",
+          properties: {
+            description:        { type: "string", description: "Skill description (max 500 chars)." },
+            intended_roles:     { type: "array", items: { type: "string" }, description: "Worker roles that use this skill (max 20). First entry routes the L1 mutator pool." },
+            mutation_guidance:  { type: "string", description: "Skill-specific mutator instructions (max 4000 chars). Pass empty string to clear." },
+            acceptance_criteria: {
+              type: "object",
+              properties: {
+                min_outcome_score: { type: "number", description: "0..1 threshold for composite outcome score." },
+                min_pass_rate:     { type: "number", description: "0..1 threshold for fixture pass rate." },
+              },
+            },
+            tags: { type: "array", items: { type: "string" }, description: "Retrieval tags (max 30)." },
+          },
+        },
+        rationale: { type: "string", description: "Why this edit (audit trail; required)." },
+      },
+      required: ["skill_id", "changes", "rationale"],
+    },
+  },
+  {
     name: "zc_skill_revert",
     description:
       "v0.18.4 Sprint 2.7 — Revert a skill to a previously-archived body. Atomic: " +
@@ -2592,6 +2629,41 @@ async function dispatchToolCall(
           };
         } catch (e) {
           mrDb.close();
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      // ── v0.18.5 Sprint 2.7 — Edit skill frontmatter (description, intended_roles, etc.) ──
+      case "zc_skill_edit_frontmatter": {
+        const { skill_id, changes, rationale } = args as {
+          skill_id: string;
+          changes:  {
+            description?: string;
+            intended_roles?: string[];
+            mutation_guidance?: string;
+            acceptance_criteria?: { min_outcome_score?: number; min_pass_rate?: number };
+            tags?: string[];
+          };
+          rationale: string;
+        };
+        if (!skill_id || !changes || !rationale) {
+          return { content: [{ type: "text", text: "skill_id, changes, and rationale are required." }], isError: true };
+        }
+        try {
+          const { editSkillFrontmatter } = await import("./dashboard/skill_editor.js");
+          const result = await editSkillFrontmatter({
+            skill_id, changes, rationale,
+            decided_by: AGENT_ID || "operator-mcp",
+          });
+          const lines: string[] = [];
+          lines.push(`✓ Skill frontmatter updated`);
+          lines.push(`  prior:           ${result.prior_skill_id} → archived`);
+          lines.push(`  new active:      ${result.new_skill_id}`);
+          lines.push(`  changed fields:  ${result.changed_fields.join(", ")}`);
+          lines.push(`  revision_id:     ${result.revision_id}`);
+          lines.push(`  rationale:       ${rationale}`);
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        } catch (e) {
           return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
         }
       }

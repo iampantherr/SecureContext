@@ -4,6 +4,92 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.5] — 2026-04-29 — Edit skill frontmatter from the dashboard (no SQL, no re-import file dance)
+
+Operator-UX patch for the data-collection foundation. Previously, updating
+a skill's `intended_roles` / `mutation_guidance` / `description` /
+`acceptance_criteria` / `tags` required either editing the markdown source
+file and calling `zc_skill_import` or running raw SQL. Now there's a Skills
+panel in the dashboard with an inline edit form per skill — type-id-confirm,
+rationale required, atomic version bump, full audit trail.
+
+### Added — `zc_skill_edit_frontmatter` MCP tool
+
+```
+zc_skill_edit_frontmatter({
+  skill_id: "validate-input@1.0.0@project:abc...",
+  changes: {
+    intended_roles:    ["developer", "qa"],          // optional
+    mutation_guidance: "Maintain edge-case rigor.",  // optional
+    description:       "...",                         // optional
+    acceptance_criteria: { min_outcome_score: 0.8 },  // optional (merged)
+    tags:              ["validation", "retry"],       // optional
+  },
+  rationale: "Adding qa role since launch validation runs both",
+})
+```
+
+Atomic flow: build new skill at bumped patch version with merged
+frontmatter (body preserved verbatim) → archive current → upsert new →
+write `skill_revisions` audit row (action='manual') → broadcast STATUS
+state='skill-frontmatter-edited'.
+
+### Added — Skills panel on the dashboard
+
+New middle panel between Pending reviews and Token savings. Lists all
+active skills grouped by scope (global / project:&lt;name&gt;), each row
+shows: skill name + version, description, intended_roles as colored tags,
+mutation_guidance preview (truncated to 120 chars), Edit frontmatter button.
+
+Click "Edit frontmatter" → inline form expands below the row (HTMX swap):
+  - description (single-line, max 500 chars)
+  - intended_roles (comma-separated, parsed to array)
+  - mutation_guidance (textarea, max 4000 chars)
+  - min_outcome_score + min_pass_rate (number inputs, 0-1)
+  - tags (comma-separated)
+  - fixtures (read-only JSON view — full editor deferred to a future sprint)
+  - confirm_id (paste skill_id to enable submit) — same misclick guard as approve flow
+  - rationale (required, audit trail)
+  - Save button → POST /dashboard/skills/edit → success/error message inline
+
+### Added — HTTP routes
+
+  - `GET /dashboard/skills` — HTML fragment, polls every 30s
+  - `GET /dashboard/skills/edit?skill_id=…` — HTML fragment with the edit form
+  - `POST /dashboard/skills/edit` — urlencoded form handler, returns success/error HTML
+
+### Architecture: Shared helper
+
+`src/dashboard/skill_editor.ts` exports `editSkillFrontmatter()` — used by
+both the MCP tool (`zc_skill_edit_frontmatter`) and the HTTP route handler.
+Single code path → identical behavior across surfaces.
+
+### Body is NOT editable through this surface (deliberate)
+
+The skill body is the mutator's territory. Allowing manual body edits via
+this form would undermine the self-improving loop — the operator's edits
+would compete with the mutator's proposals. For body rewrites, the
+canonical path is `zc_skill_import` (clean external file, full version).
+The form's banner makes this explicit.
+
+### Global-scope skills supported
+
+Skills with scope='global' (no project_hash) are handled via a synthetic
+`_global` SQLite path. PG remains the source of truth; the local SQLite
+write is best-effort cache.
+
+### Verified end-to-end
+
+Smoke test: edited `validate-input@1.0.0@project:...` via dashboard POST.
+Result:
+  - v1.0.0 archived ✓
+  - v1.0.1 active with new intended_roles=[developer,qa], tags=[validation,retry-aware], guidance preserved ✓
+  - body byte-for-byte identical (length 190 → 190) ✓
+  - skill_revisions row: action='manual', from_version='1.0.0', to_version='1.0.1', decided_by='operator-dashboard', full rationale captured ✓
+
+Tests: 828/828 still passing. No schema changes (Sprint 2.7's mig 26 already
+created skill_revisions).
+
 ## [0.18.4] — 2026-04-29 — Sprint 2.7: per-role mutator pools + decision feedback + diff view + revert + 83 worker roles
 
 **The data-collection-foundation release.** Builds the framework that makes

@@ -221,6 +221,32 @@ export function renderDashboardHtml(): string {
   .candidate-tabs > details { margin-bottom: 6px; border: 1px solid #1f2937; border-radius: 4px; padding: 6px; }
   .tab-label { font-size: 0.85rem; color: #94a3b8; cursor: pointer; padding: 2px 4px; }
   .tab-label:hover { color: #38bdf8; }
+  /* v0.18.5 — Skills panel + edit form */
+  .skill-scope { margin-bottom: 16px; }
+  .skill-scope-header { font-size: 0.85rem; color: #94a3b8; margin-bottom: 6px; }
+  .skill-row { background: #0e1116; border: 1px solid #1f2937; border-radius: 4px; padding: 10px; margin-bottom: 8px; }
+  .skill-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .skill-name { font-weight: 600; font-family: ui-monospace, monospace; font-size: 0.95rem; color: #e6e8eb; }
+  .skill-meta { color: #94a3b8; font-size: 0.85rem; margin-top: 4px; }
+  .skill-meta .role-tag { background: #1e3a8a; color: #dbeafe; padding: 1px 6px; border-radius: 3px; font-size: 0.78rem; margin-right: 4px; }
+  .skill-meta .guidance-preview { color: #cbd5e1; font-style: italic; }
+  .edit-btn { background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  .edit-btn:hover { background: #2a2f37; color: #38bdf8; }
+  .skill-edit-zone { margin-top: 8px; }
+  .skill-edit-form { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
+  .skill-edit-form .form-banner { background: #1f2937; border-left: 3px solid #fbbf24; padding: 8px 12px; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; border-radius: 0 4px 4px 0; }
+  .skill-edit-form label { display: block; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; }
+  .skill-edit-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .skill-edit-form input[type=text], .skill-edit-form input[type=number], .skill-edit-form textarea {
+    width: 100%; padding: 6px 10px; background: #0a0d12; color: #e6e8eb;
+    border: 1px solid #2a2f37; border-radius: 4px; font-family: inherit; font-size: 0.9rem;
+    margin-top: 2px;
+  }
+  .skill-edit-form .help { display: block; font-size: 0.78rem; color: #6b7280; margin-top: 2px; }
+  .skill-edit-form details.fixtures-readonly { margin: 12px 0; padding: 8px; background: #050709; border: 1px solid #1f2937; border-radius: 4px; }
+  .skill-edit-form details.fixtures-readonly summary { cursor: pointer; color: #94a3b8; font-size: 0.85rem; }
+  .skill-edit-form hr { border: none; border-top: 1px solid #2a2f37; margin: 16px 0; }
+  .skill-edit-response { margin-top: 12px; }
   .rationale { color: #cbd5e1; font-style: italic; margin-bottom: 6px; padding-left: 12px; border-left: 2px solid #38bdf8; }
   form { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2a2f37; }
   form label { display: block; margin-bottom: 8px; font-size: 0.85rem; color: #cbd5e1; }
@@ -268,12 +294,21 @@ export function renderDashboardHtml(): string {
 </div>
 
 <div class="panel">
+  <h2>Active skills <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(edit frontmatter — body is mutator-managed)</span></h2>
+  <div id="skills"
+       hx-get="/dashboard/skills" hx-trigger="load, every 30s"
+       hx-target="this" hx-swap="innerHTML">
+    Loading…
+  </div>
+</div>
+
+<div class="panel">
   <h2 style="opacity:0.6">Token savings (this project, last 7 days)</h2>
   <p class="empty">Sprint 2.7 — coming soon. Planned panels: token savings (KB hits vs Read), context-restore overhead, mutation cost vs human-edit cost.</p>
 </div>
 
 <footer>
-  v0.18.3 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
+  v0.18.5 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
   Notifications poll every 5s; pending list every 10s.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>
@@ -330,6 +365,167 @@ function enableNotifications() {
  * loadProjectNameMap) so each row can show the project basename instead
  * of just the 16-char hash.
  */
+// ─── v0.18.5 Sprint 2.7 — Skills panel rendering ─────────────────────────────
+
+interface SkillRow {
+  skill_id:    string;
+  name:        string;
+  version:     string;
+  scope:       string;
+  description: string;
+  frontmatter: unknown;
+  body?:       string;
+}
+
+export function renderSkillsListFragment(
+  rows: Array<Record<string, unknown>>,
+  projectNameMap: Map<string, string> = new Map(),
+): string {
+  if (rows.length === 0) {
+    return `<p class="empty">No active skills found. Use <code>zc_skill_import</code> to add one.</p>`;
+  }
+  // Group by scope so projects are visually clustered
+  const byScope = new Map<string, SkillRow[]>();
+  for (const r of rows) {
+    const skill: SkillRow = {
+      skill_id:    String(r.skill_id),
+      name:        String(r.name),
+      version:     String(r.version),
+      scope:       String(r.scope),
+      description: String(r.description ?? ""),
+      frontmatter: r.frontmatter,
+    };
+    const arr = byScope.get(skill.scope) ?? [];
+    arr.push(skill);
+    byScope.set(skill.scope, arr);
+  }
+  const sections: string[] = [];
+  for (const [scope, skills] of byScope.entries()) {
+    let scopeLabel: string;
+    if (scope === "global") {
+      scopeLabel = `<span class="project-name" style="background:#1e3a8a; color:#dbeafe">global</span>`;
+    } else if (scope.startsWith("project:")) {
+      const hash = scope.slice("project:".length);
+      const name = projectNameMap.get(hash);
+      scopeLabel = name
+        ? `<span class="project-name" title="project_hash: ${escapeHtml(hash)}">${escapeHtml(name)}</span>`
+        : `<span class="project-name unresolved">project:${escapeHtml(hash.slice(0, 8))}…</span>`;
+    } else {
+      scopeLabel = `<span class="project-name unresolved">${escapeHtml(scope)}</span>`;
+    }
+    const skillRows = skills.map((s) => {
+      const fm = typeof s.frontmatter === "string" ? JSON.parse(s.frontmatter) : (s.frontmatter as Record<string, unknown>);
+      const intended = (fm?.intended_roles as string[] | undefined) ?? [];
+      const guidance = String((fm?.mutation_guidance as string | undefined) ?? "");
+      const intendedHtml = intended.length > 0
+        ? intended.map((r) => `<code class="role-tag">${escapeHtml(r)}</code>`).join(" ")
+        : `<span style="color:#6b7280; font-style:italic">no intended_roles</span>`;
+      return `
+        <div class="skill-row" data-skill-id="${escapeHtml(s.skill_id)}">
+          <div class="skill-header">
+            <span class="skill-name">${escapeHtml(s.name)} <span style="color:#94a3b8">v${escapeHtml(s.version)}</span></span>
+            <button class="edit-btn"
+                    hx-get="/dashboard/skills/edit?skill_id=${encodeURIComponent(s.skill_id)}"
+                    hx-target="next .skill-edit-zone" hx-swap="innerHTML">
+              Edit frontmatter
+            </button>
+          </div>
+          <div class="skill-meta">
+            ${escapeHtml(s.description || "(no description)")}<br>
+            roles: ${intendedHtml}
+            ${guidance ? `<br>guidance: <span class="guidance-preview">${escapeHtml(guidance.slice(0, 120))}${guidance.length > 120 ? "…" : ""}</span>` : ""}
+          </div>
+          <div class="skill-edit-zone"></div>
+        </div>
+      `;
+    }).join("");
+    sections.push(`
+      <div class="skill-scope">
+        <div class="skill-scope-header">${scopeLabel}</div>
+        ${skillRows}
+      </div>
+    `);
+  }
+  return sections.join("");
+}
+
+export function renderSkillEditForm(row: Record<string, unknown>): string {
+  const skillId = String(row.skill_id);
+  const fm = typeof row.frontmatter === "string" ? JSON.parse(row.frontmatter as string) : (row.frontmatter as Record<string, unknown>);
+  const description       = String(fm?.description ?? row.description ?? "");
+  const intendedRoles     = ((fm?.intended_roles as string[] | undefined) ?? []).join(", ");
+  const mutationGuidance  = String((fm?.mutation_guidance as string | undefined) ?? "");
+  const ac                = (fm?.acceptance_criteria as { min_outcome_score?: number; min_pass_rate?: number } | undefined) ?? {};
+  const tags              = ((fm?.tags as string[] | undefined) ?? []).join(", ");
+  const fixturesJson      = JSON.stringify(fm?.fixtures ?? [], null, 2);
+
+  return `
+    <form class="skill-edit-form" hx-post="/dashboard/skills/edit" hx-target="next .skill-edit-response" hx-swap="innerHTML">
+      <input type="hidden" name="skill_id" value="${escapeHtml(skillId)}">
+
+      <div class="form-banner">
+        Editing <code>${escapeHtml(skillId)}</code>. The body is mutator-managed and NOT editable here — use <code>zc_skill_import</code> for body rewrites. Saving creates a new patch version (e.g. v1.0.3 → v1.0.4) with this frontmatter; current version is archived.
+      </div>
+
+      <label>
+        <strong>description</strong>
+        <input type="text" name="description" value="${escapeHtml(description)}" maxlength="500">
+        <span class="help">Single-line skill summary (≤500 chars).</span>
+      </label>
+
+      <label>
+        <strong>intended_roles</strong> <small>(comma-separated; first entry routes the L1 mutator pool)</small>
+        <input type="text" name="intended_roles" value="${escapeHtml(intendedRoles)}" placeholder="e.g. marketer, copywriter">
+        <span class="help">Lowercase, alphanumeric/dash/underscore. Empty = no role tagging (falls back to mutator-general).</span>
+      </label>
+
+      <label>
+        <strong>mutation_guidance</strong>
+        <textarea name="mutation_guidance" rows="5" maxlength="4000" placeholder="Skill-specific instructions injected into the mutator's prompt verbatim.">${escapeHtml(mutationGuidance)}</textarea>
+        <span class="help">Free-form. Empty to clear. Max 4000 chars.</span>
+      </label>
+
+      <div class="form-row">
+        <label>
+          <strong>min_outcome_score</strong> <small>(0–1)</small>
+          <input type="number" name="min_outcome_score" min="0" max="1" step="0.05" value="${ac.min_outcome_score ?? ""}">
+        </label>
+        <label>
+          <strong>min_pass_rate</strong> <small>(0–1)</small>
+          <input type="number" name="min_pass_rate" min="0" max="1" step="0.05" value="${ac.min_pass_rate ?? ""}">
+        </label>
+      </div>
+
+      <label>
+        <strong>tags</strong> <small>(comma-separated)</small>
+        <input type="text" name="tags" value="${escapeHtml(tags)}" placeholder="e.g. validation, retry-aware">
+      </label>
+
+      <details class="fixtures-readonly">
+        <summary>Fixtures (read-only — re-import via <code>zc_skill_import</code> to edit)</summary>
+        <pre class="candidate-body">${escapeHtml(fixturesJson)}</pre>
+      </details>
+
+      <hr>
+
+      <label>
+        <strong>Confirm skill_id</strong> <small>(paste exactly to enable submit)</small>
+        <input type="text" name="confirm_id" placeholder="${escapeHtml(skillId)}" required autocomplete="off">
+      </label>
+
+      <label>
+        <strong>Rationale</strong> <small>(audit trail; required)</small>
+        <input type="text" name="rationale" required placeholder="e.g. 'Adding copywriter role since CleanCheck launches need both'">
+      </label>
+
+      <div class="actions">
+        <button type="submit" class="approve">Save (creates new patch version)</button>
+      </div>
+      <div class="skill-edit-response"></div>
+    </form>
+  `;
+}
+
 export function renderPendingFragment(
   rows: Array<Record<string, unknown>>,
   projectNameMap: Map<string, string> = new Map(),
