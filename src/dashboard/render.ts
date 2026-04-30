@@ -420,6 +420,23 @@ export function renderDashboardHtml(): string {
     document.getElementById('savings-trend-cadence')?.addEventListener('change', () => {
       document.getElementById('savings-project')?.dispatchEvent(new Event('change'));
     });
+    // v0.18.9 — auto-refresh every 10s while a project is selected. Re-fires
+    // the existing HTMX project-change handler so both the savings panel and
+    // the trend panel update with fresh data. Cheap (single GET each), and
+    // pauses cleanly when no project is selected.
+    setInterval(() => {
+      const sel = document.getElementById('savings-project');
+      if (sel && sel.value) {
+        // Trigger the HTMX-bound select handler to re-fetch /dashboard/savings.
+        // htmx.trigger() fires hx-trigger="change" on the element, refreshing
+        // both #savings-panel (HTMX swap) and the trend div (our JS listener).
+        if (window.htmx) {
+          window.htmx.trigger(sel, 'change');
+        } else {
+          sel.dispatchEvent(new Event('change'));
+        }
+      }
+    }, 10000);
   </script>
 </div>
 
