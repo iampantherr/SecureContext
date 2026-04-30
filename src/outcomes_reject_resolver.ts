@@ -191,6 +191,37 @@ async function writeOutcomeRow(
  * mirrors this into the SQLite/PG learnings tables on PostToolUse,
  * so we don't need to touch the DB directly here.
  */
+/**
+ * v0.20.0 — write to learnings_pg directly so Docker-mode runs are visible.
+ * The JSONL append still happens as a best-effort second path so native
+ * deployments + the existing learnings-indexer hook still get a copy.
+ */
+async function writeLearningPg(
+  projectHash: string,
+  rejectedAgent: string,
+  task: string,
+  payload: string,
+): Promise<boolean> {
+  try {
+    const learningId = `learn-reject-${Date.now()}-${randomBytes(4).toString("hex")}`;
+    const sourcePath = `outcomes_reject_resolver/${rejectedAgent}/${task}`;
+    await withClient(async (c) => {
+      await c.query(
+        `INSERT INTO learnings_pg (learning_id, project_hash, category, payload, source_path, source_line, ts)
+         VALUES ($1, $2, 'failure', $3, $4, NULL, now())
+         ON CONFLICT (project_hash, source_path, source_line) DO NOTHING`,
+        [learningId, projectHash, payload, sourcePath],
+      );
+    });
+    return true;
+  } catch (e) {
+    logger.error("outcomes", "reject_resolver_learning_pg_write_failed", {
+      error: (e as Error).message, project_hash: projectHash, task,
+    });
+    return false;
+  }
+}
+
 function appendFailureLearning(
   projectPath:    string,
   rejectedAgent:  string,
@@ -417,10 +448,23 @@ export async function resolveRejectOutcome(input: RejectInput): Promise<RejectRe
     );
     result.outcome_id = outcomeId;
 
-    // 3. Append failure learning JSONL
-    result.learnings_appended = appendFailureLearning(
-      input.projectPath, merge.agent_id, input.task, input.reason, input.summary,
-    );
+    // 3. Write failure learning to BOTH PG (always works in Docker) + JSONL
+    //    (best-effort, native-only). Either path counts as "learnings_appended"
+    //    since downstream observers (dashboard) read from PG anyway.
+    const pgPayload = JSON.stringify({
+      kind: "orchestrator_reject",
+      task: input.task,
+      rejected_agent: merge.agent_id,
+      root_cause: input.reason ?? "(orchestrator rejection)",
+      impact: input.summary ?? null,
+      learning: `Orchestrator rejected ${merge.agent_id}'s MERGE for "${input.task}". Reason: ${input.reason ?? input.summary ?? "unspecified"}.`,
+      prevention: `Before MERGE on similar tasks, address: ${input.reason ?? input.summary ?? "operator review criteria"}.`,
+      source: "v0.20.0/outcomes_reject_resolver",
+      ts: new Date().toISOString(),
+    });
+    const pgWrite     = await writeLearningPg(projectHash, merge.agent_id, input.task, pgPayload);
+    const jsonlWrite  = appendFailureLearning(input.projectPath, merge.agent_id, input.task, input.reason, input.summary);
+    result.learnings_appended = pgWrite || jsonlWrite;
 
     // 4. Flag matching skill_run as failed (if any)
     const matched = await findRejectedSkillRun(

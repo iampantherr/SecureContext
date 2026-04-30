@@ -148,8 +148,36 @@ export function renderSkillCandidatesFragment(rows: SkillCandidateRow[]): string
     const headline = escapeHtml(r.headline);
     const role     = escapeHtml(r.target_role);
     const status   = escapeHtml(r.status);
+    const candId   = escapeHtml(r.candidate_id);
+
+    // v0.20.0 — actions vary by status
+    let actionsHtml = "";
+    if (r.status === "pending") {
+      actionsHtml = `
+        <button onclick="zcGenerateSkill('${candId}')" class="zc-btn zc-btn-primary">⚡ Generate skill body (LLM)</button>
+        <button onclick="zcRejectCandidate('${candId}')" class="zc-btn zc-btn-danger">✗ Reject</button>
+      `;
+    } else if (r.status === "generating") {
+      actionsHtml = `<small><em>⏳ Generating skill body via LLM... (refresh to update)</em></small>`;
+    } else if (r.status === "ready") {
+      actionsHtml = `
+        <details><summary>📄 View proposed skill body</summary>
+          <pre class="skill-candidate-body">${escapeHtml(r.proposed_skill_body ?? "")}</pre>
+        </details>
+        <button onclick="zcApproveCandidate('${candId}')" class="zc-btn zc-btn-primary">✓ Approve + install to skills/</button>
+        <button onclick="zcGenerateSkill('${candId}')" class="zc-btn zc-btn-secondary">↻ Regenerate</button>
+        <button onclick="zcRejectCandidate('${candId}')" class="zc-btn zc-btn-danger">✗ Reject</button>
+      `;
+    } else if (r.status === "approved") {
+      actionsHtml = `<small>✓ Approved + installed${r.installed_skill_id ? ` as <code>${escapeHtml(r.installed_skill_id)}</code>` : ""}</small>`;
+    } else if (r.status === "rejected") {
+      actionsHtml = `<small>✗ Rejected by operator</small>`;
+    } else if (r.status === "superseded") {
+      actionsHtml = `<small>↻ Superseded (a matching skill was authored manually)</small>`;
+    }
+
     return `
-      <div class="skill-candidate" data-candidate-id="${escapeHtml(r.candidate_id)}">
+      <div class="skill-candidate" data-candidate-id="${candId}">
         <div class="skill-candidate-header">
           <span class="role-tag">${role}</span>
           <span class="skill-candidate-count">${r.rejection_count} rejections</span>
@@ -162,11 +190,42 @@ export function renderSkillCandidatesFragment(rows: SkillCandidateRow[]): string
           ${r.installed_skill_id ? ` · installed as <code>${escapeHtml(r.installed_skill_id)}</code>` : ""}
         </div>
         <div class="skill-candidate-actions">
-          <small>v0.19.0 ships detection + queue. The "Generate skill body" LLM action lands in v0.20.0. For now, manually author a <code>${role}-&lt;name&gt;.skill.md</code> in <code>skills/</code> and the row will auto-mark superseded once it appears in <code>skills_pg</code>.</small>
+          ${actionsHtml}
         </div>
       </div>
     `;
-  }).join("");
+  }).join("") + `
+    <script>
+      // v0.20.0 — skill candidate review actions
+      window.zcGenerateSkill = async function(candId) {
+        const btn = event.target; btn.disabled = true; btn.textContent = '⏳ Generating...';
+        try {
+          const r = await fetch('/dashboard/skill-candidates/' + candId + '/generate', { method: 'POST' });
+          const j = await r.json();
+          if (!j.ok) alert('Generation failed: ' + (j.error || 'unknown'));
+          // Refresh panel
+          if (window.htmx) window.htmx.trigger('#skill-candidates', 'load');
+          else document.getElementById('skill-candidates')?.dispatchEvent(new Event('load'));
+        } catch (e) { alert('Error: ' + e.message); btn.disabled = false; btn.textContent = '⚡ Generate skill body (LLM)'; }
+      };
+      window.zcApproveCandidate = async function(candId) {
+        if (!confirm('Approve + write this skill to skills/ + auto-import?')) return;
+        const r = await fetch('/dashboard/skill-candidates/' + candId + '/approve', { method: 'POST' });
+        const j = await r.json();
+        if (!j.ok) alert('Approval failed: ' + (j.error || 'unknown'));
+        else alert('Approved! Written to ' + j.written_to);
+        if (window.htmx) window.htmx.trigger('#skill-candidates', 'load');
+      };
+      window.zcRejectCandidate = async function(candId) {
+        const notes = prompt('Why reject? (optional)') || '';
+        const r = await fetch('/dashboard/skill-candidates/' + candId + '/reject', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes }),
+        });
+        const j = await r.json();
+        if (!j.ok) alert('Reject failed: ' + (j.error || 'unknown'));
+        if (window.htmx) window.htmx.trigger('#skill-candidates', 'load');
+      };
+    </script>`;
 }
 
 export async function loadProjectNameMap(): Promise<Map<string, string>> {
@@ -535,7 +594,7 @@ export function renderDashboardHtml(): string {
 </div>
 
 <footer>
-  v0.19.0 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
+  v0.20.0 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
   Notifications poll every 5s; pending list every 10s.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>

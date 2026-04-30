@@ -733,9 +733,23 @@ export class PostgresStore implements Store {
     if (opts.agentId) { conditions.push(`agent_id = $${pIdx++}`); params.push(opts.agentId); }
     params.push(limit);
 
-    const res = await this.pool.query<BroadcastResult & { files: string; depends_on: string }>(
+    // v0.20.0 — include v0.15.0 §8.1 structured ASSIGN columns in SELECT.
+    // Without these the file-ownership overlap guard at POST /api/v1/broadcast
+    // never sees file_ownership_exclusive — every overlap returned 200 instead
+    // of 409. Caught by E2E test E1 in the v0.19.0 report.
+    const res = await this.pool.query<BroadcastResult & {
+      files: string; depends_on: string;
+      file_ownership_exclusive: string | null;
+      file_ownership_read_only: string | null;
+      task_dependencies: string | null;
+      required_skills: string | null;
+      acceptance_criteria: string | null;
+    }>(
       `SELECT id, type, agent_id, task, summary, files, state, depends_on, reason,
-              importance, created_at
+              importance, created_at,
+              file_ownership_exclusive, file_ownership_read_only,
+              task_dependencies, required_skills, acceptance_criteria,
+              complexity_estimate, estimated_tokens
        FROM   broadcasts
        WHERE  ${conditions.join(" AND ")}
        ORDER  BY id DESC LIMIT $${pIdx}`,
@@ -744,8 +758,13 @@ export class PostgresStore implements Store {
 
     return res.rows.map(r => ({
       ...r,
-      files:      JSON.parse(r.files      || "[]"),
-      depends_on: JSON.parse(r.depends_on || "[]"),
+      files:                    JSON.parse(r.files      || "[]"),
+      depends_on:               JSON.parse(r.depends_on || "[]"),
+      file_ownership_exclusive: r.file_ownership_exclusive ? JSON.parse(r.file_ownership_exclusive) : [],
+      file_ownership_read_only: r.file_ownership_read_only ? JSON.parse(r.file_ownership_read_only) : [],
+      task_dependencies:        r.task_dependencies        ? JSON.parse(r.task_dependencies)        : [],
+      required_skills:          r.required_skills          ? JSON.parse(r.required_skills)          : [],
+      acceptance_criteria:      r.acceptance_criteria      ? JSON.parse(r.acceptance_criteria)      : [],
     }));
   }
 

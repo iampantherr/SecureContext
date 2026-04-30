@@ -558,8 +558,42 @@ export async function runPgMigrations(): Promise<number> {
   }
 }
 
-/** Test helper: drop telemetry tables. NEVER call against shared / production DBs. */
+/**
+ * Test helper: drop telemetry tables. NEVER call against shared / production DBs.
+ *
+ * v0.20.0 — defense in depth. Three guards prevent prod DB nuking:
+ *   1. Refuses unless ZC_POSTGRES_DB matches a test sentinel ('test' / 'securecontext_test')
+ *      OR the env var ZC_ALLOW_DESTRUCTIVE_TEST_HELPERS=1 is explicitly set
+ *   2. Refuses if VITEST env (which vitest sets automatically) is missing
+ *   3. Logs the operation regardless, so a forgotten override leaves a paper trail
+ *
+ * If you trip this guard, you're not running tests against an isolated DB.
+ * Set up a test PG (e.g. `securecontext_test` database in the same container)
+ * and pass ZC_POSTGRES_DB=securecontext_test in vitest setup.
+ */
 export async function _dropPgTelemetryTablesForTesting(): Promise<void> {
+  const dbName = process.env.ZC_POSTGRES_DB ?? "";
+  const isTestDb = /test/i.test(dbName) || dbName.endsWith("_test");
+  const inVitest = !!process.env.VITEST;
+  const explicitOverride = process.env.ZC_ALLOW_DESTRUCTIVE_TEST_HELPERS === "1";
+
+  if (!isTestDb && !explicitOverride) {
+    throw new Error(
+      `_dropPgTelemetryTablesForTesting refused: ZC_POSTGRES_DB="${dbName}" doesn't look like a test DB ` +
+      `(should match /test/i or end with _test). Vitest must point at a separate database (e.g. securecontext_test) ` +
+      `to avoid wiping production data. Set ZC_ALLOW_DESTRUCTIVE_TEST_HELPERS=1 to override (NOT recommended).`,
+    );
+  }
+  if (!inVitest && !explicitOverride) {
+    throw new Error(
+      `_dropPgTelemetryTablesForTesting refused: VITEST env not set (this should only run from vitest). ` +
+      `Set ZC_ALLOW_DESTRUCTIVE_TEST_HELPERS=1 to override.`,
+    );
+  }
+  logger.warn("telemetry", "destructive_test_helper_invoked", {
+    db: dbName, in_vitest: inVitest, override: explicitOverride,
+  });
+
   await withClient(async (client) => {
     await client.query(`DROP TABLE IF EXISTS tool_calls_pg CASCADE`);
     await client.query(`DROP TABLE IF EXISTS outcomes_pg CASCADE`);

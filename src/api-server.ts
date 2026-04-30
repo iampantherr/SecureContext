@@ -519,6 +519,97 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.20.0 — Generate skill body from rejection cluster (LLM-driven)
+  app.post("/dashboard/skill-candidates/:id/generate", async (request, reply) => {
+    try {
+      const candId = (request.params as { id: string }).id;
+      const { generateForCandidate } = await import("./skill_candidate_generator.js");
+      const result = await generateForCandidate(candId);
+      reply.type("application/json").send(result);
+    } catch (e) {
+      reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  // v0.20.0 — Approve a generated candidate: write the proposed body to skills/
+  // (the next auto-import will pick it up + mark candidate superseded)
+  app.post("/dashboard/skill-candidates/:id/approve", async (request, reply) => {
+    try {
+      const candId = (request.params as { id: string }).id;
+      const { withClient: wc } = await import("./pg_pool.js");
+      const row = await wc(async (c) => {
+        const r = await c.query<{ proposed_skill_body: string | null; target_role: string; status: string }>(
+          `SELECT proposed_skill_body, target_role, status FROM skill_candidates_pg WHERE candidate_id=$1`,
+          [candId],
+        );
+        return r.rows[0] ?? null;
+      });
+      if (!row) return reply.status(404).type("application/json").send({ ok: false, error: "Candidate not found" });
+      if (row.status !== "ready" || !row.proposed_skill_body) {
+        return reply.status(400).type("application/json").send({ ok: false, error: `Candidate not ready (status=${row.status}). Run /generate first.` });
+      }
+      // Write to skills/ then trigger auto-import. File name: <role>-from-rejections-<short>.skill.md
+      const { writeFileSync, existsSync, mkdirSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const skillsDir = process.env.ZC_SKILLS_DIR ?? "/app/skills";
+      if (!existsSync(skillsDir)) mkdirSync(skillsDir, { recursive: true });
+      const filename = `${row.target_role}-from-rejections-${candId.slice(-8)}.skill.md`;
+      const fullPath = join(skillsDir, filename);
+      writeFileSync(fullPath, row.proposed_skill_body, "utf-8");
+
+      // Auto-import + mark approved
+      const { autoImportSkills } = await import("./skill_auto_import.js");
+      const importSummary = await autoImportSkills();
+      await wc(async (c) => {
+        await c.query(
+          `UPDATE skill_candidates_pg SET status='approved', reviewed_at=now(),
+              installed_skill_id = (
+                SELECT skill_id FROM skills_pg WHERE source_path=$2 AND archived_at IS NULL LIMIT 1
+              )
+            WHERE candidate_id=$1`,
+          [candId, fullPath],
+        );
+      });
+      reply.type("application/json").send({
+        ok: true, written_to: fullPath, filename,
+        imported: { inserted: importSummary.inserted, updated: importSummary.updated },
+      });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  app.post("/dashboard/skill-candidates/:id/reject", async (request, reply) => {
+    try {
+      const candId = (request.params as { id: string }).id;
+      const body   = request.body as Record<string, unknown>;
+      const notes  = typeof body.notes === "string" ? body.notes.slice(0, 500) : null;
+      const { withClient: wc } = await import("./pg_pool.js");
+      await wc(async (c) => {
+        await c.query(
+          `UPDATE skill_candidates_pg SET status='rejected', reviewed_at=now(), review_notes=$2 WHERE candidate_id=$1`,
+          [candId, notes],
+        );
+      });
+      reply.type("application/json").send({ ok: true });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  // v0.20.0 — manual trigger to re-import skills from disk into skills_pg.
+  // Useful when the operator drops a new *.skill.md into skills/ and doesn't
+  // want to restart the container. Idempotent.
+  app.post("/dashboard/skills/import", async (_request, reply) => {
+    try {
+      const { autoImportSkills } = await import("./skill_auto_import.js");
+      const summary = await autoImportSkills({ verbose: false });
+      reply.type("application/json").send({ ok: true, summary });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
   // v0.19.0 Sprint 2.10 — Skill candidates panel
   app.get("/dashboard/skill-candidates", async (_request, reply) => {
     try {
@@ -706,17 +797,68 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.20.0 — Rolling compaction (Sprint 4 #5 / Tier A #4)
+  app.post("/api/v1/compact", async (request, reply) => {
+    try {
+      const { projectPath, sessionId, turns } = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      const { compactRecentWindow } = await import("./compaction.js");
+      const result = await compactRecentWindow({
+        projectPath: pp,
+        sessionId:   typeof sessionId === "string" ? sessionId : null,
+        turns:       typeof turns     === "number" ? turns     : undefined,
+      });
+      reply.type("application/json").send(result);
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
   app.post("/api/v1/search", async (request, reply) => {
     try {
-      const { projectPath, queries, limit, agentId, depth } = request.body as Record<string, unknown>;
+      const { projectPath, queries, limit, agentId, depth, mode, rerank, hopDepth } = request.body as Record<string, unknown>;
       const pp = validateProjectPath(projectPath);
       if (!Array.isArray(queries) || queries.length === 0) throw new ApiError(400, "queries must be a non-empty array");
-      const results = await store.search(pp, queries.map(String), {
+      const queryStrs = queries.map(String);
+
+      // v0.20.0 — advanced retrieval modes (Sprint 4)
+      const useHyde      = mode === "hyde";
+      const useMultihop  = mode === "multihop";
+      const useRerank    = rerank === true || rerank === "true";
+
+      let effectiveQueries = queryStrs;
+      if (useHyde) {
+        const { generateHydeQuery } = await import("./retrieval_advanced.js");
+        const hyped = await Promise.all(queryStrs.map((q) => generateHydeQuery(q)));
+        effectiveQueries = hyped;
+      }
+
+      const baseSearch = (qs: string[]) => store.search(pp, qs, {
         limit:   limit !== undefined ? Number(limit) : undefined,
         agentId: agentId !== undefined ? String(agentId) : undefined,
         depth:   depth as "L0" | "L1" | "L2" | undefined,
       });
-      return { ok: true, results };
+
+      let results;
+      if (useMultihop) {
+        const { multiHopSearch } = await import("./retrieval_advanced.js");
+        results = await multiHopSearch(effectiveQueries, {
+          depth:           Math.max(1, Math.min(3, Number(hopDepth ?? 2))),
+          maxResultsPerHop: 5,
+          searchFn:        baseSearch,
+        });
+      } else {
+        results = await baseSearch(effectiveQueries);
+      }
+
+      if (useRerank && results.length > 0) {
+        const { rerankCandidates } = await import("./retrieval_advanced.js");
+        const reranked = await rerankCandidates(queryStrs.join(" "), results, Number(limit ?? 10));
+        results = reranked;
+      }
+
+      return { ok: true, results, mode: mode ?? "default", reranked: useRerank };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });
@@ -1226,7 +1368,19 @@ export async function createApiServer(storeOverride?: Store) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 if (process.argv[1]?.endsWith("api-server.js")) {
-  createApiServer().then(({ app }) => {
+  createApiServer().then(async ({ app }) => {
+    // v0.20.0 — auto-import skills/*.skill.md into skills_pg before listening.
+    // Idempotent: skips files whose body_hmac is unchanged. Skip silently if
+    // PG isn't configured (the import is best-effort startup work).
+    if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
+      try {
+        const { autoImportSkills } = await import("./skill_auto_import.js");
+        const summary = await autoImportSkills();
+        console.log(`Skill auto-import: scanned=${summary.scanned} +${summary.inserted} ~${summary.updated} =${summary.skipped_same} ✗${summary.parse_errors + summary.validation_errors}`);
+      } catch (e) {
+        console.error("Skill auto-import failed:", (e as Error).message);
+      }
+    }
     app.listen({ port: API_PORT, host: API_HOST }, (err) => {
       if (err) { console.error(err); process.exit(1); }
       console.log(`SecureContext API server listening on ${API_HOST}:${API_PORT}`);

@@ -34,6 +34,11 @@ COPY --from=builder --chown=securecontext:securecontext /app/dist        ./dist
 COPY --from=builder --chown=securecontext:securecontext /app/node_modules ./node_modules
 COPY --from=builder --chown=securecontext:securecontext /app/package.json ./package.json
 
+# v0.20.0 — bake the skills/ directory into the image so the auto-importer
+# has something to scan on first boot. Operators can also volume-mount their
+# host skills/ over this in docker-compose for live editing.
+COPY --chown=securecontext:securecontext skills/ ./skills/
+
 USER securecontext
 
 # Health check — uses the /health endpoint

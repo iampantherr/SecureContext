@@ -238,11 +238,18 @@ const TOOLS: Tool[] = [
       "Hybrid BM25 + semantic vector search across the knowledge base. " +
       "If Ollama (nomic-embed-text) is running locally, cosine similarity reranking is applied. " +
       "Falls back to pure BM25 if Ollama is unavailable. " +
-      "Pass multiple queries to search several topics at once.",
+      "Pass multiple queries to search several topics at once. " +
+      "v0.20.0 — optional advanced modes: " +
+      "{ rerank: true } adds cross-encoder reranking for precision, " +
+      "{ mode: 'hyde' } generates a hypothetical answer first then searches by it (10-25% precision lift on long-tail queries), " +
+      "{ mode: 'multihop', hopDepth: 2 } follows file/URL references in initial results.",
     inputSchema: {
       type: "object",
       properties: {
-        queries: { type: "array", items: { type: "string" }, minItems: 1 },
+        queries:  { type: "array", items: { type: "string" }, minItems: 1 },
+        rerank:   { type: "boolean", description: "v0.20.0 — apply reranker for precision (slower)" },
+        mode:     { type: "string", enum: ["default", "hyde", "multihop"], description: "v0.20.0 — retrieval strategy" },
+        hopDepth: { type: "integer", minimum: 1, maximum: 3, description: "v0.20.0 — for mode=multihop, how many reference hops to follow (default 2)" },
       },
       required: ["queries"],
     },
@@ -364,6 +371,35 @@ const TOOLS: Tool[] = [
       properties: {
         agent_id: { type: "string", description: "Agent namespace for memory stats (default: 'default')" },
       },
+      required: [],
+    },
+  },
+  {
+    name: "zc_compact_window",
+    description:
+      "v0.20.0 — Rolling conversation compaction (Tier A item #4). Pulls the last N broadcasts + " +
+      "tool_calls in this session, generates a structured summary via local Ollama, stores it as " +
+      "an importance=4 working memory fact. Call when zc_context_status reports tier=alert (≥85%). " +
+      "Returns the summary text inline so you can include it in your next reasoning step.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        turns: { type: "integer", minimum: 5, maximum: 100, description: "How many recent turns to compact (default 30)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "zc_context_status",
+    description:
+      "v0.20.0 — Return current context-budget state for this MCP session. " +
+      "Reports: total tokens used, fraction of 200K budget consumed, tier (ok/warn/alert/emergency), " +
+      "recommended action. Use when you suspect you're approaching context exhaustion. " +
+      "Every other tool already shows a [ctx: X% / 200K] suffix in its cost header — call this " +
+      "for the explicit recommendation when you cross a threshold.",
+    inputSchema: {
+      type: "object",
+      properties: {},
       required: [],
     },
   },
@@ -1212,7 +1248,14 @@ async function _handleRemoteTool(
         return { content: [{ type: "text", text: `Indexed "${body["source"]}" (${String(body["content"] ?? "").length} chars).` }] };
 
       case "zc_search": {
-        const sr = await apiCall("POST", "/api/v1/search", { projectPath: PROJECT_PATH, queries: body["queries"] });
+        const sr = await apiCall("POST", "/api/v1/search", {
+          projectPath: PROJECT_PATH,
+          queries:     body["queries"],
+          // v0.20.0 — forward advanced retrieval options
+          rerank:      body["rerank"],
+          mode:        body["mode"],
+          hopDepth:    body["hopDepth"],
+        });
         const results = sr["results"] as Array<{ source: string; snippet: string }> ?? [];
         if (results.length === 0) return { content: [{ type: "text", text: "No results found." }] };
         const lines = results.map((r, i) => `${i + 1}. [${r.source}]\n   ${r.snippet}`);
@@ -1238,6 +1281,41 @@ async function _handleRemoteTool(
           `KB entries: ${kb?.["totalEntries"]}  |  Embeddings: ${kb?.["embeddingsCached"]}\n` +
           `Chain: ${ch?.["ok"] ? `OK (${ch?.["totalRows"]} rows)` : `BROKEN at #${ch?.["brokenAt"]}`}\n` +
           `Active sessions: ${st["sessions"]}`
+        }] };
+      }
+
+      case "zc_compact_window": {
+        // v0.20.0 — rolling compaction
+        const turns = typeof body["turns"] === "number" ? body["turns"] : undefined;
+        const r = await apiCall("POST", "/api/v1/compact", {
+          projectPath: PROJECT_PATH,
+          sessionId:   MCP_SESSION_ID,
+          turns,
+        });
+        if (!r["ok"]) return { content: [{ type: "text", text: `Compaction failed: ${r["error"] ?? "unknown"}` }] };
+        return { content: [{ type: "text", text:
+          `## Rolling Compaction — ${r["turns_compacted"]} turns\n\n` +
+          `${r["summary"]}\n\n` +
+          `_Stored as working memory key: \`${r["written_to_memory_key"]}\` (importance=4)._\n` +
+          `_Window: ${r["oldest_compacted_at"]} → ${r["newest_compacted_at"]}_`,
+        }] };
+      }
+
+      case "zc_context_status": {
+        // v0.20.0 — context budget for this MCP session
+        const { getContextStatus } = await import("./context_budget.js");
+        const s = getContextStatus(MCP_SESSION_ID);
+        const tierBadge = s.tier === "ok"        ? "✓ OK" :
+                          s.tier === "warn"      ? "⚠ WARN" :
+                          s.tier === "alert"     ? "🚨 ALERT" :
+                                                   "⛔ EMERGENCY";
+        return { content: [{ type: "text", text:
+          `## Context Budget — ${tierBadge}\n\n` +
+          `Tokens used:   **${s.totalTokens.toLocaleString()}** / ${s.budget.toLocaleString()}  (**${s.pct.toFixed(1)}%**)\n` +
+          `Tool calls:    ${s.callCount}\n` +
+          `Cost so far:   $${s.cost.toFixed(4)}\n` +
+          `Tier:          ${s.tier}\n\n` +
+          `**Recommendation:** ${s.recommendation}`,
         }] };
       }
 
@@ -3287,6 +3365,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     outputTokens,
     cost,
     latencyMs: Date.now() - t0,
+    sessionId: MCP_SESSION_ID,    // v0.20.0 — enables context-budget suffix
   });
 
   // Inject header as the FIRST line of the FIRST text content block

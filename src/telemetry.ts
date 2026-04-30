@@ -433,13 +433,27 @@ export function formatCostHeader(input: {
   outputTokens?: number;
   cost?:        CostCalculation;
   latencyMs:    number;
+  sessionId?:   string;        // v0.20.0 — for context-budget suffix
 }): string {
   const inTok  = input.inputTokens  ?? 0;
   const outTok = input.outputTokens ?? 0;
   const cost   = input.cost?.cost_usd ?? 0;
   const known  = input.cost?.known ?? false;
   const dollarPart = known ? `$${cost.toFixed(4)}` : "$?";
-  return `[cost: ${inTok} in, ${outTok} out, ${dollarPart}, ${input.latencyMs}ms]`;
+  const base = `[cost: ${inTok} in, ${outTok} out, ${dollarPart}, ${input.latencyMs}ms]`;
+  // v0.20.0 — context budget suffix. Records this call's tokens into the
+  // session's running total + appends "[ctx: X% / 200K — TIER]" so the agent
+  // sees its budget in real time. Tier A item #3 from the harness plan.
+  if (input.sessionId) {
+    try {
+      // Lazy import to avoid pulling context_budget.ts into pure-telemetry deployments
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const ctx = require("./context_budget.js") as typeof import("./context_budget.js");
+      ctx.recordContextUsage(input.sessionId, inTok, outTok, cost);
+      return `${base} ${ctx.formatBudgetSuffix(input.sessionId)}`;
+    } catch { /* fall through silently */ }
+  }
+  return base;
 }
 
 /**
