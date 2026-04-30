@@ -184,6 +184,22 @@ export async function createApiServer(storeOverride?: Store) {
       }
     }
 
+    // v0.18.9 fix — telemetry endpoints have their own per-agent session_token
+    // auth (the Reference Monitor pattern from v0.12.1, see RT-S2-02..RT-S2-06).
+    // The Authorization header here carries the session_token, NOT the global
+    // API key. The route handler validates it via requireSessionToken() and
+    // enforces the agent_id binding. Skip the global API key gate here so
+    // legitimate session-token requests aren't 401'd.
+    //
+    // Why this didn't fail in tests: API_KEY is captured at module-load. The
+    // test process imports api-server.ts BEFORE beforeAll() sets ZC_API_KEY,
+    // so API_KEY is undefined and timingSafeKeyCheck returns true regardless.
+    // Production (real settings.json env at MCP-spawn time) had API_KEY set,
+    // and every tool_call write was rejected with 401. Telemetry has been
+    // silently dropped on the floor for everyone running with API mode +
+    // ZC_API_KEY since v0.12.1.
+    if (request.url.startsWith("/api/v1/telemetry/")) return;
+
     // API key check
     const authHeader = request.headers.authorization;
     const supplied   = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
