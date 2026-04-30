@@ -84,6 +84,13 @@ beforeAll(async () => {
   process.env.ZC_API_KEY = testApiKey;
   baseUrl = `http://localhost:${port}`;
   process.env.ZC_API_URL = baseUrl;  // tell telemetry_client where to find us
+  // v0.18.9 — pin ZC_TELEMETRY_MODE=local. With the new 'auto' default, the
+  // test setup (which sets ZC_API_URL+ZC_API_KEY) would otherwise route every
+  // intra-test recordToolCall through the same fastify instance — that floods
+  // the per-IP rate limiter (500/min) and turns later auth-check tests into
+  // 429s instead of 401s/403s. The reference monitor itself is exercised
+  // explicitly via fetch() calls; we don't need recordToolCall going via API.
+  process.env.ZC_TELEMETRY_MODE = "local";
 
   const { app } = await createApiServer();
   await new Promise<void>((resolve, reject) => {
@@ -96,6 +103,7 @@ afterAll(async () => {
   try { await serverApp.close(); } catch {}
   delete process.env.ZC_API_KEY;
   delete process.env.ZC_API_URL;
+  delete process.env.ZC_TELEMETRY_MODE;
 });
 
 beforeEach(() => {

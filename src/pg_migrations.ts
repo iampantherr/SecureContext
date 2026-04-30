@@ -465,6 +465,22 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 14,
+    description: "v0.18.9 Sprint 2.9: project_paths_pg — hash → path resolution so the dashboard can show real project names instead of truncated hashes (Docker container cannot read the host's agents.json)",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS project_paths_pg (
+          project_hash    TEXT PRIMARY KEY,
+          project_path    TEXT NOT NULL,
+          first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+          last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_project_paths_pg_last_seen ON project_paths_pg(last_seen_at DESC)`);
+    },
+  },
+
 ];
 
 /**

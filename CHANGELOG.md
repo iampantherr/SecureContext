@@ -4,6 +4,114 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.9] — 2026-04-30 — Telemetry observability + HA-friendly defaults + dashboard project names from PG
+
+Three months of operator activity were silently being dropped on the floor.
+This release surfaces the bugs that were hiding it, fixes the schema drift
+that caused it, switches to an HA-friendly default mode, and ships a one-shot
+recovery script to restore historical data into Postgres.
+
+### Bug 1 — fire-and-forget telemetry was swallowing **every** error (`src/server.ts`)
+
+Both telemetry call sites used `void recordToolCall(...)` to avoid blocking
+tool returns. That worked for latency but turned the entire telemetry chain
+into an iceberg: schema drift on session SQLite DBs, missing env vars, broken
+PG credentials — all silent. **Fixed**: the `void` is replaced with a
+`.catch()` that logs to the structured `telemetry` log (`logger.error`) with
+call_id, tool_name, agent_id, error, and trace_id. The user-visible behavior
+is identical (telemetry still doesn't block), but operators now have a paper
+trail for debugging.
+
+### Bug 2 — older session SQLite DBs missing the `id` column (`src/migrations.ts`)
+
+Some session DBs were created before the `id INTEGER PRIMARY KEY AUTOINCREMENT`
+migration was added to `tool_calls`. Subsequent INSERTs with `RETURNING id`
+failed with `no such column: id` and (per Bug 1) were silently dropped.
+**Fixed**: new function `healSessionDbs(sessionsDir)` walks
+`~/.claude/zc-ctx/sessions/*.db` at MCP server startup and runs idempotent
+migrations on each. Runs once per server boot; subsequent boots are no-ops
+on already-healed DBs. Per-DB failures are isolated and logged.
+
+### HA shift — `ZC_TELEMETRY_MODE` now defaults to `'auto'` (`src/telemetry.ts`)
+
+Old default was `'local'` — every MCP server wrote directly to its configured
+backend (SQLite or PG). For PG that meant N MCP processes all holding PG
+credentials in their env, with no central writer. New default `'auto'`:
+when `ZC_API_URL` and `ZC_API_KEY` are both set, telemetry routes through
+the SecureContext HTTP API as the single PG writer (the Reference Monitor
+pattern from v0.12.1). Falls back to `'local'` cleanly when the API isn't
+reachable. Explicit `'local'`/`'api'`/`'dual'` overrides still work.
+
+This is non-breaking: existing setups with no API config keep their old
+behavior. Setups WITH the API config silently shift to API mode on next
+restart. Tests pin the explicit mode to keep test isolation tight.
+
+### Project-name resolution from Postgres (`src/dashboard/render.ts`, `src/api-server.ts`, `src/pg_migrations.ts`)
+
+The dashboard runs in Docker and can't reach the host's `agents.json`
+registry. Result: every project hash showed as `project:abc12345…`
+instead of a readable name. **Fixed** with PG migration 14 +
+`project_paths_pg` table (project_hash PK → project_path, last_seen_at):
+
+  - `/api/v1/telemetry/tool_call` UPSERTs the path on every successful
+    write — best-effort, non-fatal.
+  - `loadProjectNameMap()` is now async + queries `project_paths_pg` first,
+    then merges agents.json (file-based registry wins on conflict).
+  - All 4 dashboard handlers now `await` the resolver.
+
+The dashboard now shows e.g. `A2A_communication (8 calls)` for projects
+that have any telemetry; new projects pick up names automatically as soon
+as they emit their first tool call through the API.
+
+### One-shot recovery script — `scripts/migrate-sqlite-to-pg.mjs`
+
+Walks every `~/.claude/zc-ctx/sessions/*.db`, heals any stale schema, and
+copies its `tool_calls` rows into `tool_calls_pg`. Idempotent: re-running
+skips duplicates via `ON CONFLICT (call_id) DO NOTHING`. Also populates
+`project_paths_pg` for hashes found in `agents.json`. Author's run on
+8,394 session DBs imported **102 historical telemetry rows across 48
+projects** — months of operator activity, suddenly visible on the dashboard.
+
+Usage:
+```
+node scripts/migrate-sqlite-to-pg.mjs [--dry-run] [--limit=N]
+```
+
+### Schema — PG migration 14
+
+```sql
+CREATE TABLE project_paths_pg (
+  project_hash    TEXT PRIMARY KEY,
+  project_path    TEXT NOT NULL,
+  first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### Operator action required
+
+To pick up these fixes you must **restart Claude Code** (so MCP server
+subprocesses re-read the env from `settings.json` and load the new
+compiled code). Once you do:
+
+  1. New telemetry routes via the API → PG (because `ZC_API_URL` +
+     `ZC_API_KEY` are set in your settings)
+  2. Project-name resolution kicks in for every project that emits
+     telemetry
+  3. Old session SQLite DBs are auto-healed on first server boot
+
+Optional one-time: run
+`node scripts/migrate-sqlite-to-pg.mjs` to backfill historical data.
+
+### Tests
+
+839 passing (unchanged total). One test file (`reference_monitor.test.ts`)
+needed an explicit `ZC_TELEMETRY_MODE=local` pin in `beforeAll` — the new
+'auto' default would have routed every test's intra-suite telemetry through
+the same fastify instance and tripped the per-IP rate limiter (500/min),
+flipping later auth-check tests' expected 401s into 429s. Test pinning is
+hygiene; production behavior is unchanged.
+
 ## [0.18.8] — 2026-04-30 — Sprint 2.8: persistent savings snapshots + trend + feedback loops
 
 Closes the "v0.18.7 panel only shows the current window" gap. Savings data

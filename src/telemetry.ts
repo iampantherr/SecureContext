@@ -145,8 +145,15 @@ export function newCallId(): string {
  * (e.g. RBAC unconfigured).
  */
 export async function recordToolCall(input: ToolCallInput): Promise<ToolCallRecord | null> {
-  // v0.12.1: Reference Monitor opt-in
-  const mode = (process.env.ZC_TELEMETRY_MODE || "local").toLowerCase();
+  // v0.18.9: 'auto' is the new default — picks API mode when ZC_API_URL +
+  // ZC_API_KEY are both set (HA-friendly: only the API server has direct PG
+  // creds; many MCP servers POST to it). Falls back to direct local writes
+  // when the API isn't reachable. Explicit values ('local'|'api'|'dual') still
+  // override.
+  const rawMode = (process.env.ZC_TELEMETRY_MODE || "auto").toLowerCase();
+  const mode = rawMode === "auto"
+    ? ((process.env.ZC_API_URL && process.env.ZC_API_KEY) ? "api" : "local")
+    : rawMode;
   if (mode === "api" || mode === "dual") {
     const apiResult = await _recordToolCallViaApiPath(input);
     // dual: also write locally; api-only: return what we got

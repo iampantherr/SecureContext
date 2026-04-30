@@ -3246,10 +3246,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Re-throw so MCP transport returns the error to the caller
     // (telemetry write happens in the finally block below)
     const inputChars  = JSON.stringify(argsObj).length;
-    // Fire-and-forget: telemetry failure must not block the error from
-    // propagating. The void operator silences @typescript-eslint/no-floating-promises
-    // while documenting that the promise is intentionally un-awaited.
-    void recordToolCall({
+    // v0.18.9 — fail-loud telemetry. Previously `void recordToolCall(...)` swallowed
+    // ALL errors silently. That hid an entire class of bugs (schema drift on session
+    // SQLite, env-not-propagated to MCP subprocess, etc.) for weeks. We still don't
+    // re-throw — telemetry failure must not break the user's tool call — but we DO
+    // surface the error in the structured logger so operators see it.
+    recordToolCall({
       callId,
       sessionId:   MCP_SESSION_ID,
       agentId:     AGENT_ID,
@@ -3262,6 +3264,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       status,
       errorClass,
       traceId,
+    }).catch((telemErr: unknown) => {
+      logger.error("telemetry", "record_failed_in_error_path", {
+        call_id: callId, tool_name: name, agent_id: AGENT_ID,
+        error: (telemErr as Error)?.message ?? String(telemErr),
+      }, traceId);
     });
     throw e;
   }
@@ -3289,9 +3296,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     result.content.unshift({ type: "text", text: header });
   }
 
-  // ── Record telemetry (fire-and-forget; never throws; never blocks return) ──
-  // void operator documents intent + silences no-floating-promises lint
-  void recordToolCall({
+  // ── Record telemetry (fire-and-forget for return latency; logs on error) ──
+  // v0.18.9 — fail-loud: errors no longer swallowed; surfaced in structured logs
+  recordToolCall({
     callId,
     sessionId:   MCP_SESSION_ID,
     agentId:     AGENT_ID,
@@ -3304,6 +3311,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     status,
     errorClass,
     traceId,
+  }).catch((telemErr: unknown) => {
+    logger.error("telemetry", "record_failed_in_success_path", {
+      call_id: callId, tool_name: name, agent_id: AGENT_ID,
+      error: (telemErr as Error)?.message ?? String(telemErr),
+    }, traceId);
   });
 
   return result;
@@ -3323,6 +3335,25 @@ function formatSandboxResult(result: {
   if (result.stderr)    parts.push(`STDERR:\n${result.stderr}`);
   parts.push(`Exit code: ${result.exitCode ?? "killed"}`);
   return parts.join("\n\n");
+}
+
+// v0.18.9 — auto-heal session SQLite DBs created on older schemas before
+// the MCP server was upgraded. Idempotent: re-running migrates only new
+// migrations; healed DBs are no-ops on subsequent boots. Non-fatal: any
+// per-DB failure is logged but doesn't block server startup.
+try {
+  const { healSessionDbs } = await import("./migrations.js");
+  const result = healSessionDbs(Config.DB_DIR);
+  if (result.scanned > 0) {
+    logger.info("migrations", "session_dbs_healed", {
+      scanned: result.scanned, healed: result.healed, failed: result.failed,
+      ...(result.failures.length > 0 ? { failures: result.failures.slice(0, 3) } : {}),
+    });
+  }
+} catch (e) {
+  logger.error("migrations", "session_db_heal_failed", {
+    error: (e as Error).message,
+  });
 }
 
 const transport = new StdioServerTransport();

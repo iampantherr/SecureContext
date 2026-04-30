@@ -124,14 +124,36 @@ export function renderDiff(parent: string, candidate: string): string {
  * the hash. Multi-project: the same registry file holds an entry per
  * project, so one read serves the whole dashboard.
  */
-export function loadProjectNameMap(): Map<string, string> {
+export async function loadProjectNameMap(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+
+  // v0.18.9 — query PG project_paths_pg first. This is populated by the API
+  // server's /api/v1/telemetry/tool_call handler on every write — so it
+  // covers EVERY project that has emitted any telemetry, not just those
+  // launched via the A2A dispatcher. Critical for Docker-deployed dashboards
+  // (the container can't read the host's agents.json).
+  try {
+    const { withClient } = await import("../pg_pool.js");
+    const rows = await withClient(async (c) => {
+      const r = await c.query<{ project_hash: string; project_path: string }>(
+        `SELECT project_hash, project_path FROM project_paths_pg`,
+      );
+      return r.rows;
+    });
+    for (const r of rows) {
+      const name = basename(r.project_path.replace(/\\/g, "/"));
+      if (name) map.set(r.project_hash, name);
+    }
+  } catch { /* PG unavailable — fall through to file-based registry */ }
+
+  // Then merge agents.json — wins on conflict (it's curated by start-agents.ps1
+  // and gives the cleanest names; PG entries are best-effort from telemetry).
   const candidates = [
     process.env.ZC_A2A_REGISTRY_PATH,
     join(homedir(), "AI_projects", "A2A_dispatcher", "data", "agents.json"),
     join(process.cwd(), "..", "A2A_dispatcher", "data", "agents.json"),
   ].filter((p): p is string => Boolean(p));
 
-  const map = new Map<string, string>();
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     try {
@@ -139,13 +161,12 @@ export function loadProjectNameMap(): Map<string, string> {
       for (const [hash, entry] of Object.entries(data)) {
         const projectPath = (entry as { _meta?: { projectPath?: string } } | null)?._meta?.projectPath;
         if (typeof projectPath === "string" && projectPath.length > 0) {
-          // basename works for both unix and windows-style paths
           const name = basename(projectPath.replace(/\\/g, "/"));
-          if (name) map.set(hash, name);
+          if (name) map.set(hash, name);  // overrides PG entry
         }
       }
-      return map;  // first valid registry wins
-    } catch { /* try next */ }
+      break;  // first valid registry wins for the file portion
+    } catch { /* try next candidate */ }
   }
   return map;
 }
@@ -403,7 +424,7 @@ export function renderDashboardHtml(): string {
 </div>
 
 <footer>
-  v0.18.8 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
+  v0.18.9 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
   Notifications poll every 5s; pending list every 10s.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>

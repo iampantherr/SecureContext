@@ -260,7 +260,7 @@ export async function createApiServer(storeOverride?: Store) {
       });
       // v0.18.3: resolve project_hash → name once per request (sync read of
       // agents.json; cheap enough for a 10s poll, no caching needed yet).
-      const nameMap = loadProjectNameMap();
+      const nameMap = await loadProjectNameMap();
       reply.type("text/html").send(renderPendingFragment(rows, nameMap));
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to load pending: ${(e as Error).message}</div>`);
@@ -349,7 +349,7 @@ export async function createApiServer(storeOverride?: Store) {
       });
       const { loadProjectNameMap } = await import("./dashboard/render.js");
       const { fetchSkillEfficiency } = await import("./dashboard/savings_snapshotter.js");
-      const nameMap = loadProjectNameMap();
+      const nameMap = await loadProjectNameMap();
       // v0.18.8 Loop B — pull per-skill avg cost (cross-project; we filter by skill_id, not project)
       const effMap = await fetchSkillEfficiency("");
       reply.type("text/html").send(renderSkillsListFragment(rows, nameMap, effMap));
@@ -405,7 +405,7 @@ export async function createApiServer(storeOverride?: Store) {
       const { computeSavings, renderSavingsHtml } = await import("./dashboard/token_savings.js");
       const { loadProjectNameMap } = await import("./dashboard/render.js");
       const summary = await computeSavings(projectHash, since.toISOString(), until.toISOString());
-      const projectName = loadProjectNameMap().get(projectHash) ?? null;
+      const projectName = (await loadProjectNameMap()).get(projectHash) ?? null;
       reply.type("text/html").send(renderSavingsHtml(summary, projectName));
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to compute savings: ${escapeHtml((e as Error).message)}</div>`);
@@ -492,7 +492,7 @@ export async function createApiServer(storeOverride?: Store) {
         );
         return res.rows;
       });
-      const nameMap = loadProjectNameMap();
+      const nameMap = await loadProjectNameMap();
       const opts = rows.map((r) => {
         const name = nameMap.get(r.project_hash) ?? `project:${r.project_hash.slice(0, 8)}…`;
         return `<option value="${escapeHtml(r.project_hash)}">${escapeHtml(name)} (${r.n} calls)</option>`;
@@ -1003,6 +1003,27 @@ export async function createApiServer(storeOverride?: Store) {
       if (record === null) {
         throw new ApiError(500, "Telemetry write failed (see server logs)");
       }
+
+      // v0.18.9 — capture (project_hash → project_path) so the dashboard can
+      // resolve hashes to readable names. Best-effort: failure here must not
+      // break the telemetry write that already succeeded.
+      void (async () => {
+        try {
+          const { withClient } = await import("./pg_pool.js");
+          const { createHash } = await import("node:crypto");
+          const projectHash = createHash("sha256").update(pp).digest("hex").slice(0, 16);
+          await withClient(async (c) => {
+            await c.query(`
+              INSERT INTO project_paths_pg (project_hash, project_path)
+              VALUES ($1, $2)
+              ON CONFLICT (project_hash) DO UPDATE
+                SET project_path  = EXCLUDED.project_path,
+                    last_seen_at  = now()
+            `, [projectHash, pp]);
+          });
+        } catch { /* non-fatal */ }
+      })();
+
       return { ok: true, record };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });

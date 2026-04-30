@@ -949,6 +949,53 @@ export function runMigrations(db: DatabaseSync): void {
   }
 }
 
+/**
+ * v0.18.9 — Heal session SQLite DBs that were created on an older schema.
+ *
+ * Background: Each Claude Code session opens a project-scoped SQLite DB in
+ * `~/.claude/zc-ctx/sessions/<hash>.db`. If the MCP server is upgraded between
+ * sessions, OLD session DBs are NOT auto-migrated unless the agent reconnects.
+ * That left some session DBs missing columns (e.g. tool_calls.id) and silently
+ * dropping every telemetry write with "no such column: id".
+ *
+ * Fix: at MCP server start, walk the sessions directory and run idempotent
+ * migrations on every *.db. Cheap, idempotent, and transactional per-DB —
+ * if any single DB fails, others are unaffected.
+ *
+ * Returns { scanned, healed, failed } counts. `healed` only counts DBs where
+ * at least one new migration applied.
+ */
+export function healSessionDbs(sessionsDir: string): { scanned: number; healed: number; failed: number; failures: Array<{ path: string; error: string }> } {
+  const result = { scanned: 0, healed: 0, failed: 0, failures: [] as Array<{ path: string; error: string }> };
+  let entries: string[];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("node:fs") as typeof import("node:fs");
+    if (!fs.existsSync(sessionsDir)) return result;
+    entries = fs.readdirSync(sessionsDir).filter((f) => f.endsWith(".db"));
+  } catch (e) {
+    return { ...result, failed: 1, failures: [{ path: sessionsDir, error: (e as Error).message }] };
+  }
+  for (const fname of entries) {
+    result.scanned++;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require("node:path") as typeof import("node:path");
+    const full = path.join(sessionsDir, fname);
+    try {
+      const db = new DatabaseSync(full);
+      const before = getCurrentSchemaVersion(db);
+      runMigrations(db);
+      const after = getCurrentSchemaVersion(db);
+      db.close();
+      if (after > before) result.healed++;
+    } catch (e) {
+      result.failed++;
+      result.failures.push({ path: full, error: (e as Error).message });
+    }
+  }
+  return result;
+}
+
 /** Returns the highest applied migration ID, or 0 if none applied yet. */
 export function getCurrentSchemaVersion(db: DatabaseSync): number {
   try {
