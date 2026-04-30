@@ -481,6 +481,36 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 15,
+    description: "v0.19.0 Sprint 2.10: skill_candidates_pg — pending skill proposals from REJECT clusters when no matching skill exists (closes the bootstrap loop: REJECT pattern → operator review → new skill in library)",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_candidates_pg (
+          candidate_id        TEXT PRIMARY KEY,
+          project_hash        TEXT NOT NULL,
+          target_role         TEXT NOT NULL,
+          rejection_count     INTEGER NOT NULL,
+          first_rejection_at  TIMESTAMPTZ NOT NULL,
+          last_rejection_at   TIMESTAMPTZ NOT NULL,
+          rejection_outcomes  JSONB NOT NULL,
+          headline            TEXT NOT NULL,
+          proposed_skill_body TEXT,
+          proposed_at         TIMESTAMPTZ,
+          status              TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending','generating','ready','approved','rejected','superseded')),
+          reviewed_by         TEXT,
+          reviewed_at         TIMESTAMPTZ,
+          review_notes        TEXT,
+          installed_skill_id  TEXT,
+          created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_candidates_status ON skill_candidates_pg(status, created_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_candidates_project_role ON skill_candidates_pg(project_hash, target_role, status)`);
+    },
+  },
+
 ];
 
 /**

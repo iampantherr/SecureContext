@@ -519,6 +519,39 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.19.0 Sprint 2.10 — Skill candidates panel
+  app.get("/dashboard/skill-candidates", async (_request, reply) => {
+    try {
+      // Run the detector first (cooldown-gated internally) so new clusters
+      // are queued before render.
+      const { detectAndQueueSkillCandidates } = await import("./skill_candidate_detector.js");
+      void detectAndQueueSkillCandidates();  // fire-and-forget; render uses what's already in DB
+
+      const { renderSkillCandidatesFragment } = await import("./dashboard/render.js");
+      const { withClient: wc } = await import("./pg_pool.js");
+      const rows = await wc(async (c) => {
+        const r = await c.query<{
+          candidate_id: string; target_role: string; rejection_count: number;
+          headline: string; status: string; created_at: string; last_rejection_at: string;
+          proposed_skill_body: string | null; installed_skill_id: string | null;
+        }>(
+          `SELECT candidate_id, target_role, rejection_count, headline, status,
+                  created_at::text AS created_at,
+                  last_rejection_at::text AS last_rejection_at,
+                  proposed_skill_body, installed_skill_id
+             FROM skill_candidates_pg
+            WHERE status IN ('pending','generating','ready','approved')
+            ORDER BY rejection_count DESC, created_at DESC
+            LIMIT 25`,
+        );
+        return r.rows;
+      });
+      reply.type("text/html").send(renderSkillCandidatesFragment(rows));
+    } catch (e) {
+      reply.type("text/html").send(`<p class="error">Error loading skill candidates: ${escapeHtml((e as Error).message)}</p>`);
+    }
+  });
+
   app.post("/dashboard/skills/edit", async (request, reply) => {
     const body = request.body as Record<string, unknown>;
     const skill_id        = String(body.skill_id ?? "").trim();
@@ -756,11 +789,15 @@ export async function createApiServer(storeOverride?: Store) {
         }
       }
 
+      const broadcastTask    = typeof body["task"]    === "string" ? body["task"]    : undefined;
+      const broadcastSummary = typeof body["summary"] === "string" ? body["summary"] : undefined;
+      const broadcastReason  = typeof body["reason"]  === "string" ? body["reason"]  : undefined;
+
       const msg = await store.broadcast(pp, type as never, agentId, {
-        task:          typeof body["task"]          === "string" ? body["task"]          : undefined,
-        summary:       typeof body["summary"]       === "string" ? body["summary"]       : undefined,
+        task:          broadcastTask,
+        summary:       broadcastSummary,
         state:         typeof body["state"]         === "string" ? body["state"]         : undefined,
-        reason:        typeof body["reason"]        === "string" ? body["reason"]        : undefined,
+        reason:        broadcastReason,
         importance:    typeof body["importance"]    === "number" ? body["importance"]    : undefined,
         channel_key:   typeof body["channel_key"]   === "string" ? body["channel_key"]  : undefined,
         session_token: typeof body["session_token"] === "string" ? body["session_token"]: undefined,
@@ -779,6 +816,32 @@ export async function createApiServer(storeOverride?: Store) {
           estimated_tokens:         typeof body["estimated_tokens"]         === "number" ? body["estimated_tokens"]       : undefined,
         } as Record<string, unknown>),
       } as never);
+
+      // v0.19.0 Step 2 — REJECT outcome resolver. Fire-and-forget: writes
+      // outcomes_pg row, learnings/failures.jsonl entry, working memory fact,
+      // and flags any matching skill_run with low outcome_score (so the
+      // mutator's auto-spawn detector picks it up). Errors logged, never
+      // surfaced to the caller — broadcast delivery must always succeed.
+      if (type === "REJECT") {
+        void (async () => {
+          try {
+            const { resolveRejectOutcome } = await import("./outcomes_reject_resolver.js");
+            await resolveRejectOutcome({
+              projectPath:       pp,
+              rejectingAgentId:  agentId,
+              task:              broadcastTask,
+              summary:           broadcastSummary,
+              reason:            broadcastReason,
+              rejectBroadcastId: msg.id,
+            });
+          } catch (e) {
+            // Defense in depth — resolveRejectOutcome itself should never throw,
+            // but if its lazy-imported deps fail to load we still want a log.
+            void e;
+          }
+        })();
+      }
+
       return { ok: true, message: msg };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });

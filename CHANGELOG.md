@@ -4,6 +4,161 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.19.0] — 2026-04-30 — Sprint 2.10: closing the agent self-improvement loop
+
+The mutator system shipped in Sprint 2.4–2.7 was a skill *improvement*
+engine: feed it `skill_runs_pg` rows with low outcome_score, it proposes
+better skill bodies. But operators discovered an architectural hole:
+**without skills, the loop never starts.** Every behavioral instruction
+was baked into `roles.json` `deepPrompt` blobs (487K chars across 27
+roles), invisible to the mutator. And when an orchestrator REJECTed a
+worker's MERGE, that signal was just text in the broadcasts table — it
+never reached the outcomes resolver pipeline.
+
+This release closes both gaps in three coordinated steps:
+
+### Step 1 — Role-to-skill extractor (`scripts/extract-skills-from-roles.mjs`)
+
+Reads `A2A_dispatcher/roles.json`, splits each role's `deepPrompt` into:
+  - **Identity content** (kept in role): "you are X", communication
+    protocols, boundaries, model + idle config
+  - **Procedural content** (extracted to `.skill.md`): checklists,
+    workflows, pre-action verifications, debugging protocols
+
+Heuristics:
+  - Split on markdown H2 headers
+  - Classify by title patterns + bullet density (`/protocol|checklist|
+    workflow|flow|rules|instincts|directives|when|before|how to/i` →
+    procedural; identity-shaped titles or low-bullet-density → identity;
+    everything else flagged ambiguous, kept in role)
+
+Output goes to `skills/_staging_v0_19/` for operator review with a full
+report. Run with `--apply` to:
+  1. Backup `roles.json` to `roles.json.v0_19_backup`
+  2. Replace each role's `deepPrompt` with the slimmed (identity-only) version
+  3. Copy approved `*.skill.md` files from staging to `skills/`
+
+The script is **dry-run by default** and writes nothing destructive
+until `--apply`. Single-role mode: `--role=developer` for spike testing.
+
+### Step 2 — Orchestrator REJECT outcome resolver (Option B)
+
+New file `src/outcomes_reject_resolver.ts`. Wired into the broadcast
+endpoint at `POST /api/v1/broadcast` — fires fire-and-forget when
+`type === "REJECT"`. Five effects:
+
+  1. Walks back through `broadcasts` to find the rejected agent's most
+     recent MERGE for the same `task` field
+  2. Writes an `outcomes_pg` row with `outcome_kind='rejected'`,
+     `signal_source='orchestrator_reject'`, evidence including reject
+     reason + summary + IDs
+  3. Appends a structured row to `<project>/learnings/failures.jsonl`
+     so the existing `learnings-indexer` hook mirrors it into PG
+  4. **If the rejected agent has any `skill_runs_pg` rows referencing
+     this task** (or in the MERGE→REJECT time window), updates the
+     run with `outcome_score=0.2` + `status='failed'` + appends the
+     reject reason to `failure_trace`. **The mutator's auto-spawn
+     detector picks this up on the next tick** — closing the loop.
+  5. Persists a `reject_<task>_<short>` working memory fact at
+     importance=4 so the rejected agent sees it next session via
+     `zc_recall_context` ("Last attempt at X was REJECTED. Reason: Y.
+     Before retrying, address Y explicitly.")
+
+### Step 3 — Skill candidate detector (Option D, MVP)
+
+New file `src/skill_candidate_detector.ts` + PG migration 14 → 15
+adding `skill_candidates_pg`:
+
+```sql
+CREATE TABLE skill_candidates_pg (
+  candidate_id        TEXT PRIMARY KEY,
+  project_hash        TEXT NOT NULL,
+  target_role         TEXT NOT NULL,
+  rejection_count     INTEGER NOT NULL,
+  first_rejection_at  TIMESTAMPTZ NOT NULL,
+  last_rejection_at   TIMESTAMPTZ NOT NULL,
+  rejection_outcomes  JSONB NOT NULL,
+  headline            TEXT NOT NULL,
+  proposed_skill_body TEXT,
+  status              TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','generating','ready','approved','rejected','superseded')),
+  reviewed_by         TEXT, reviewed_at TIMESTAMPTZ, review_notes TEXT,
+  installed_skill_id  TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+The detector clusters orchestrator REJECT outcomes from the trailing
+window. When `target_role` has ≥3 rejections AND no skill exists with
+`intended_roles` containing it AND no recent candidate is queued (cooldown):
+queue a new `pending` candidate with the rejection cluster + headline.
+
+Tunable via env:
+  - `ZC_SKILL_CANDIDATE_MIN_REJECTS` (default 3)
+  - `ZC_SKILL_CANDIDATE_WINDOW_DAYS` (default 7)
+  - `ZC_SKILL_CANDIDATE_COOLDOWN_HRS` (default 12)
+
+### Dashboard
+
+  - **Skill candidates panel** (new): pending candidates rendered with
+    role, rejection count, sample reasons. Auto-polls every 30s.
+  - HTTP route: `GET /dashboard/skill-candidates` returns the rendered
+    fragment. Triggers the detector before render (cooldown-gated).
+  - CSS for status badges (pending/generating/ready/approved/rejected/superseded)
+  - Footer bumped to v0.19.0
+
+### What v0.19.0 deliberately does NOT do
+
+  - **No automatic skill body generation** — the LLM "Generate skill
+    from rejection cluster" action lands in v0.20.0. v0.19.0 ships
+    detection + queue + dashboard; the operator manually authors a
+    `*.skill.md` with `intended_roles` and the candidate row auto-marks
+    `superseded` on next detector tick.
+  - **No role-edit mutation loop** (Option C from the design discussion)
+    — most rejections are skill-shaped; role-edit comes later if
+    role-level failures recur.
+  - **The extractor doesn't auto-apply** — operator must review the
+    proposed split and run with `--apply` explicitly.
+
+### The full feedback loop, finally end-to-end
+
+```
+Step 1: roles.json deepPrompt   → skills/*.skill.md (operator review)
+                                ↓
+Step 2: orchestrator REJECT     → outcomes_pg + learnings + memory + skill_run flagged
+                                ↓
+        flagged skill_run       → mutator-engineering pool spawns
+                                ↓
+        mutator                 → proposes candidate skill body
+                                ↓
+        operator approves       → improved skill body in skills_pg
+                                ↓
+Step 3: REJECT pattern (no skill)→ skill_candidates_pg row → operator authors → skills/
+                                ↓
+        new skill executes      → skill_runs_pg → mutator → loop continues
+```
+
+For the first time, every rejection has a path to either a learning,
+a skill mutation, or a skill candidate. Nothing falls on the floor.
+
+### Operator action required
+
+  1. **Restart Claude Code** so MCP servers pick up the new compiled code
+     and the v0.19.0 dist.
+  2. **Run the extractor** in dry-run first:
+     `node scripts/extract-skills-from-roles.mjs --role=developer`
+     review `skills/_staging_v0_19/`, then re-run with `--apply`.
+  3. **Restart agent windows** after applying — running orchestrator/
+     developer have their role prompts cached in memory; new spawns will
+     pick up the slimmed `roles.json` + the new skill files.
+
+### Tests
+
+In progress (deferred while operator's project was running). Will be
+backfilled before the v0.19.0 git tag — until then, the working memory
+fact `v0_19_0_PRE_TEST_STATE` flags the schema applied + code committed
+but not yet vitested.
+
 ## [0.18.9] — 2026-04-30 — Telemetry observability + HA-friendly defaults + dashboard project names from PG
 
 Three months of operator activity were silently being dropped on the floor.

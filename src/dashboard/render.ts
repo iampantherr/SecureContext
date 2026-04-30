@@ -124,6 +124,51 @@ export function renderDiff(parent: string, candidate: string): string {
  * the hash. Multi-project: the same registry file holds an entry per
  * project, so one read serves the whole dashboard.
  */
+/**
+ * v0.19.0 Sprint 2.10 — render the skill-candidates panel fragment.
+ * Pure HTML rendering; the API server fetches the rows.
+ */
+export interface SkillCandidateRow {
+  candidate_id:        string;
+  target_role:         string;
+  rejection_count:     number;
+  headline:            string;
+  status:              string;
+  created_at:          string;
+  last_rejection_at:   string;
+  proposed_skill_body: string | null;
+  installed_skill_id:  string | null;
+}
+
+export function renderSkillCandidatesFragment(rows: SkillCandidateRow[]): string {
+  if (rows.length === 0) {
+    return `<p class="empty">No pending skill candidates. Rejections will queue here when ≥3 occur for a role with no governing skill.</p>`;
+  }
+  return rows.map((r) => {
+    const headline = escapeHtml(r.headline);
+    const role     = escapeHtml(r.target_role);
+    const status   = escapeHtml(r.status);
+    return `
+      <div class="skill-candidate" data-candidate-id="${escapeHtml(r.candidate_id)}">
+        <div class="skill-candidate-header">
+          <span class="role-tag">${role}</span>
+          <span class="skill-candidate-count">${r.rejection_count} rejections</span>
+          <span class="skill-candidate-status ${status}">${status}</span>
+        </div>
+        <div class="skill-candidate-headline">${headline}</div>
+        <div class="skill-candidate-meta">
+          first observed: ${escapeHtml(r.created_at.slice(0, 19))} ·
+          last rejection: ${escapeHtml(r.last_rejection_at.slice(0, 19))}
+          ${r.installed_skill_id ? ` · installed as <code>${escapeHtml(r.installed_skill_id)}</code>` : ""}
+        </div>
+        <div class="skill-candidate-actions">
+          <small>v0.19.0 ships detection + queue. The "Generate skill body" LLM action lands in v0.20.0. For now, manually author a <code>${role}-&lt;name&gt;.skill.md</code> in <code>skills/</code> and the row will auto-mark superseded once it appears in <code>skills_pg</code>.</small>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
 export async function loadProjectNameMap(): Promise<Map<string, string>> {
   const map = new Map<string, string>();
 
@@ -273,6 +318,21 @@ export function renderDashboardHtml(): string {
   .skill-eff strong { color: #4ade80; font-family: ui-monospace, monospace; }
   .skill-eff-none { color: #6b7280; }
   .skill-eff-none em { font-style: italic; }
+  /* v0.19.0 — skill candidates panel */
+  .skill-candidate { background: #0e1116; border: 1px solid #1f2937; border-radius: 4px; padding: 12px; margin-bottom: 8px; }
+  .skill-candidate-header { display: flex; gap: 12px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+  .skill-candidate-count { background: #7f1d1d; color: #fecaca; padding: 2px 8px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; }
+  .skill-candidate-status { padding: 2px 8px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; text-transform: uppercase; }
+  .skill-candidate-status.pending   { background: #1f2937; color: #fbbf24; }
+  .skill-candidate-status.generating{ background: #1e3a8a; color: #93c5fd; }
+  .skill-candidate-status.ready     { background: #064e3b; color: #6ee7b7; }
+  .skill-candidate-status.approved  { background: #064e3b; color: #d1fae5; }
+  .skill-candidate-status.rejected  { background: #4c1d95; color: #ddd6fe; opacity: 0.7; }
+  .skill-candidate-status.superseded{ background: #1f2937; color: #94a3b8; opacity: 0.6; }
+  .skill-candidate-headline { color: #cbd5e1; font-size: 0.9rem; margin: 6px 0; line-height: 1.4; }
+  .skill-candidate-meta { color: #6b7280; font-size: 0.78rem; }
+  .skill-candidate-actions { margin-top: 8px; padding-top: 8px; border-top: 1px solid #1f2937; }
+  .skill-candidate-actions small { color: #94a3b8; font-style: italic; }
   /* v0.18.7 — token savings panel */
   .savings-controls { display: flex; gap: 16px; margin-bottom: 12px; align-items: center; }
   .savings-controls label { font-size: 0.85rem; color: #cbd5e1; display: flex; gap: 6px; align-items: center; }
@@ -463,8 +523,19 @@ export function renderDashboardHtml(): string {
   </script>
 </div>
 
+<!-- v0.19.0 Sprint 2.10 — Skill candidates panel (REJECT clusters → propose new skill) -->
+<div class="panel">
+  <h2>Skill candidates <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(from REJECT patterns where the role has no governing skill)</span></h2>
+  <div id="skill-candidates"
+       hx-get="/dashboard/skill-candidates"
+       hx-trigger="load, every 30s"
+       hx-swap="innerHTML">
+    <p class="empty">Loading skill candidates…</p>
+  </div>
+</div>
+
 <footer>
-  v0.18.9 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
+  v0.19.0 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
   Notifications poll every 5s; pending list every 10s.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>
