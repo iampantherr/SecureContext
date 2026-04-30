@@ -832,6 +832,44 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 26,
+    description: "v0.18.4 Sprint 2.7: per-role mutator pools + skill_revisions audit ledger + decision-feedback context",
+    up: (db) => {
+      const safeAdd = (table: string, col: string, def: string) => {
+        try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); } catch { /* exists */ }
+      };
+      // 1) mutation_results: track which pool generated this result. Useful
+      //    for analytics ("are mutator-marketing's candidates approved more
+      //    than mutator-engineering's?") and for surfacing role-specific
+      //    decision history into future mutations.
+      safeAdd("mutation_results", "mutator_pool", "TEXT");
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mres_pool ON mutation_results(mutator_pool, created_at DESC);`);
+
+      // 2) skill_revisions: every skill version transition is audit-logged.
+      //    Promote (mutation-approved) AND revert events both write here.
+      //    Lets us answer "show me the history of this skill" without
+      //    walking archived rows in skills.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill_revisions (
+          revision_id      TEXT PRIMARY KEY,         -- rev-<uuid>
+          skill_name       TEXT NOT NULL,
+          scope            TEXT NOT NULL,            -- 'global' | 'project:<hash>'
+          from_version     TEXT,                     -- previous active version (NULL for genesis)
+          to_version       TEXT NOT NULL,            -- new active version after this rev
+          action           TEXT NOT NULL CHECK(action IN ('promote','revert','manual')),
+          source_result_id TEXT,                     -- mres-<id> when action='promote'
+          reverted_to_body_of TEXT,                  -- skill_id whose body was restored on revert
+          decided_by       TEXT NOT NULL,
+          rationale        TEXT,
+          created_at       TEXT NOT NULL
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_skill_revisions_name ON skill_revisions(skill_name, scope, created_at DESC);`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_skill_revisions_source ON skill_revisions(source_result_id);`);
+    },
+  },
+
 ];
 
 /**

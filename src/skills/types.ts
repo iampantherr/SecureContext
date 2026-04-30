@@ -89,6 +89,40 @@ export interface SkillFrontmatter {
   inputs_schema?: Record<string, unknown>;
   /** Tags for retrieval / categorization. */
   tags?:         string[];
+  /**
+   * v0.18.4 Sprint 2.7 — agent roles that typically use this skill. Used by
+   * the L1 mutation trigger to route the resulting mutator task to the right
+   * domain pool (mutator-engineering, mutator-marketing, mutator-legal, etc.)
+   * via the mutator_pools mapping in A2A_dispatcher/roles.json.
+   *
+   * The FIRST role in the array is the primary classifier — that's what gets
+   * mapped to a pool. Additional roles are informational. If empty/missing,
+   * the skill falls back to mutator-general.
+   *
+   * Examples:
+   *   intended_roles: ["developer"]              → mutator-engineering
+   *   intended_roles: ["marketer", "copywriter"] → mutator-marketing
+   *   intended_roles: ["legal-counsel"]          → mutator-legal
+   */
+  intended_roles?: string[];
+  /**
+   * v0.18.4 Sprint 2.7 — domain-specific guidance the mutator should follow
+   * when proposing candidates for THIS skill. Free-form markdown. Injected
+   * into the mutator's prompt verbatim, AFTER the pool-level style rules but
+   * BEFORE the failure traces.
+   *
+   * Use this when a skill has genuinely unusual constraints (specific brand
+   * voice, regulatory framework, customer segment) that the generic pool
+   * prompt can't capture.
+   *
+   * Example for a legal skill:
+   *   mutation_guidance: |
+   *     This skill produces customer-facing privacy disclosures.
+   *     - Never assert specific obligations as fact; frame as "considerations"
+   *     - Reference GDPR Art 13/14 + CCPA §1798.100 by name when relevant
+   *     - Always include the "consult counsel" disclaimer at the bottom
+   */
+  mutation_guidance?: string;
 }
 
 /**

@@ -242,6 +242,28 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
       } catch { /* ignore — best-effort */ }
     }
 
+    // v0.18.4 Sprint 2.7 — resolve mutator pool from intended_roles[0] (if set)
+    // OR from originalRole as fallback. Routes the mutation task to the right
+    // domain pool's queue (mutator-engineering, mutator-marketing, etc.).
+    const { resolveMutatorPool } = await import("./skills/mutator_pool.js");
+    const intendedRoles = (targetSkill.frontmatter as { intended_roles?: string[] }).intended_roles ?? [];
+    const primaryRole = intendedRoles[0] ?? originalRole ?? "";
+    const mutatorPool = resolveMutatorPool(primaryRole);
+    const mutationGuidance = (targetSkill.frontmatter as { mutation_guidance?: string }).mutation_guidance ?? null;
+
+    // v0.18.4 Sprint 2.7 — fetch recent decisions for this skill or pool to
+    // inject as `prior_decisions`. This is the operator-decision feedback loop:
+    // the mutator sees what got approved/rejected before + why, and adjusts.
+    let priorDecisions: unknown[] = [];
+    try {
+      const { fetchRecentDecisions } = await import("./skills/mutation_results.js");
+      priorDecisions = await fetchRecentDecisions(db, {
+        skill_id:    row.skill_id,
+        mutator_pool: mutatorPool,
+        limit:       5,
+      });
+    } catch { /* tolerate — empty prior_decisions just means no context */ }
+
     // Enqueue the mutation task — the mutator agent will pick it up
     const { enqueueTask } = await import("./task_queue.js");
     const { randomUUID } = await import("node:crypto");
@@ -250,7 +272,7 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
     await enqueueTask({
       taskId,
       projectHash,
-      role: "mutator",
+      role: mutatorPool,                                 // v0.18.4: route to specific pool
       payload: {
         kind:                "skill-mutation",
         mutation_id:         taskId,
@@ -264,6 +286,11 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
         // v0.18.2 — operator review / auto-reassign context
         original_task_id:    originalTaskId,
         original_role:       originalRole,
+        // v0.18.4 Sprint 2.7 — pool routing + skill domain context + feedback
+        mutator_pool:        mutatorPool,
+        intended_roles:      intendedRoles,
+        mutation_guidance:   mutationGuidance,
+        prior_decisions:     priorDecisions,
       },
     });
     logger.info("skills", "l1_mutation_triggered", { skill_id: row.skill_id, task_id: taskId, reason: guard.reason });

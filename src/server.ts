@@ -918,6 +918,45 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_skill_revert",
+    description:
+      "v0.18.4 Sprint 2.7 — Revert a skill to a previously-archived body. Atomic: " +
+      "(1) finds the target archived skill, (2) builds a NEW skill at a bumped " +
+      "patch version with the archived body, (3) archives the current active " +
+      "version, (4) upserts the new reverted version, (5) writes a skill_revisions " +
+      "audit row for traceability. Use this when an approved promotion turned out " +
+      "worse than the prior version — restores the prior body without manual SQL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        skill_name:     { type: "string", description: "Skill name (without version/scope), e.g. 'validate-input'" },
+        scope:          { type: "string", description: "Scope: 'global' or 'project:<hash>'" },
+        target_version: { type: "string", description: "The version to restore (must be an archived row, e.g. '1.0.0' to revert from current 1.0.1 back to the body of 1.0.0)" },
+        rationale:      { type: "string", description: "Why this revert is happening (audit trail)" },
+      },
+      required: ["skill_name", "scope", "target_version", "rationale"],
+    },
+  },
+  {
+    name: "zc_skills_by_role",
+    description:
+      "v0.18.4 Sprint 2.7 — Orchestrator/CEO tool. List all active skills tagged for a given " +
+      "worker role (via skill frontmatter `intended_roles`). Use this when deciding which " +
+      "specialist to LAUNCH_ROLE — the orchestrator can see what skills are available for " +
+      "marketer / developer / legal-counsel / etc. before assigning work. Returns skill_id, " +
+      "version, description, and intended_roles for each match. Falls back to fuzzy match " +
+      "(role contained in any skill's intended_roles) when an exact match returns nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        role:  { type: "string", description: "Worker role name to filter by (e.g. 'developer', 'marketer', 'legal-counsel')." },
+        scope: { type: "string", description: "Optional scope filter: 'global', 'project:<hash>', or omit for both." },
+        limit: { type: "number", description: "Max number of skills to return (default 50)." },
+      },
+      required: ["role"],
+    },
+  },
+  {
     name: "zc_mutation_pending",
     description:
       "v0.18.2 Sprint 2.6 — Operator review tool. Lists mutation candidate bundles awaiting " +
@@ -2553,6 +2592,194 @@ async function dispatchToolCall(
           };
         } catch (e) {
           mrDb.close();
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      // ── v0.18.4 Sprint 2.7 — Skill revert (one-click rollback) ────────────
+      case "zc_skill_revert": {
+        const { skill_name, scope, target_version, rationale } = args as {
+          skill_name: string; scope: string; target_version: string; rationale: string;
+        };
+        if (!skill_name || !scope || !target_version || !rationale) {
+          return { content: [{ type: "text", text: "skill_name, scope, target_version, and rationale are required." }], isError: true };
+        }
+        const { DatabaseSync: SrvDb } = await import("node:sqlite");
+        const { mkdirSync: srvMkd } = await import("node:fs");
+        const { join: srvJoin } = await import("node:path");
+        const { createHash: srvHash, randomUUID: srvUUID } = await import("node:crypto");
+        srvMkd(Config.DB_DIR, { recursive: true });
+        const projectHash = srvHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const srvDb = new SrvDb(srvJoin(Config.DB_DIR, `${projectHash}.db`));
+        srvDb.exec("PRAGMA journal_mode = WAL");
+        try {
+          const { runMigrations } = await import("./migrations.js");
+          runMigrations(srvDb);
+
+          const targetSkillId = `${skill_name}@${target_version}@${scope}`;
+          const { getSkillById, getActiveSkill, archiveSkill, upsertSkill } = await import("./skills/storage_dual.js");
+          const { buildSkill } = await import("./skills/loader.js");
+
+          // 1. Verify target exists (could be archived OR active — we revert TO a body)
+          const target = await getSkillById(srvDb, targetSkillId);
+          if (!target) {
+            srvDb.close();
+            return { content: [{ type: "text", text: `Target skill not found: ${targetSkillId}` }], isError: true };
+          }
+          // 2. Look up the currently-active version for this name+scope
+          const current = await getActiveSkill(srvDb, skill_name, scope as "global" | `project:${string}`);
+          if (current && current.skill_id === targetSkillId) {
+            srvDb.close();
+            return { content: [{ type: "text", text: `Cannot revert: ${targetSkillId} is already the active version.` }], isError: true };
+          }
+          // 3. Build new reverted skill (bump patch from current.version, body=target.body)
+          const bumpPatch = (v: string): string => {
+            const parts = v.split(".");
+            if (parts.length !== 3) return v + ".1";
+            const patch = parseInt(parts[2], 10);
+            return `${parts[0]}.${parts[1]}.${Number.isFinite(patch) ? patch + 1 : 1}`;
+          };
+          const newVersion = current ? bumpPatch(current.frontmatter.version) : bumpPatch(target.frontmatter.version);
+          const newSkill = await buildSkill(
+            { ...target.frontmatter, version: newVersion },
+            target.body,
+            { promoted_from: targetSkillId },
+          );
+          // 4. Atomic transition: archive current → upsert new
+          if (current) {
+            await archiveSkill(srvDb, current.skill_id, `reverted_to_body_of_${targetSkillId}`);
+          }
+          await upsertSkill(srvDb, newSkill);
+
+          // 5. Audit: write skill_revisions row (SQLite + PG)
+          const revisionId = `rev-${srvUUID().slice(0, 12)}`;
+          const decided_by = AGENT_ID || "operator";
+          const created_at = new Date().toISOString();
+          srvDb.prepare(`
+            INSERT INTO skill_revisions
+              (revision_id, skill_name, scope, from_version, to_version, action,
+               source_result_id, reverted_to_body_of, decided_by, rationale, created_at)
+            VALUES (?, ?, ?, ?, ?, 'revert', NULL, ?, ?, ?, ?)
+          `).run(revisionId, skill_name, scope, current?.frontmatter.version ?? null, newVersion, targetSkillId, decided_by, rationale, created_at);
+
+          // PG mirror (best effort)
+          try {
+            const { withClient } = await import("./pg_pool.js");
+            await withClient(async (c) => {
+              await c.query(
+                `INSERT INTO skill_revisions_pg
+                  (revision_id, skill_name, scope, from_version, to_version, action,
+                   source_result_id, reverted_to_body_of, decided_by, rationale, created_at)
+                 VALUES ($1, $2, $3, $4, $5, 'revert', NULL, $6, $7, $8, $9)
+                 ON CONFLICT (revision_id) DO NOTHING`,
+                [revisionId, skill_name, scope, current?.frontmatter.version ?? null, newVersion, targetSkillId, decided_by, rationale, created_at],
+              );
+            });
+          } catch { /* tolerate */ }
+
+          // Broadcast STATUS state='skill-reverted'
+          try {
+            const { broadcastFact } = await import("./memory.js");
+            broadcastFact(PROJECT_PATH, "STATUS", decided_by, {
+              task: `skill-reverted:${newSkill.skill_id}`,
+              state: "skill-reverted",
+              summary: JSON.stringify({
+                prior_skill_id: current?.skill_id ?? null,
+                new_skill_id:   newSkill.skill_id,
+                target_skill_id: targetSkillId,
+                revision_id:    revisionId,
+                rationale:      rationale.slice(0, 200),
+              }).slice(0, 1000),
+              importance: 4,
+            });
+          } catch { /* best-effort */ }
+
+          srvDb.close();
+          const lines: string[] = [];
+          lines.push(`✓ Reverted ${skill_name} (${scope})`);
+          lines.push(`  prior active:  ${current ? current.skill_id : "(none)"} → archived`);
+          lines.push(`  reverted body: ${targetSkillId}`);
+          lines.push(`  new active:    ${newSkill.skill_id}`);
+          lines.push(`  revision_id:   ${revisionId}`);
+          lines.push(`  rationale:     ${rationale}`);
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        } catch (e) {
+          try { srvDb.close(); } catch { /* noop */ }
+          return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+        }
+      }
+
+      // ── v0.18.4 Sprint 2.7 — Orchestrator tools ───────────────────────────
+      case "zc_skills_by_role": {
+        const { role, scope, limit } = args as { role: string; scope?: string; limit?: number };
+        if (!role) return { content: [{ type: "text", text: "role is required." }], isError: true };
+        const lim = Math.max(1, Math.min(100, limit ?? 50));
+        const { withClient } = await import("./pg_pool.js");
+        try {
+          // Use jsonb @> containment if intended_roles is stored as JSON; we
+          // check both literal-string and JSON-array shapes since seed data
+          // sometimes stores frontmatter as flat JSON.
+          const rows = await withClient(async (c) => {
+            const params: unknown[] = [role.toLowerCase().trim()];
+            let scopeClause = "";
+            if (scope) {
+              params.push(scope);
+              scopeClause = `AND scope = $${params.length}`;
+            }
+            const sql = `
+              SELECT skill_id, name, version, scope, description, frontmatter
+                FROM skills_pg
+               WHERE archived_at IS NULL
+                 ${scopeClause}
+                 AND EXISTS (
+                   SELECT 1 FROM jsonb_array_elements_text(
+                     COALESCE(frontmatter->'intended_roles', '[]'::jsonb)
+                   ) AS elem WHERE lower(elem) = $1
+                 )
+               ORDER BY name, version DESC
+               LIMIT ${lim}
+            `;
+            try {
+              const res = await c.query(sql, params);
+              return res.rows;
+            } catch {
+              // Fallback: simpler text-based filter when frontmatter isn't jsonb-shaped
+              const fallback = await c.query(
+                `SELECT skill_id, name, version, scope, description, frontmatter
+                   FROM skills_pg
+                  WHERE archived_at IS NULL
+                    ${scopeClause}
+                    AND frontmatter::text ILIKE $1
+                  ORDER BY name, version DESC LIMIT ${lim}`,
+                [`%"intended_roles"%"${role.toLowerCase()}"%`, ...(scope ? [scope] : [])],
+              );
+              return fallback.rows;
+            }
+          });
+          const lines: string[] = [];
+          if (rows.length === 0) {
+            lines.push(`No active skills tagged for role '${role}'.`);
+            lines.push(``);
+            lines.push(`Hint: skills opt in via frontmatter \`intended_roles: [${role}, ...]\`. Skills without this tag can still be used by the role; this tool just doesn't surface them.`);
+          } else {
+            lines.push(`# Active skills for role: ${role} (${rows.length} found)`);
+            for (const r of rows) {
+              const fm = typeof r.frontmatter === "string" ? JSON.parse(r.frontmatter) : r.frontmatter;
+              const roles = (fm?.intended_roles ?? []).join(", ");
+              lines.push(``);
+              lines.push(`- **${r.skill_id}**`);
+              lines.push(`  ${r.description ?? "(no description)"}`);
+              lines.push(`  intended_roles: [${roles}]`);
+              if (fm?.mutation_guidance) {
+                const guide = String(fm.mutation_guidance).slice(0, 200);
+                lines.push(`  mutation_guidance: ${guide}${guide.length === 200 ? "..." : ""}`);
+              }
+            }
+            lines.push(``);
+            lines.push(`To use a skill: \`zc_skill_show({skill_id:"<id>"})\` to read; run fixtures + report via \`zc_record_skill_outcome\`.`);
+          }
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        } catch (e) {
           return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
         }
       }

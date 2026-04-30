@@ -478,6 +478,191 @@ export async function markConsumed(
   return any_changed || ((r.changes ?? 0) > 0);
 }
 
+// ─── v0.18.4 Sprint 2.7 — decision-feedback loop ─────────────────────────────
+
+export interface PriorDecision {
+  result_id:               string;
+  picked_candidate_index:  number | null;
+  decision:                "approved" | "rejected";
+  rationale:               string;
+  picked_candidate_summary: string | null;  // rationale of the picked body, if approved
+  retry_passed:            boolean | null;  // true if v1.0.X+1 ran fixtures successfully
+  decided_at:              string;
+  mutator_pool:            string | null;
+  skill_id:                string;
+}
+
+/**
+ * Fetch recent operator decisions to inject into a future mutator's payload as
+ * `prior_decisions`. Used by the L1 trigger so the mutator can learn operator
+ * preferences without ML/training — just prompt-engineering against past data.
+ *
+ * Filters by skill_id (most relevant for repeat-mutations of the same skill)
+ * and falls back to mutator_pool (similar-domain mutations) when not enough
+ * skill-specific history exists. Always returns the most recent decisions
+ * first so the prompt's last-seen items are most weighted.
+ *
+ * The `retry_passed` field is best-effort — we look for skill_runs against
+ * the new version with was_retry_after_promotion=true; if we find a recent
+ * succeeded run, retry_passed=true. If there are recent failed runs,
+ * retry_passed=false. If neither, retry_passed=null (haven't retried yet).
+ */
+export async function fetchRecentDecisions(
+  db: DatabaseSync,
+  args: { skill_id?: string; mutator_pool?: string; limit?: number },
+): Promise<PriorDecision[]> {
+  const limit = Math.max(1, Math.min(20, args.limit ?? 5));
+  const backend = getBackend();
+
+  if (backend === "postgres" || backend === "dual") {
+    try {
+      const decisions = await withClient(async (c) => {
+        // Step 1: pull consumed mutation_results for the skill or pool, newest first.
+        // Try skill-specific first; fall back to pool-wide if skill returns < limit.
+        const wheres: string[] = ["consumed_decision IS NOT NULL"];
+        const params: unknown[] = [];
+        if (args.skill_id) {
+          params.push(args.skill_id);
+          wheres.push(`skill_id = $${params.length}`);
+        }
+        params.push(limit);
+        const sql = `
+          SELECT result_id, mutation_id, skill_id, mutator_pool,
+                 consumed_decision, consumed_by, picked_candidate_index, consumed_at,
+                 bodies
+            FROM mutation_results_pg
+           WHERE ${wheres.join(" AND ")}
+           ORDER BY consumed_at DESC
+           LIMIT $${params.length}
+        `;
+        const res = await c.query<Record<string, unknown>>(sql, params);
+        let rows = res.rows;
+
+        // Fallback: if skill-specific returned < limit, supplement with pool-wide
+        if (rows.length < limit && args.mutator_pool) {
+          const remain = limit - rows.length;
+          const seen = new Set(rows.map((r) => r.result_id as string));
+          const r2 = await c.query<Record<string, unknown>>(
+            `SELECT result_id, mutation_id, skill_id, mutator_pool,
+                    consumed_decision, consumed_by, picked_candidate_index, consumed_at,
+                    bodies
+               FROM mutation_results_pg
+              WHERE consumed_decision IS NOT NULL
+                AND mutator_pool = $1
+                AND ($2::text IS NULL OR skill_id != $2)
+              ORDER BY consumed_at DESC
+              LIMIT $3`,
+            [args.mutator_pool, args.skill_id ?? null, remain],
+          );
+          for (const row of r2.rows) {
+            if (!seen.has(row.result_id as string)) rows.push(row);
+          }
+        }
+
+        // Best-effort retry_passed lookup for each result
+        const decisions: PriorDecision[] = [];
+        for (const row of rows) {
+          // consumed_by has the format "<by>|<rationale>"; split
+          const cb = String(row.consumed_by ?? "");
+          const sepIdx = cb.indexOf("|");
+          const decided_by = sepIdx > 0 ? cb.slice(0, sepIdx) : cb;
+          const rationale  = sepIdx > 0 ? cb.slice(sepIdx + 1) : "";
+
+          let pickedSummary: string | null = null;
+          const pickedIdx = row.picked_candidate_index === null || row.picked_candidate_index === undefined
+            ? null : Number(row.picked_candidate_index);
+          if (pickedIdx !== null && row.bodies) {
+            try {
+              const bodies = typeof row.bodies === "string" ? JSON.parse(row.bodies as string) : row.bodies;
+              if (Array.isArray(bodies) && bodies[pickedIdx]) {
+                pickedSummary = String(bodies[pickedIdx].rationale ?? "").slice(0, 200);
+              }
+            } catch { /* ignore corrupt bodies */ }
+          }
+
+          // retry_passed: was there a was_retry_after_promotion run for this skill_id post-decision?
+          let retry_passed: boolean | null = null;
+          if (row.consumed_decision === "approved") {
+            try {
+              const rr = await c.query<{ status: string }>(
+                `SELECT status FROM skill_runs_pg
+                  WHERE was_retry_after_promotion = TRUE
+                    AND ts > $1::timestamptz
+                  ORDER BY ts ASC LIMIT 1`,
+                [row.consumed_at],
+              );
+              if (rr.rows.length > 0) {
+                retry_passed = rr.rows[0].status === "succeeded";
+              }
+            } catch { /* tolerate */ }
+          }
+          // (Note: decided_by is captured but not used directly in PriorDecision;
+          // it's encoded in `rationale` since the field carries who+why audit trail.
+          // Future cleanup: split into separate columns.)
+          void decided_by;
+
+          decisions.push({
+            result_id:                String(row.result_id),
+            picked_candidate_index:   pickedIdx,
+            decision:                 row.consumed_decision as "approved" | "rejected",
+            rationale,
+            picked_candidate_summary: pickedSummary,
+            retry_passed,
+            decided_at:               row.consumed_at instanceof Date ? row.consumed_at.toISOString() : String(row.consumed_at),
+            mutator_pool:             (row.mutator_pool as string) ?? null,
+            skill_id:                 String(row.skill_id),
+          });
+        }
+        return decisions;
+      });
+      if (decisions.length > 0 || backend === "postgres") return decisions;
+    } catch {
+      if (backend === "postgres") return [];
+    }
+  }
+
+  // SQLite fallback (no retry_passed lookup — only PG has skill_runs_pg)
+  let sql = `SELECT result_id, mutation_id, skill_id, mutator_pool,
+                    consumed_decision, consumed_by, picked_candidate_index, consumed_at, bodies
+               FROM mutation_results
+              WHERE consumed_decision IS NOT NULL`;
+  const sqliteParams: Array<string | number | null> = [];
+  if (args.skill_id) {
+    sql += ` AND skill_id = ?`;
+    sqliteParams.push(args.skill_id);
+  }
+  sql += ` ORDER BY consumed_at DESC LIMIT ?`;
+  sqliteParams.push(limit);
+  const rows = db.prepare(sql).all(...sqliteParams) as Array<Record<string, unknown>>;
+  return rows.map((row) => {
+    const cb = String(row.consumed_by ?? "");
+    const sepIdx = cb.indexOf("|");
+    const rationale = sepIdx > 0 ? cb.slice(sepIdx + 1) : "";
+    let pickedSummary: string | null = null;
+    const pickedIdx = row.picked_candidate_index === null || row.picked_candidate_index === undefined
+      ? null : Number(row.picked_candidate_index);
+    if (pickedIdx !== null && row.bodies) {
+      try {
+        const bodies = JSON.parse(row.bodies as string);
+        if (Array.isArray(bodies) && bodies[pickedIdx]) {
+          pickedSummary = String(bodies[pickedIdx].rationale ?? "").slice(0, 200);
+        }
+      } catch { /* ignore */ }
+    }
+    return {
+      result_id:                String(row.result_id),
+      picked_candidate_index:   pickedIdx,
+      decision:                 row.consumed_decision as "approved" | "rejected",
+      rationale,
+      picked_candidate_summary: pickedSummary,
+      retry_passed:             null,  // SQLite-only: can't determine
+      decided_at:               String(row.consumed_at ?? ""),
+      mutator_pool:             (row.mutator_pool as string) ?? null,
+      skill_id:                 String(row.skill_id),
+    };
+  });
+}
+
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
 export async function _dropMutationResultsForTesting(): Promise<void> {

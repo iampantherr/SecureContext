@@ -410,6 +410,32 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 12,
+    description: "v0.18.4 Sprint 2.7: mutator_pool column + skill_revisions_pg audit ledger",
+    up: async (client) => {
+      await client.query(`ALTER TABLE mutation_results_pg ADD COLUMN IF NOT EXISTS mutator_pool TEXT`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mres_pg_pool ON mutation_results_pg(mutator_pool, created_at DESC)`);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_revisions_pg (
+          revision_id      TEXT PRIMARY KEY,
+          skill_name       TEXT NOT NULL,
+          scope            TEXT NOT NULL,
+          from_version     TEXT,
+          to_version       TEXT NOT NULL,
+          action           TEXT NOT NULL CHECK (action IN ('promote','revert','manual')),
+          source_result_id TEXT,
+          reverted_to_body_of TEXT,
+          decided_by       TEXT NOT NULL,
+          rationale        TEXT,
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_rev_pg_name ON skill_revisions_pg(skill_name, scope, created_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_rev_pg_source ON skill_revisions_pg(source_result_id)`);
+    },
+  },
+
 ];
 
 /**

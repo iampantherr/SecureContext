@@ -243,13 +243,18 @@ export async function createApiServer(storeOverride?: Store) {
     const { withClient } = await import("./pg_pool.js");
     try {
       const rows = await withClient(async (c) => {
+        // v0.18.4: LEFT JOIN skills_pg to fetch the parent body for the
+        // diff view in the dashboard (so each candidate can be shown
+        // side-by-side against what it's replacing).
         const res = await c.query<Record<string, unknown>>(
-          `SELECT result_id, mutation_id, skill_id, project_hash, proposer_model,
-                  proposer_role, candidate_count, best_score, bodies, bodies_hash,
-                  headline, created_at, original_task_id, original_role
-             FROM mutation_results_pg
-            WHERE consumed_at IS NULL
-            ORDER BY created_at DESC LIMIT 50`,
+          `SELECT mr.result_id, mr.mutation_id, mr.skill_id, mr.project_hash, mr.proposer_model,
+                  mr.proposer_role, mr.candidate_count, mr.best_score, mr.bodies, mr.bodies_hash,
+                  mr.headline, mr.created_at, mr.original_task_id, mr.original_role,
+                  mr.mutator_pool, sp.body AS parent_body
+             FROM mutation_results_pg mr
+        LEFT JOIN skills_pg sp ON sp.skill_id = mr.skill_id
+            WHERE mr.consumed_at IS NULL
+            ORDER BY mr.created_at DESC LIMIT 50`,
         );
         return res.rows;
       });

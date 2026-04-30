@@ -4,6 +4,152 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.18.4] — 2026-04-29 — Sprint 2.7: per-role mutator pools + decision feedback + diff view + revert + 83 worker roles
+
+**The data-collection-foundation release.** Builds the framework that makes
+the autonomous self-improving skills loop *self-improving over time* rather
+than just *self-modifying*. Every operator decision now feeds back into the
+mutator's next proposal cycle. Every skill belongs to a domain pool with
+specialized mutator expertise. Every promotion is reversible.
+
+### 15 domain mutator pools (covering CEO-level functions)
+
+`mutator_pools` config in `A2A_dispatcher/roles.json` maps 83 worker roles
+to 15 specialized mutator pools, each with its own deepPrompt + style_rules:
+
+  | pool | covers (sample) |
+  |---|---|
+  | mutator-engineering | developer, qa, devops, security, sre, data-engineer, ml-engineer |
+  | mutator-product     | product-manager, product-owner, business-analyst |
+  | mutator-design      | designer, ux-researcher, ui-designer, brand-designer |
+  | mutator-marketing   | marketer, growth-marketer, seo, social-media |
+  | mutator-sales       | sales-rep, account-executive, sdr, partnerships |
+  | mutator-content     | copywriter, editor, technical-writer, blogger |
+  | mutator-brand       | brand-strategist, brand-manager, creative-director |
+  | mutator-research    | researcher, analyst, user-researcher, data-analyst |
+  | mutator-legal       | legal-counsel, compliance, privacy, contracts |
+  | mutator-finance     | accountant, fp&a, treasurer, controller |
+  | mutator-hr          | recruiter, l&d, comp-analyst, people-ops |
+  | mutator-operations  | ops-manager, project-manager, scrum, program-manager |
+  | mutator-customer    | support, customer-success, account-manager |
+  | mutator-strategy    | strategist, chief-of-staff, consultant, board-advisor |
+  | mutator-general     | (fallback for un-tagged skills) |
+
+Each pool's deepPrompt bakes in domain-specific style rules (legal: "never
+provide actual legal advice — frame as 'considerations'"; marketing: "never
+propose code samples"; engineering: "test coverage is a first-class concern";
+finance: "show your work — every number traces to an assumption"; ...).
+
+### On-demand auto-spawn / auto-retire (Option B)
+
+The dispatcher's health-check tick now runs two new passes:
+
+  - **Auto-spawn**: when there's a queued task for `mutator-<pool>` with no
+    live worker, the dispatcher synthesizes a LAUNCH_ROLE and routes through
+    the existing onLaunchRole pipeline. Mutator pools are spawned only when
+    needed, retired when idle.
+  - **Auto-retire (Option B)**: a mutator-pool agent is retired when:
+       (a) its queue is empty,
+       (b) all mutation_results from the pool have been operator-consumed
+           (consumed_at IS NOT NULL — neither pending nor abandoned),
+       (c) it's been idle for ≥ZC_MUTATOR_IDLE_RETIRE_MIN minutes (default 5).
+    Operator-tunable via env. Keeps the agent warm during the human-decision
+    window so retry tasks process fast.
+
+### 83 worker roles fully defined in roles.json
+
+Every role mapped under any mutator pool now has a worker role definition
+with auto-derived deepPrompt (built from the pool's domain_summary +
+style_rules + standard worker template). Hand-curated existing roles
+(developer, qa, marketer, etc.) preserved unchanged. The orchestrator can
+LAUNCH_ROLE any of these on demand — `marketer-1` spins up with marketing
+domain expertise; `legal-counsel-1` spins up with legal-domain conservatism;
+etc.
+
+### Operator-decision feedback loop (the gold-mine layer)
+
+`fetchRecentDecisions(skill_id, mutator_pool, limit)` queries the last N
+operator decisions for the same skill or pool, including:
+  - approve/reject + rationale text (operator's revealed taste)
+  - picked_candidate_index + the picked body's rationale
+  - retry_passed (did dev-retry succeed? — best-effort lookup against
+    skill_runs.was_retry_after_promotion)
+
+The L1 trigger now injects these as `prior_decisions` in the mutator task
+payload. The mutator's deepPrompt instructs it to:
+  - favor patterns the operator approved
+  - avoid patterns the operator rejected
+  - treat operator rationales as revealed taste
+
+PLUS: the mutator deepPrompt instructs it to:
+  - call `zc_recall_context()` at session start to load any prior
+    `mutator-learning/<pool>/...` notes from past sessions
+  - call `zc_remember()` after each mutation to persist new learnings
+    (key prefix `mutator-learning/<pool>/<insight>`)
+
+This is the cross-session learning loop — the mutator's own observations
+accumulate in SecureContext and inform future mutations.
+
+### Skill frontmatter: intended_roles + mutation_guidance
+
+Two new optional frontmatter fields:
+  - `intended_roles: [string]` — declares which worker roles use this skill;
+    used by the L1 trigger to route to the right mutator pool
+  - `mutation_guidance: string` — free-form skill-specific guidance baked
+    into the mutator's prompt verbatim (e.g. "this skill produces customer
+    privacy disclosures — frame as considerations, not advice")
+
+### Dashboard diff view (per candidate)
+
+Each candidate body in the dashboard now renders side-by-side against the
+parent body it's replacing. Pure-JS LCS-based diff (no external library)
+with red/green highlighting + add/del line counts. Tabbed view: "Diff vs
+parent" (default open) + "Full body". For very large bodies (>500 lines),
+falls back to no-highlight side-by-side display.
+
+### zc_skill_revert MCP tool (one-click rollback)
+
+`zc_skill_revert(skill_name, scope, target_version, rationale)` — atomic:
+  1. Find the target archived skill
+  2. Build new skill at bumped patch version with target's body
+  3. Archive current active version
+  4. Upsert new (reverted) version
+  5. Write skill_revisions audit row
+  6. Broadcast STATUS state='skill-reverted'
+
+### zc_skills_by_role MCP tool (CEO-orchestrator skill discovery)
+
+`zc_skills_by_role(role)` — orchestrator queries "what skills exist for
+this role?" before deciding whether to LAUNCH_ROLE that worker. Returns
+skill_id, version, description, intended_roles, mutation_guidance for each
+skill tagged with the role.
+
+### Schema (mig 26 SQLite + mig 12 PG)
+
+  - `mutation_results.mutator_pool` column (analytics + decision-feedback queries)
+  - new `skill_revisions` / `skill_revisions_pg` tables (full audit lineage of
+    every promote / revert action)
+  - indexes for pending-by-pool + revisions-by-skill
+
+### Tests
+
+828 PASS / 828 total — no regressions across the whole sprint.
+
+### Files modified (Sprint 2.7 totals)
+
+  src/skills/mutator_pool.ts       (NEW, 90 LoC)
+  src/skills/types.ts              (+30 — frontmatter fields)
+  src/skills/mutation_results.ts   (+170 — fetchRecentDecisions + PriorDecision interface)
+  src/migrations.ts                (+45 — mig 26)
+  src/pg_migrations.ts             (+30 — mig 12)
+  src/outcomes.ts                  (+30 — pool routing + decision feedback in L1 trigger)
+  src/server.ts                    (+250 — zc_skill_revert + zc_skills_by_role)
+  src/api-server.ts                (+10 — JOIN parent_body in /dashboard/pending)
+  src/dashboard/render.ts          (+150 — renderDiff + tabbed candidate view)
+  A2A_dispatcher/dispatcher.mjs    (+100 — auto-spawn/retire passes)
+  A2A_dispatcher/roles.json        (+15 mutator pools + 75 worker roles + 1 alias)
+  A2A_dispatcher/start-agents.ps1  (-88 — stripped inline mutator heredoc, uses roles.json)
+
 ## [0.18.3] — 2026-04-29 — Operator UX patch: dashboard project names + sensible env defaults
 
 Two small ergonomics wins after Sprint 2.6 dogfooding revealed friction.

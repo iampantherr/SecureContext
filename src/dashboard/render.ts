@@ -16,6 +16,99 @@ function escapeHtml(s: string): string {
 }
 
 /**
+ * v0.18.4 Sprint 2.7 — line-based diff renderer for the dashboard.
+ *
+ * Computes a longest-common-subsequence (LCS) diff between parent_body and
+ * candidate_body and renders it as side-by-side HTML with red/green
+ * highlighting. Pure-JS, no external diff library — keeps the dashboard
+ * dependency-free.
+ *
+ * For very long bodies (>500 lines either side), falls back to a simple
+ * "show both, no highlighting" view to keep render time bounded.
+ */
+export function renderDiff(parent: string, candidate: string): string {
+  const parentLines    = parent.split(/\r?\n/);
+  const candidateLines = candidate.split(/\r?\n/);
+  if (parentLines.length > 500 || candidateLines.length > 500) {
+    // Fallback for huge bodies — just show both
+    return `
+      <div class="diff-fallback">
+        <div class="diff-side">
+          <div class="diff-label">Previous version</div>
+          <pre>${escapeHtml(parent)}</pre>
+        </div>
+        <div class="diff-side">
+          <div class="diff-label">Proposed</div>
+          <pre>${escapeHtml(candidate)}</pre>
+        </div>
+      </div>
+    `;
+  }
+  // Compute LCS table
+  const m = parentLines.length;
+  const n = candidateLines.length;
+  const lcs: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      lcs[i][j] = parentLines[i - 1] === candidateLines[j - 1]
+        ? lcs[i - 1][j - 1] + 1
+        : Math.max(lcs[i - 1][j], lcs[i][j - 1]);
+    }
+  }
+  // Backtrack to produce diff ops
+  type Op = { kind: "equal" | "del" | "add"; left?: string; right?: string };
+  const ops: Op[] = [];
+  let i = m;
+  let j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && parentLines[i - 1] === candidateLines[j - 1]) {
+      ops.unshift({ kind: "equal", left: parentLines[i - 1], right: candidateLines[j - 1] });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || lcs[i][j - 1] >= lcs[i - 1][j])) {
+      ops.unshift({ kind: "add", right: candidateLines[j - 1] });
+      j--;
+    } else {
+      ops.unshift({ kind: "del", left: parentLines[i - 1] });
+      i--;
+    }
+  }
+  // Render side-by-side: for each op, show left + right (blank when only one side)
+  const leftRows:  string[] = [];
+  const rightRows: string[] = [];
+  for (const op of ops) {
+    if (op.kind === "equal") {
+      leftRows.push(`<div class="diff-row diff-equal">${escapeHtml(op.left ?? "")}</div>`);
+      rightRows.push(`<div class="diff-row diff-equal">${escapeHtml(op.right ?? "")}</div>`);
+    } else if (op.kind === "del") {
+      leftRows.push(`<div class="diff-row diff-del">${escapeHtml(op.left ?? "")}</div>`);
+      rightRows.push(`<div class="diff-row diff-blank"></div>`);
+    } else {
+      leftRows.push(`<div class="diff-row diff-blank"></div>`);
+      rightRows.push(`<div class="diff-row diff-add">${escapeHtml(op.right ?? "")}</div>`);
+    }
+  }
+  const adds = ops.filter((o) => o.kind === "add").length;
+  const dels = ops.filter((o) => o.kind === "del").length;
+  return `
+    <div class="diff-summary">
+      <span class="diff-stat-add">+${adds}</span>
+      <span class="diff-stat-del">-${dels}</span>
+      lines changed
+    </div>
+    <div class="diff-grid">
+      <div class="diff-side">
+        <div class="diff-label">Previous version (parent body)</div>
+        <div class="diff-content">${leftRows.join("")}</div>
+      </div>
+      <div class="diff-side">
+        <div class="diff-label">Proposed candidate</div>
+        <div class="diff-content">${rightRows.join("")}</div>
+      </div>
+    </div>
+  `;
+}
+
+/**
  * v0.18.3 — Resolve project_hash → human-readable project name.
  *
  * The dashboard shows pending mutation results from ALL projects in one
@@ -108,6 +201,26 @@ export function renderDashboardHtml(): string {
     white-space: pre-wrap; word-wrap: break-word;
     max-height: 300px; overflow: auto;
   }
+  /* v0.18.4 — diff view */
+  .diff-summary { font-size: 0.85rem; color: #94a3b8; margin: 8px 0; }
+  .diff-stat-add { color: #4ade80; font-family: ui-monospace, monospace; margin-right: 8px; }
+  .diff-stat-del { color: #f87171; font-family: ui-monospace, monospace; margin-right: 8px; }
+  .diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .diff-side { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; overflow: hidden; }
+  .diff-label { padding: 4px 8px; background: #1f2937; color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .diff-content { max-height: 400px; overflow: auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.78rem; }
+  .diff-row { padding: 1px 8px; white-space: pre-wrap; word-wrap: break-word; min-height: 1em; }
+  .diff-row.diff-equal { color: #cbd5e1; }
+  .diff-row.diff-add   { color: #d1fae5; background: #064e3b; border-left: 2px solid #4ade80; }
+  .diff-row.diff-del   { color: #fecaca; background: #7f1d1d; border-left: 2px solid #f87171; text-decoration: line-through; }
+  .diff-row.diff-blank { background: #050709; min-height: 1em; }
+  .diff-fallback { display: flex; gap: 8px; }
+  .diff-fallback .diff-side { flex: 1; }
+  .diff-fallback pre { padding: 8px; margin: 0; max-height: 400px; overflow: auto; font-size: 0.78rem; }
+  .candidate-tabs { margin-top: 8px; }
+  .candidate-tabs > details { margin-bottom: 6px; border: 1px solid #1f2937; border-radius: 4px; padding: 6px; }
+  .tab-label { font-size: 0.85rem; color: #94a3b8; cursor: pointer; padding: 2px 4px; }
+  .tab-label:hover { color: #38bdf8; }
   .rationale { color: #cbd5e1; font-style: italic; margin-bottom: 6px; padding-left: 12px; border-left: 2px solid #38bdf8; }
   form { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2a2f37; }
   form label { display: block; margin-bottom: 8px; font-size: 0.85rem; color: #cbd5e1; }
@@ -243,16 +356,26 @@ function renderResultSection(row: Record<string, unknown>, projectNameMap: Map<s
   let bodies: MutationCandidatePreview[] = [];
   try { bodies = JSON.parse(String(row.bodies)) as MutationCandidatePreview[]; } catch { /* corrupt row */ }
 
-  const candidates_html = bodies.map((b, i) => `
+  // v0.18.4: render diff view + raw body, both inside a tabbed <details>
+  const parentBody = String(row.parent_body ?? "");
+  const candidates_html = bodies.map((b, i) => {
+    const diffHtml = parentBody
+      ? renderDiff(parentBody, b.candidate_body)
+      : `<p class="empty">Parent body not available — diff disabled. (Skill may have been archived without preserving the body record.)</p>`;
+    return `
     <details>
       <summary>
         <strong>#${i}</strong> ${escapeHtml(b.rationale.slice(0, 90))}${b.rationale.length > 90 ? "…" : ""}
         <span class="score">score=${escapeHtml(String(b.self_rated_score))} · ${b.candidate_body.length} chars</span>
       </summary>
       <div class="rationale">${escapeHtml(b.rationale)}</div>
-      <div class="candidate-body">${escapeHtml(b.candidate_body)}</div>
+      <div class="candidate-tabs">
+        <details open><summary class="tab-label">Diff vs parent</summary>${diffHtml}</details>
+        <details><summary class="tab-label">Full body</summary><div class="candidate-body">${escapeHtml(b.candidate_body)}</div></details>
+      </div>
     </details>
-  `).join("");
+    `;
+  }).join("");
 
   // v0.18.3: project name resolved from agents.json registry; falls back to
   // the truncated hash when the registry isn't accessible (e.g. dashboard
