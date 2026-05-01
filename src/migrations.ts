@@ -905,6 +905,60 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 28,
+    description: "v0.22.0: full skill attribution — agent_id + project_hash on skill_runs + skill_run_tool_calls correlation table + mutation_reviews operator audit",
+    up: (db) => {
+      // ── skill_runs: per-agent + per-project attribution ────────────────
+      // Without these columns we cannot answer "which skills is THIS agent
+      // using on THIS project?" — the core question the self-improvement
+      // loop needs to surface to the operator. project_hash is required
+      // (denormalized from session_id for query efficiency).
+      const safeAdd = (table: string, col: string, ddl: string) => {
+        const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+        if (!cols.some((c) => c.name === col)) {
+          db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`);
+        }
+      };
+      safeAdd("skill_runs", "agent_id",     "TEXT");
+      safeAdd("skill_runs", "project_hash", "TEXT");
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sr_agent_project ON skill_runs(agent_id, project_hash, ts DESC);`);
+
+      // ── skill_run_tool_calls: which tool calls happened DURING a skill_run? ──
+      // The MCP server sets currentSkillContext on zc_skill_show; every
+      // tool_call between then and zc_record_skill_outcome accumulates here.
+      // Lets the operator answer "show me the 14 tool calls behind this
+      // low-scoring run" — essential for debugging skill failures.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill_run_tool_calls (
+          run_id    TEXT NOT NULL,
+          call_id   TEXT NOT NULL,
+          ts        TEXT NOT NULL,
+          PRIMARY KEY (run_id, call_id)
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_srtc_run ON skill_run_tool_calls(run_id);`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_srtc_call ON skill_run_tool_calls(call_id);`);
+
+      // ── mutation_reviews: operator action audit log ─────────────────────
+      // When the operator approves/rejects a mutation result on the dashboard,
+      // log it here so we can audit "who approved what when, with what reasoning."
+      // Without this, every approval is fire-and-forget — gone forever.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mutation_reviews (
+          review_id      TEXT PRIMARY KEY,
+          mutation_id    TEXT NOT NULL,
+          result_id      TEXT,
+          action         TEXT NOT NULL CHECK (action IN ('approve', 'reject', 'defer')),
+          operator       TEXT NOT NULL,           -- agent_id or 'operator' for human dashboard action
+          rationale      TEXT,
+          ts             TEXT NOT NULL
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_mr_mutation ON mutation_reviews(mutation_id, ts DESC);`);
+    },
+  },
+
 ];
 
 /**

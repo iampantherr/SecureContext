@@ -118,12 +118,69 @@ export async function archiveSkill(db: DatabaseSync, skill_id: string, reason: s
 
 export async function recordSkillRun(db: DatabaseSync, run: SkillRun, projectPath: string): Promise<void> {
   const backend = getBackend();
+  // v0.22.0 — PG mirror is now best-effort even in 'sqlite' mode if PG creds
+  // are present. The agent's local MCP server defaults to sqlite, but if the
+  // operator runs Docker (ZC_POSTGRES_HOST set) we mirror to skill_runs_pg
+  // so the dashboard can see it. This closes the v0.21.x gap where skill_runs
+  // were never visible to the operator dashboard.
+  const projectHash = projectHashOf(projectPath);
+  const runWithProject: SkillRun = { ...run, project_hash: run.project_hash ?? projectHash };
+
   if (backend === "postgres" || backend === "dual") {
-    try { await pg.recordSkillRunPg(run, projectHashOf(projectPath)); }
+    try { await pg.recordSkillRunPg(runWithProject, projectHash); }
     catch (e) { if (backend === "postgres") throw e; }
+  } else if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
+    // Best-effort PG mirror in sqlite-mode — log on failure, don't throw.
+    pg.recordSkillRunPg(runWithProject, projectHash).catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error("[storage_dual] PG mirror failed (sqlite mode, best-effort):", (e as Error).message);
+    });
   }
   if (backend === "sqlite" || backend === "dual") {
-    sqlite.recordSkillRun(db, run);
+    sqlite.recordSkillRun(db, runWithProject);
+  }
+}
+
+// v0.22.0 — link tool calls captured during a skill_run (currentSkillContext)
+// to the run. Writes to BOTH local SQLite and PG (best-effort) so the L1
+// hook + dashboard both have the trail.
+export async function linkSkillRunToolCalls(
+  db: DatabaseSync,
+  run_id: string,
+  call_ids: string[],
+  ts: string,
+): Promise<void> {
+  if (call_ids.length === 0) return;
+  // Local SQLite (used by L1 hook + offline analysis)
+  try { sqlite.linkSkillRunToolCalls(db, run_id, call_ids, ts); }
+  catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[storage_dual] SQLite link skill_run_tool_calls failed:", (e as Error).message);
+  }
+  // PG (used by dashboard)
+  if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
+    pg.linkSkillRunToolCallsPg(run_id, call_ids).catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error("[storage_dual] PG link skill_run_tool_calls failed:", (e as Error).message);
+    });
+  }
+}
+
+// v0.22.0 — operator action log. Best-effort PG write.
+export async function recordMutationReview(args: {
+  review_id: string;
+  mutation_id: string;
+  result_id?: string | null;
+  action: "approve" | "reject" | "defer";
+  operator: string;
+  rationale?: string | null;
+}): Promise<void> {
+  if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
+    try { await pg.recordMutationReviewPg(args); }
+    catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[storage_dual] PG mutation_review write failed:", (e as Error).message);
+    }
   }
 }
 

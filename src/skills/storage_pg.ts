@@ -136,16 +136,56 @@ export async function recordSkillRunPg(run: SkillRun, projectHash: string): Prom
       INSERT INTO skill_runs_pg (
         run_id, skill_id, project_hash, session_id, task_id, inputs, outcome_score,
         total_cost, total_tokens, duration_ms, status, failure_trace, ts,
-        was_retry_after_promotion
+        was_retry_after_promotion, agent_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW()), $14)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW()), $14, $15)
       ON CONFLICT (run_id) DO NOTHING
     `, [
       run.run_id, run.skill_id, projectHash, run.session_id, run.task_id,
       JSON.stringify(run.inputs), run.outcome_score, run.total_cost, run.total_tokens,
       run.duration_ms, run.status, run.failure_trace, run.ts,
-      run.was_retry_after_promotion ?? false,
+      run.was_retry_after_promotion ?? false, run.agent_id ?? null,
     ]);
+  });
+}
+
+// v0.22.0 — mirror skill_run_tool_calls links to PG. Inserted right after
+// the run row lands, so the dashboard can render the per-run tool-call trace.
+export async function linkSkillRunToolCallsPg(run_id: string, call_ids: string[]): Promise<void> {
+  if (call_ids.length === 0) return;
+  await withClient(async (c) => {
+    const chunks: string[][] = [];
+    for (let i = 0; i < call_ids.length; i += 100) chunks.push(call_ids.slice(i, i + 100));
+    for (const chunk of chunks) {
+      const params: unknown[] = [];
+      const placeholders = chunk.map((cid, idx) => {
+        params.push(run_id, cid);
+        return `($${idx * 2 + 1}, $${idx * 2 + 2})`;
+      }).join(", ");
+      await c.query(
+        `INSERT INTO skill_run_tool_calls_pg (run_id, call_id) VALUES ${placeholders} ON CONFLICT (run_id, call_id) DO NOTHING`,
+        params
+      );
+    }
+  });
+}
+
+// v0.22.0 — operator action audit log. Called by zc_mutation_approve / reject.
+export async function recordMutationReviewPg(args: {
+  review_id: string;
+  mutation_id: string;
+  result_id?: string | null;
+  action: "approve" | "reject" | "defer";
+  operator: string;
+  rationale?: string | null;
+}): Promise<void> {
+  await withClient(async (c) => {
+    await c.query(
+      `INSERT INTO mutation_reviews_pg (review_id, mutation_id, result_id, action, operator, rationale)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (review_id) DO NOTHING`,
+      [args.review_id, args.mutation_id, args.result_id ?? null, args.action, args.operator, args.rationale ?? null]
+    );
   });
 }
 

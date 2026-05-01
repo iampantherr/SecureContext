@@ -2321,11 +2321,80 @@ async function dispatchToolCall(
         const { resolveSkill } = await import("./skills/storage.js");
         const projectScope = `project:${ssHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
         try {
-          const skill = await resolveSkill(ssDb, name, projectScope);
+          let skill = await resolveSkill(ssDb, name, projectScope);
           ssDb.close();
+
+          // v0.21.1 — PG fallback: skills auto-imported by sc-api container
+          // live in skills_pg, NOT in per-project SQLite. Without this fallback,
+          // agents see global skills in their YOUR SKILLS injection (lever #1)
+          // but cannot load the body — this lever's promise breaks on the
+          // first zc_skill_show call. Same architectural gap as the L1-mutation
+          // PG-fallback fix in outcomes.ts (v0.20.1).
+          if (!skill && (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD)) {
+            try {
+              const { withClient } = await import("./pg_pool.js");
+              // Resolve by skill_id exact match first (handles "name@version@scope"),
+              // then by bare name (highest version, prefer global).
+              const pgRow = await withClient(async (c) => {
+                const exact = await c.query(
+                  `SELECT skill_id, name, version, scope, description, frontmatter, body, body_hmac
+                     FROM skills_pg
+                    WHERE skill_id=$1 AND archived_at IS NULL
+                    LIMIT 1`,
+                  [name]
+                );
+                if (exact.rows[0]) return exact.rows[0];
+                const byName = await c.query(
+                  `SELECT skill_id, name, version, scope, description, frontmatter, body, body_hmac
+                     FROM skills_pg
+                    WHERE name=$1 AND archived_at IS NULL
+                    ORDER BY (CASE WHEN scope='global' THEN 0 ELSE 1 END), version DESC
+                    LIMIT 1`,
+                  [name]
+                );
+                return byName.rows[0] ?? null;
+              });
+              if (pgRow) {
+                skill = {
+                  skill_id: pgRow.skill_id,
+                  name: pgRow.name,
+                  version: pgRow.version,
+                  scope: pgRow.scope,
+                  description: pgRow.description,
+                  frontmatter: typeof pgRow.frontmatter === "string"
+                    ? JSON.parse(pgRow.frontmatter)
+                    : pgRow.frontmatter,
+                  body: pgRow.body,
+                  body_hmac: pgRow.body_hmac,
+                } as never;
+              }
+            } catch (pgErr) {
+              return { content: [{ type: "text", text: `Skill '${name}' not in local SQLite; PG fallback failed: ${(pgErr as Error).message}` }], isError: true };
+            }
+          }
+
           if (!skill) return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true };
+
+          // v0.22.0 — open a tracking window for this skill. Tool calls between
+          // here and zc_record_skill_outcome will be tagged with this skill_id
+          // (in tool_calls_pg.skill_id) and linked via skill_run_tool_calls.
+          // pending_run_id is the run_id we'll commit when the agent records
+          // the outcome; passing it to the agent in the response so the agent
+          // (or the L1 hook) can correlate.
+          const { randomUUID: skUUID } = await import("node:crypto");
+          const pendingRunId = `run-${skUUID().slice(0, 12)}`;
+          currentSkillContext = {
+            skill_id:       skill.skill_id,
+            pending_run_id: pendingRunId,
+            started_at:     new Date().toISOString(),
+            tool_call_ids:  [],
+          };
+          logger.info("skills", "skill_context_opened", {
+            skill_id: skill.skill_id, pending_run_id: pendingRunId, agent_id: AGENT_ID,
+          });
+
           const fm = JSON.stringify(skill.frontmatter, null, 2);
-          return { content: [{ type: "text", text: `## ${skill.skill_id}\n\n### frontmatter\n\`\`\`json\n${fm}\n\`\`\`\n\n### body\n\n${skill.body}` }] };
+          return { content: [{ type: "text", text: `## ${skill.skill_id}\n\n_Tracking opened: pending_run_id=${pendingRunId}. All subsequent tool calls will be linked to this run until you call zc_record_skill_outcome._\n\n### frontmatter\n\`\`\`json\n${fm}\n\`\`\`\n\n### body\n\n${skill.body}` }] };
         } catch (e) {
           ssDb.close();
           return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
@@ -2607,9 +2676,20 @@ async function dispatchToolCall(
         const rsoDb = new RsoDb(rsoDbFile);
         rsoDb.exec("PRAGMA journal_mode = WAL");
         try {
-          const runId = `run-${rsoUUID().slice(0, 12)}`;
+          // v0.22.0 — prefer the pending_run_id from currentSkillContext if it
+          // matches this skill (set by zc_skill_show). Falls back to fresh UUID
+          // when no tracking context exists (legacy / direct outcome path).
+          const ctxMatches = currentSkillContext &&
+            (currentSkillContext.skill_id === skill_id || currentSkillContext.skill_id.startsWith(skill_id + "@"));
+          const runId = ctxMatches && currentSkillContext
+            ? currentSkillContext.pending_run_id
+            : `run-${rsoUUID().slice(0, 12)}`;
+          const collectedCallIds = ctxMatches && currentSkillContext
+            ? [...currentSkillContext.tool_call_ids]
+            : [];
           const ts = new Date().toISOString();
-          const { recordSkillRun } = await import("./skills/storage_dual.js");
+          const { recordSkillRun, linkSkillRunToolCalls } = await import("./skills/storage_dual.js");
+          const projectHashOf16 = rsoProjectHash;
           await recordSkillRun(rsoDb, {
             run_id:        runId,
             skill_id,
@@ -2624,7 +2704,19 @@ async function dispatchToolCall(
             failure_trace: failure_trace ?? null,
             ts,
             was_retry_after_promotion: was_retry_after_promotion === true,
+            agent_id:      AGENT_ID,
+            project_hash:  projectHashOf16,
           }, PROJECT_PATH);
+
+          // v0.22.0 — link the tool_calls captured during this skill_run.
+          if (collectedCallIds.length > 0) {
+            await linkSkillRunToolCalls(rsoDb, runId, collectedCallIds, ts);
+            logger.info("skills", "skill_run_tool_calls_linked", {
+              run_id: runId, skill_id, agent_id: AGENT_ID, count: collectedCallIds.length,
+            });
+          }
+          // Clear the tracking window — the skill run is now committed.
+          if (ctxMatches) currentSkillContext = null;
 
           // Decide whether to record an outcome row (and thereby trigger L1).
           // Failures, timeouts, and low scores all signal the skill needs work.
@@ -3095,6 +3187,22 @@ async function dispatchToolCall(
           await upsertSkill(maDb, newSkill);
           await approveMutation(maDb, result_id, picked_candidate_index, rationale, AGENT_ID || "operator");
 
+          // v0.22.0 — operator action audit. Best-effort PG write.
+          try {
+            const { recordMutationReview } = await import("./skills/storage_dual.js");
+            const { randomUUID: mrUUID } = await import("node:crypto");
+            await recordMutationReview({
+              review_id:   `rev-${mrUUID().slice(0, 12)}`,
+              mutation_id: result.mutation_id ?? result_id,
+              result_id,
+              action:      "approve",
+              operator:    AGENT_ID || "operator",
+              rationale,
+            });
+          } catch (auditErr) {
+            logger.warn("skills", "mutation_review_audit_write_failed", { result_id, error: (auditErr as Error).message });
+          }
+
           // Auto-reassign retry (default true)
           let retryTaskId: string | null = null;
           const shouldReassign = auto_reassign !== false; // default true
@@ -3182,8 +3290,26 @@ async function dispatchToolCall(
         const mrjDb = new MrjDb(mrjJoin(Config.DB_DIR, `${projectHash}.db`));
         mrjDb.exec("PRAGMA journal_mode = WAL");
         try {
-          const { rejectMutation } = await import("./skills/mutation_results.js");
+          const { rejectMutation, fetchByResultId: rjFetchByResultId } = await import("./skills/mutation_results.js");
+          // v0.22.0 — fetch first so we can record review with mutation_id linkage
+          const rjResult = await rjFetchByResultId(mrjDb, result_id);
           const ok = await rejectMutation(mrjDb, result_id, rationale, AGENT_ID || "operator");
+          if (ok) {
+            try {
+              const { recordMutationReview } = await import("./skills/storage_dual.js");
+              const { randomUUID: rjUUID } = await import("node:crypto");
+              await recordMutationReview({
+                review_id:   `rev-${rjUUID().slice(0, 12)}`,
+                mutation_id: rjResult?.mutation_id ?? result_id,
+                result_id,
+                action:      "reject",
+                operator:    AGENT_ID || "operator",
+                rationale,
+              });
+            } catch (auditErr) {
+              logger.warn("skills", "mutation_review_audit_write_failed", { result_id, error: (auditErr as Error).message });
+            }
+          }
           mrjDb.close();
           if (!ok) return { content: [{ type: "text", text: `Result ${result_id} not found or already consumed.` }], isError: true };
           // Broadcast for visibility
@@ -3301,6 +3427,23 @@ const MCP_SESSION_ID = `mcp-${randomUUID().slice(0, 12)}`;
 const AGENT_ID    = process.env.ZC_AGENT_ID    || "default";
 const AGENT_MODEL = process.env.ZC_AGENT_MODEL || "unknown";
 
+/**
+ * v0.22.0 — Tracks the skill currently being exercised by this agent.
+ * Set by zc_skill_show on successful resolution; tool_call_ids accumulate
+ * via the recordToolCall wrapper; consumed and cleared by
+ * zc_record_skill_outcome which writes the run + skill_run_tool_calls links.
+ *
+ * Stack-shaped (one element) by design — agents invoke one skill at a time.
+ * If multiple skills nest, the outer is overwritten (rare in practice).
+ */
+interface CurrentSkillContext {
+  skill_id:        string;
+  pending_run_id:  string;
+  started_at:      string;
+  tool_call_ids:   string[];
+}
+let currentSkillContext: CurrentSkillContext | null = null;
+
 /** Classify an error for telemetry's error_class taxonomy. */
 /** v0.18.1 — bump the minor segment of a semver-ish string. Used by global skill promotion. */
 function bumpMinor(version: string): string {
@@ -3348,6 +3491,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // SQLite, env-not-propagated to MCP subprocess, etc.) for weeks. We still don't
     // re-throw — telemetry failure must not break the user's tool call — but we DO
     // surface the error in the structured logger so operators see it.
+    // v0.22.0 — capture skill_id from currentSkillContext (set by zc_skill_show)
+    // and accumulate call_id for skill_run_tool_calls correlation.
+    const errSkillId = currentSkillContext?.skill_id;
+    if (currentSkillContext) currentSkillContext.tool_call_ids.push(callId);
     recordToolCall({
       callId,
       sessionId:   MCP_SESSION_ID,
@@ -3355,6 +3502,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       projectPath: PROJECT_PATH,
       toolName:    name,
       model:       AGENT_MODEL,
+      skillId:     errSkillId,
       inputChars,
       outputChars: 0,
       latencyMs:   Date.now() - t0,
@@ -3396,6 +3544,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ── Record telemetry (fire-and-forget for return latency; logs on error) ──
   // v0.18.9 — fail-loud: errors no longer swallowed; surfaced in structured logs
+  // v0.22.0 — skillId from currentSkillContext + accumulate call_id for
+  // skill_run_tool_calls correlation. Skip the bookkeeping when the call IS
+  // zc_skill_show / zc_record_skill_outcome itself (those are the brackets).
+  const okSkillId = currentSkillContext?.skill_id;
+  if (currentSkillContext && name !== "zc_skill_show" && name !== "zc_record_skill_outcome") {
+    currentSkillContext.tool_call_ids.push(callId);
+  }
   recordToolCall({
     callId,
     sessionId:   MCP_SESSION_ID,
@@ -3403,6 +3558,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     projectPath: PROJECT_PATH,
     toolName:    name,
     model:       AGENT_MODEL,
+    skillId:     okSkillId,
     inputChars,
     outputChars,
     latencyMs:   Date.now() - t0,

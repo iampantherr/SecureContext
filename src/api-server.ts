@@ -1424,6 +1424,21 @@ export async function createApiServer(storeOverride?: Store) {
 
 if (process.argv[1]?.endsWith("api-server.js")) {
   createApiServer().then(async ({ app }) => {
+    // v0.22.0 — run PG migrations on API startup. Previously migrations
+    // only ran when an agent's MCP server made the first PG-backed telemetry
+    // write — meaning new schema (added in a release) wouldn't apply until
+    // an agent connected. That created a window where the API container
+    // could serve stale-schema requests. Idempotent + safe to call always.
+    if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
+      try {
+        const { runPgMigrations } = await import("./pg_migrations.js");
+        const applied = await runPgMigrations();
+        if (applied > 0) console.log(`PG migrations applied: ${applied}`);
+      } catch (e) {
+        console.error("PG migration on startup failed:", (e as Error).message);
+      }
+    }
+
     // v0.20.0 — auto-import skills/*.skill.md into skills_pg before listening.
     // Idempotent: skips files whose body_hmac is unchanged. Skip silently if
     // PG isn't configured (the import is best-effort startup work).

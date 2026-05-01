@@ -4,6 +4,78 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.0] — 2026-05-01 — Full skill attribution + operator audit log
+
+The v0.21.x cycle proved skill enforcement works (agents call `zc_skill_show`,
+record outcomes, mutator generates candidates). But it also surfaced the
+**logging gap that would have blocked any meaningful real-project deployment**:
+`skill_runs_pg` had no `agent_id`, `tool_calls_pg.skill_id` was always NULL,
+and there was no operator-action audit trail. You could collect data but
+couldn't slice it by the dimensions that matter for self-improvement.
+
+v0.22.0 closes those gaps before real-project deployment.
+
+### What's new
+
+- **`skill_runs_pg.agent_id` column** (PG migration 16) + same on local SQLite (migration 28).
+  Per-agent attribution: which agent ran this skill, on which project. The two
+  questions you actually need to answer to improve skills.
+- **`skill_run_tool_calls_pg`** correlation table: links a `skill_run` to
+  every tool_call recorded between `zc_skill_show` and `zc_record_skill_outcome`.
+  Lets the dashboard render "what did the agent actually do during this run."
+- **`mutation_reviews_pg`** operator audit log: every `zc_mutation_approve`
+  / `zc_mutation_reject` writes a row capturing operator, action, rationale, ts.
+- **`tool_calls_pg.skill_id` finally populated**. The MCP server now tracks a
+  `currentSkillContext` (set by `zc_skill_show`, cleared by
+  `zc_record_skill_outcome`); every tool_call between those brackets
+  inherits the skill_id. Combined with `skill_run_tool_calls_pg`, you can
+  finally trace per-skill-run tool-call activity end-to-end.
+- **API container runs PG migrations on startup** (api-server.ts boot path).
+  Previously migrations only ran when the first MCP-side telemetry write hit,
+  leaving a stale-schema window after image rebuilds.
+- **`start-agents.ps1` propagates `ZC_MUTATION_FAILURE_THRESHOLD` +
+  `ZC_MUTATION_COOLDOWN_HOURS`** so the L1 mutation guardrails are tunable
+  from the operator's shell.
+
+### Live verified end-to-end
+
+This release was verified live with real Claude Sonnet 4.6 agents on two real
+projects (Test_Agent_Coordination + Test_Project_B), 5 distinct roles
+(orchestrator, developer, researcher, qa-engineer, mutator-engineering),
+and full operator-driven approval via Playwright-driven dashboard.
+
+The full self-improvement cycle was observed: ASSIGN → skill load (via PG
+fallback) → debugging-methodology applied → outcome recorded → L1 hook fired
+→ guardrails passed → mutator pool spawned → 5 candidates produced (best=0.88)
+→ operator approval form submitted via dashboard.
+
+### Bugs fixed in this cycle
+
+- v0.21.0 lever #1 helper not firing: `start-agents.ps1` resolved
+  `$zcApiUrl`/`$zcApiKey` from MCP config but never exported to `$env:`, so
+  the child node helper saw empty `ZC_API_URL` and exited silent.
+- `zc_skill_show` only read local SQLite, missing skills auto-imported to
+  `skills_pg`. PG fallback added.
+- `tool_calls_pg.skill_id` column was schema-defined but never populated.
+- Mutation approval had no audit trail. Now `mutation_reviews_pg` captures
+  every operator action.
+
+### Known limitations (deferred to v0.22.1)
+
+- `mutation_results` doesn't auto-mirror to `mutation_results_pg`.
+- L1 mutator targets the parent skill_id at trigger time (not the
+  currently-active version), causing body-HMAC mismatch when operator
+  approves a candidate against an archived version.
+- `zc_record_skill_outcome` reports "L1 hook fired" based on env-var
+  detection, not actual queue insertion.
+
+### Memory checkpoints
+
+Six `zc_remember(importance=5)` entries persisted to surface on every
+`zc_recall_context`: logic gaps + their data requirements, security gaps,
+observability gaps, mem0 features worth borrowing, parameters needing
+real-project data to tune, and unverified features needing real workload.
+
 ## [0.21.0] — 2026-05-01 — Skill enforcement levers (#1, #2, #4 of 5)
 
 The v0.20.1 mutator-loop verification exposed the **single biggest reliability

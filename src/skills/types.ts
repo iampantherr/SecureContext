@@ -165,6 +165,13 @@ export interface SkillRun {
   // The L1 mutation trigger SKIPS mutation when the latest run for a skill was
   // marked this way — preventing infinite mutate→approve→fail→mutate loops.
   was_retry_after_promotion?: boolean;
+  // v0.22.0 — full skill attribution. agent_id is the worker that ran the
+  // skill (developer, researcher, etc.); project_hash is the project context
+  // (denormalized from session_id for query efficiency). Both nullable for
+  // backward compat with rows written before migration 28/16, but new writes
+  // SHOULD always populate them.
+  agent_id?:     string | null;
+  project_hash?: string | null;
 }
 
 /**

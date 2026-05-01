@@ -171,15 +171,26 @@ export function recordSkillRun(db: DatabaseSync, run: SkillRun): void {
     INSERT INTO skill_runs (
       run_id, skill_id, session_id, task_id, inputs, outcome_score,
       total_cost, total_tokens, duration_ms, status, failure_trace, ts,
-      was_retry_after_promotion
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      was_retry_after_promotion, agent_id, project_hash
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     run.run_id, run.skill_id, run.session_id, run.task_id ?? null,
     JSON.stringify(run.inputs), run.outcome_score ?? null,
     run.total_cost ?? null, run.total_tokens ?? null, run.duration_ms ?? null,
     run.status, run.failure_trace ?? null, run.ts,
     run.was_retry_after_promotion ? 1 : 0,
+    run.agent_id ?? null, run.project_hash ?? null,
   );
+}
+
+// v0.22.0 — link tool_calls to a skill_run. Called by zc_record_skill_outcome
+// after recording the run, with the call_ids accumulated in currentSkillContext.
+export function linkSkillRunToolCalls(db: DatabaseSync, run_id: string, call_ids: string[], ts: string): void {
+  if (call_ids.length === 0) return;
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO skill_run_tool_calls (run_id, call_id, ts) VALUES (?, ?, ?)`
+  );
+  for (const cid of call_ids) stmt.run(run_id, cid, ts);
 }
 
 export function getRecentSkillRuns(db: DatabaseSync, skill_id: string, limit = 20): SkillRun[] {

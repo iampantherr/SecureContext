@@ -511,6 +511,52 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 16,
+    description: "v0.22.0: full skill attribution — agent_id on skill_runs_pg + skill_run_tool_calls_pg correlation + mutation_reviews_pg operator audit",
+    up: async (client) => {
+      // Per-agent attribution. project_hash already exists on skill_runs_pg
+      // (added in migration 7). Without agent_id we cannot ask "which agent
+      // benefits most from this skill" — central self-improvement question.
+      await client.query(`ALTER TABLE skill_runs_pg ADD COLUMN IF NOT EXISTS agent_id TEXT`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sr_pg_agent ON skill_runs_pg(agent_id, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sr_pg_agent_project ON skill_runs_pg(agent_id, project_hash, ts DESC)`);
+
+      // skill_run_tool_calls_pg — links each skill_run to the tool_calls it
+      // contained. The MCP server's currentSkillContext accumulates call_ids
+      // between zc_skill_show and zc_record_skill_outcome; that list lands
+      // here. Lets the dashboard show "what did the agent actually do during
+      // this run" — the missing trace for skill failures.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_run_tool_calls_pg (
+          run_id    TEXT NOT NULL,
+          call_id   TEXT NOT NULL,
+          ts        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (run_id, call_id)
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_srtc_pg_run ON skill_run_tool_calls_pg(run_id)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_srtc_pg_call ON skill_run_tool_calls_pg(call_id)`);
+
+      // mutation_reviews_pg — operator action log. Every approve/reject/defer
+      // on the dashboard logs here so we can audit "who did what when, why."
+      // Without this we lose the entire human-in-the-loop trail.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS mutation_reviews_pg (
+          review_id      TEXT PRIMARY KEY,
+          mutation_id    TEXT NOT NULL,
+          result_id      TEXT,
+          action         TEXT NOT NULL CHECK (action IN ('approve', 'reject', 'defer')),
+          operator       TEXT NOT NULL,
+          rationale      TEXT,
+          ts             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mr_pg_mutation ON mutation_reviews_pg(mutation_id, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mr_pg_operator ON mutation_reviews_pg(operator, ts DESC)`);
+    },
+  },
+
 ];
 
 /**
