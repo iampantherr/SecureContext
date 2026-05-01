@@ -521,15 +521,32 @@ export function renderDashboardHtml(): string {
   </div>
   <div id="savings-trend"></div>
   <script>
-    // Lazy-load project options on first render
-    (async () => {
+    // Lazy-load project options on first render + periodically re-fetch so new
+    // projects appear without a manual page refresh. Preserves the user's
+    // selection across re-fetches. v0.22.1 fix: previously the dropdown was
+    // populated once at page load and stayed stale forever — discovered live
+    // when A2A_communication started writing tool_calls but dashboard kept
+    // showing only Test_Agent_Coordination + Test_Project_B.
+    async function loadSavingsProjects() {
       try {
         const r = await fetch('/dashboard/savings/projects', { cache: 'no-store' });
         const html = await r.text();
         const sel = document.getElementById('savings-project');
-        if (sel) sel.innerHTML = '<option value="">— pick a project —</option>' + html;
+        if (!sel) return;
+        const prevValue = sel.value;
+        const prevFocused = (document.activeElement === sel);
+        const newInner = '<option value="">— pick a project —</option>' + html;
+        if (sel.innerHTML !== newInner) {
+          sel.innerHTML = newInner;
+          if (prevValue) {
+            const opt = Array.from(sel.options).find(o => o.value === prevValue);
+            if (opt) sel.value = prevValue;
+          }
+        }
       } catch (e) { /* swallow */ }
-    })();
+    }
+    loadSavingsProjects();
+    setInterval(loadSavingsProjects, 30_000);
     // Load trend + per-agent + anti-patterns when project changes
     document.getElementById('savings-project')?.addEventListener('change', async (e) => {
       const proj = e.target.value;
