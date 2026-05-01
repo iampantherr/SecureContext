@@ -1407,6 +1407,31 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.22.1 — count tasks claimed-but-not-done by a specific agent. Used by
+  // dispatcher's auto-retire to skip retire while a long Sonnet generation is
+  // in flight (without this, dispatcher kills mutator window mid-generation
+  // because byRole.queued only counts state='queued' rows). Discovered live:
+  // mut-1f85f351-1f8 was orphaned this way at 13:16:42.
+  app.get("/api/v1/queue/in-flight", async (request, reply) => {
+    try {
+      const { claimed_by } = request.query as Record<string, unknown>;
+      if (typeof claimed_by !== "string" || !claimed_by) {
+        return reply.status(400).send({ error: "claimed_by query param is required" });
+      }
+      const { withClient } = await import("./pg_pool.js");
+      const count = await withClient(async (c) => {
+        const r = await c.query<{ n: string }>(
+          "SELECT COUNT(*)::int::text AS n FROM task_queue_pg WHERE state='claimed' AND claimed_by = $1",
+          [claimed_by],
+        );
+        return Number(r.rows[0]?.n ?? 0);
+      });
+      return { ok: true, claimed_by, count };
+    } catch {
+      return { ok: true, count: 0 };
+    }
+  });
+
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   const shutdown = async () => {
     await app.close();

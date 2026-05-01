@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 
 import { fetchByResultId, approveMutation, rejectMutation } from "../skills/mutation_results.js";
-import { getSkillById, archiveSkill, upsertSkill } from "../skills/storage_dual.js";
+import { getSkillById, getActiveSkill, archiveSkill, upsertSkill, recordMutationReview } from "../skills/storage_dual.js";
 import { buildSkill } from "../skills/loader.js";
 import { enqueueTask } from "../task_queue.js";
 import { broadcastFact } from "../memory.js";
@@ -112,8 +112,43 @@ export async function handleApproveFromDashboard(args: ApproveArgs): Promise<App
     }
     const picked = result.bodies[args.picked_candidate_index];
 
-    const current = await getSkillById(db, result.skill_id);
-    if (!current) throw new Error(`Skill ${result.skill_id} not found in storage`);
+    // v0.22.1 — resolve to currently-active version by name+scope so we
+    // bump from the active skill, not from result.skill_id (which may be
+    // archived if a more recent promotion happened between result creation
+    // and operator approval). Without this, approving a stale result against
+    // an archived parent creates a NEW skill at parent_version+1 — LOWER
+    // than the active version — effectively reverting progress. Same fix
+    // applied to zc_mutation_approve handler in server.ts.
+    //
+    // v0.22.1 enhancement: if parent skill_id is missing entirely (e.g.
+    // skills got re-imported and the version-bumped intermediate is gone),
+    // parse name+scope from the result.skill_id format "name@version@scope"
+    // and fall back to active-by-name. This recovers from stale-result
+    // scenarios where the original parent has disappeared between mutation
+    // generation and operator approval.
+    let parentSkill = await getSkillById(db, result.skill_id);
+    let nameForActive: string | null = null;
+    let scopeForActive: string | null = null;
+    if (parentSkill) {
+      nameForActive  = parentSkill.frontmatter.name;
+      scopeForActive = parentSkill.frontmatter.scope;
+    } else {
+      // Parse "name@version@scope" — split on @ from the END (so name can contain @)
+      const parts = result.skill_id.split("@");
+      if (parts.length >= 3) {
+        scopeForActive = parts.slice(-1).join("@");
+        nameForActive  = parts.slice(0, -2).join("@");
+      }
+    }
+    const activeSkill = nameForActive && scopeForActive
+      ? await getActiveSkill(db, nameForActive, scopeForActive as never).catch(() => null)
+      : null;
+    if (!parentSkill && !activeSkill) {
+      throw new Error(`Skill ${result.skill_id} not found in storage AND no active version by name resolved`);
+    }
+    const current = activeSkill ?? parentSkill!;
+    parentSkill = parentSkill ?? current;
+    const versionDrifted = current.skill_id !== parentSkill.skill_id;
 
     const newVersion = bumpPatch(current.frontmatter.version);
     const newSkill = await buildSkill(
@@ -125,6 +160,19 @@ export async function handleApproveFromDashboard(args: ApproveArgs): Promise<App
     await archiveSkill(db, current.skill_id, `promoted_to_${newSkill.skill_id}`);
     await upsertSkill(db, newSkill);
     await approveMutation(db, args.result_id, args.picked_candidate_index, args.rationale, args.decided_by ?? "operator-dashboard");
+
+    // v0.22.1 — write to mutation_reviews_pg (operator audit log; was missing
+    // from the dashboard handler — only the MCP tool path had this).
+    try {
+      await recordMutationReview({
+        review_id:   `rev-${randomUUID().slice(0, 12)}`,
+        mutation_id: result.mutation_id ?? args.result_id,
+        result_id:   args.result_id,
+        action:      "approve",
+        operator:    args.decided_by ?? "operator-dashboard",
+        rationale:   args.rationale + (versionDrifted ? ` [v0.22.1: bumped from active ${current.skill_id} not parent ${parentSkill.skill_id}]` : ""),
+      });
+    } catch { /* best-effort */ }
 
     let retry_task_id: string | null = null;
     if (args.auto_reassign && result.original_role) {
@@ -193,6 +241,17 @@ export async function handleRejectFromDashboard(args: RejectArgs): Promise<void>
     if (result.consumed_at) throw new Error(`Result ${args.result_id} already consumed (decision=${result.consumed_decision})`);
 
     await rejectMutation(db, args.result_id, args.rationale, args.decided_by ?? "operator-dashboard");
+    // v0.22.1 — operator audit log on reject too
+    try {
+      await recordMutationReview({
+        review_id:   `rev-${randomUUID().slice(0, 12)}`,
+        mutation_id: result.mutation_id ?? args.result_id,
+        result_id:   args.result_id,
+        action:      "reject",
+        operator:    args.decided_by ?? "operator-dashboard",
+        rationale:   args.rationale,
+      });
+    } catch { /* best-effort */ }
 
     try {
       const projectPath = await resolveProjectPath(result.project_hash);

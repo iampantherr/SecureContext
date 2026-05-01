@@ -14,6 +14,14 @@ volumes:
     name: securecontext-ollama-models
   postgres_data:
     name: securecontext-postgres-data
+  # v0.22.1 — persist API container's state dir (machine_secret + logs +
+  # sessions). Without this, machine_secret regenerates on every container
+  # rebuild and ALL HMAC-protected data in PG (skills.body_hmac, hash chains)
+  # becomes unverifiable. Discovered live during dashboard approve test:
+  # "Skill body HMAC mismatch — refusing to load (possible tampering or
+  # machine-secret rotation)" after a Docker image rebuild.
+  api_state:
+    name: securecontext-api-state
 
 services:
 
@@ -74,6 +82,11 @@ services:
       ZC_POSTGRES_USER:       ${POSTGRES_USER:-scuser}
       ZC_POSTGRES_PASSWORD:   ${POSTGRES_PASSWORD}
       ZC_POSTGRES_DB:         ${POSTGRES_DB:-securecontext}
+    volumes:
+      # v0.22.1 — persist machine_secret + logs + sessions across container rebuilds.
+      # Without this, HMAC-protected data in PG (skills.body_hmac, hash chains)
+      # becomes unverifiable after every `docker compose build`.
+      - api_state:/home/securecontext/.claude/zc-ctx
     ports:
       - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
     depends_on:
