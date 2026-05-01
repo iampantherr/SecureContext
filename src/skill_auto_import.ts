@@ -21,9 +21,15 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
 import { withClient } from "./pg_pool.js";
 import { logger } from "./logger.js";
+// v0.20.1 — use the project's HMAC-keyed body hash. Earlier v0.20.0 used
+// plain SHA256, which the skill loader rejects with "body HMAC mismatch —
+// refusing to load (possible tampering or machine-secret rotation)" when
+// downstream code (mutator, dashboard) tries to load the skill. Caught in
+// live test on Test_Agent_Coordination after the mutator generated 5
+// candidates and the dashboard tried to render the parent skill body.
+import { computeSkillBodyHmac } from "./skills/loader.js";
 
 // Resolve the skills/ dir relative to the running module. In the Docker
 // container this is /app/skills (copied during the build); in dev/native
@@ -140,12 +146,9 @@ export function parseSkillFile(fullPath: string): ParsedSkill {
   }
 }
 
-function computeBodyHmac(body: string): string {
-  // v0.20.0 — plain SHA256. Migrating to HMAC-keyed via machine_secret is a
-  // v0.21+ task. Plain hash is enough to detect body changes for
-  // idempotency; integrity-on-PG is a future hardening.
-  return createHash("sha256").update(body).digest("hex");
-}
+// v0.20.1 — delegate to the canonical computeSkillBodyHmac from loader.ts.
+// Async because it derives a subkey from the machine secret. Idempotency
+// for the auto-import is unchanged: same body → same HMAC → row skipped.
 
 interface ImportSummary {
   scanned:      number;
@@ -190,7 +193,7 @@ export async function autoImportSkills(opts: { dir?: string; verbose?: boolean }
       result.details.push({ file: parsed.filename, result: "validation_error", reason: "missing name/version/scope" });
       continue;
     }
-    const bodyHmac = computeBodyHmac(parsed.body);
+    const bodyHmac = await computeSkillBodyHmac(parsed.body);
 
     try {
       // Check existing — idempotent skip if body unchanged

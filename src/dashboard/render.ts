@@ -461,8 +461,14 @@ export function renderDashboardHtml(): string {
 
 <div class="panel">
   <h2>Pending mutation reviews</h2>
+  <!-- v0.20.1 — skip poll when any input/textarea/select inside the panel has
+       focus, OR when an .approve-form / .reject-form is currently open.
+       Without this, every 10s the innerHTML swap wiped the operator's typed
+       confirmation text. Filter syntax: hx-trigger="every Ns[<JS truthy>]"
+       — true means "go ahead and trigger", false means "skip this fire". -->
   <div id="pending"
-       hx-get="/dashboard/pending" hx-trigger="load, every 10s"
+       hx-get="/dashboard/pending"
+       hx-trigger="load, every 10s[!document.querySelector('#pending input:focus, #pending textarea:focus, #pending select:focus, #pending details[open]')]"
        hx-target="this" hx-swap="innerHTML">
     Loading…
   </div>
@@ -471,7 +477,8 @@ export function renderDashboardHtml(): string {
 <div class="panel">
   <h2>Active skills <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(edit frontmatter — body is mutator-managed)</span></h2>
   <div id="skills"
-       hx-get="/dashboard/skills" hx-trigger="load, every 30s"
+       hx-get="/dashboard/skills"
+       hx-trigger="load, every 30s[!document.querySelector('#skills input:focus, #skills textarea:focus, #skills select:focus, #skills details[open]')]"
        hx-target="this" hx-swap="innerHTML">
     Loading…
   </div>
@@ -585,9 +592,11 @@ export function renderDashboardHtml(): string {
 <!-- v0.19.0 Sprint 2.10 — Skill candidates panel (REJECT clusters → propose new skill) -->
 <div class="panel">
   <h2>Skill candidates <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(from REJECT patterns where the role has no governing skill)</span></h2>
+  <!-- v0.20.1 — same focus-aware filter as #pending; don't blow away an
+       operator who's mid-edit on the proposed skill body or notes. -->
   <div id="skill-candidates"
        hx-get="/dashboard/skill-candidates"
-       hx-trigger="load, every 30s"
+       hx-trigger="load, every 30s[!document.querySelector('#skill-candidates input:focus, #skill-candidates textarea:focus, #skill-candidates select:focus, #skill-candidates details[open]')]"
        hx-swap="innerHTML">
     <p class="empty">Loading skill candidates…</p>
   </div>

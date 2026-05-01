@@ -212,9 +212,62 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
     const skill = await getActiveSkill(db, "skill_id_will_be_resolved_below" as never, projectScope).catch(() => null);
     // The above would only work by name; fallback to direct skill_id lookup
     const { getSkillById } = await import("./skills/storage.js");
-    const targetSkill = skill ?? await getSkillById(db, row.skill_id).catch(() => null);
+    let targetSkill = skill ?? await getSkillById(db, row.skill_id).catch(() => null);
+
+    // v0.20.1 — PG fallback. v0.20.0 added skill auto-import that lands
+    // skills in skills_pg (Postgres). The legacy SQLite getSkillById doesn't
+    // see those, so the L1 hook used to bail with skill_missing for every
+    // PG-imported skill. Discovered live: a developer agent recorded a
+    // failed skill_run for `developer-debugging-methodology@1@global`
+    // (which lives in skills_pg) and the mutator never fired.
+    //
+    // Fix: if the local lookup misses AND PG is configured, query skills_pg.
+    // Synthesize a Skill-shaped object the rest of the L1 path can consume.
+    // Falls through to the original missing-skill bail if PG is unreachable
+    // or the skill genuinely doesn't exist there either.
+    if (!targetSkill && (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD)) {
+      try {
+        const { withClient } = await import("./pg_pool.js");
+        const pgRow = await withClient(async (c) => {
+          const r = await c.query<{ skill_id: string; name: string; version: string; scope: string; description: string; frontmatter: Record<string, unknown>; body: string; body_hmac: string }>(
+            `SELECT skill_id, name, version, scope, description, frontmatter, body, body_hmac
+               FROM skills_pg WHERE skill_id=$1 AND archived_at IS NULL LIMIT 1`,
+            [row.skill_id],
+          );
+          return r.rows[0] ?? null;
+        });
+        if (pgRow) {
+          // Synthesize the Skill shape that getSkillById would have returned.
+          // The fields the downstream mutator path actually uses are:
+          //   skill_id, name, version, scope, description, frontmatter, body
+          // Fixtures + acceptance_criteria come from frontmatter.
+          targetSkill = {
+            skill_id:    pgRow.skill_id,
+            name:        pgRow.name,
+            version:     pgRow.version,
+            scope:       pgRow.scope as never,
+            description: pgRow.description,
+            frontmatter: pgRow.frontmatter as never,
+            body:        pgRow.body,
+            body_hmac:   pgRow.body_hmac,
+            source_path: null,
+          } as never;
+          logger.info("skills", "l1_mutation_skill_resolved_from_pg", {
+            skill_id: row.skill_id, source: "skills_pg",
+          });
+        }
+      } catch (e) {
+        logger.warn("skills", "l1_mutation_pg_fallback_failed", {
+          skill_id: row.skill_id, error: (e as Error).message,
+        });
+      }
+    }
+
     if (!targetSkill) {
-      logger.debug("skills", "l1_mutation_skill_missing", { skill_id: row.skill_id });
+      logger.warn("skills", "l1_mutation_skill_missing", {
+        skill_id: row.skill_id,
+        note: "checked both SQLite (local) and skills_pg (PG); not in either",
+      });
       return;
     }
     // Recent failure traces from skill_runs

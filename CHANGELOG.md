@@ -4,6 +4,128 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.20.1] — 2026-05-01 — Live mutator-loop verification + 4 bugs found and fixed
+
+The v0.20.0 E2E flagged "full live mutator loop" as deferred — this release
+closes that gap by actually running it end-to-end with real agents
+(orchestrator + developer + auto-spawned mutator-engineering pool agent).
+**The first fully verified self-improvement cycle on Test_Agent_Coordination.**
+The exercise caught 4 architectural bugs that synthetic tests had missed.
+
+### Bug #1 — L1 hook couldn't see PG-imported skills
+
+The L1 mutation hook in `src/outcomes.ts maybeTriggerL1Mutation` calls
+`getSkillById(db, skill_id)` against the **agent's local SQLite project DB**.
+But v0.20.0's auto-importer landed skills in **`skills_pg` (Postgres)**.
+The lookup missed every PG-imported skill → hook bailed silently with a
+DEBUG-level `l1_mutation_skill_missing` log → mutator never fired.
+
+**Fix:** added a PG fallback in `outcomes.ts`. When the local SQLite
+lookup misses AND `ZC_POSTGRES_HOST` or `ZC_POSTGRES_PASSWORD` are set,
+query `skills_pg` directly. Synthesize a `Skill`-shaped object the rest of
+the L1 path can consume. Logs `l1_mutation_skill_resolved_from_pg` on
+success. Falls through to the original missing-skill bail if PG is
+unreachable AND the skill genuinely isn't there.
+
+### Bug #2 — `ZC_L1_MUTATION_ENABLED` not propagated to agent MCP servers
+
+`start-agents.ps1` set `$env:ZC_L1_MUTATION_ENABLED = "1"` in its OWN
+shell, but the per-agent launcher templates (which spawn each agent's
+claude.exe → MCP server subprocess) did NOT include that env var. When
+the MCP server checked `process.env.ZC_L1_MUTATION_ENABLED === "1"`, it
+saw `undefined` and skipped the L1 hook entirely — even though
+start-agents claimed at startup that "L1 autonomous-mutation: enabled".
+Discovered when the developer's `zc_record_skill_outcome` call wrote
+`skill_runs` + `outcomes` rows but no mutation candidates appeared.
+
+**Fix:** `start-agents.ps1` now propagates `ZC_L1_MUTATION_ENABLED` and
+`ZC_MUTATOR_MODEL` (when set) into both the orchestrator launcher template
+AND the worker launcher template's `$workerEnvBlock`. After this fix,
+`tail $env:TEMP\Test_Agent_Coordination-developer-launch.ps1 | grep L1`
+shows `$env:ZC_L1_MUTATION_ENABLED = '1'` as expected.
+
+### Bug #3 — Dispatcher process env didn't have PG creds
+
+Before bug #2 was fixed, the L1 hook DID enqueue a `mutator-engineering`
+task to `task_queue_pg` (when run in a shell that happened to have the
+env). The dispatcher's auto-spawn detector saw the queued task and tried
+to spawn a mutator-engineering pool agent via `spawn-agent.ps1`. But
+the auto-spawn child process inherited the dispatcher's env — and the
+dispatcher's launcher script (`a2a-launch-dispatcher.ps1` template in
+start-agents.ps1) only set `ZC_API_URL` + `ZC_API_KEY`, NOT the PG creds.
+Result: mutator-engineering agent broadcast `BLOCKED: zc_claim_task
+continues to fail with "Postgres pool unavailable"`.
+
+**Fix:** new `$dispatcherEnvBlock` in `start-agents.ps1` propagates all
+PG vars (`ZC_POSTGRES_HOST/PORT/USER/PASSWORD/DB`) plus
+`ZC_L1_MUTATION_ENABLED` + `ZC_MUTATOR_MODEL` into the dispatcher's
+launcher. Auto-spawned pool agents now correctly inherit PG access.
+
+### Bug #4 — Skill auto-import used plain SHA256 instead of HMAC-keyed hash
+
+v0.20.0 `src/skill_auto_import.ts` `computeBodyHmac()` used plain
+`createHash('sha256').update(body).digest('hex')`. But the skill loader
+(`src/skills/loader.ts computeSkillBodyHmac()`) computes an
+**HMAC-SHA256** using a subkey derived from the machine secret. When the
+dashboard tried to load the parent skill (to render mutation candidates),
+the loader's HMAC verification failed with the visible error: *"Skill
+developer-debugging-methodology@1@global body HMAC mismatch — refusing
+to load (possible tampering or machine-secret rotation)"*.
+
+**Fix:** auto-importer now imports + uses the canonical
+`computeSkillBodyHmac` from `loader.ts`. On container restart the
+auto-importer re-runs and UPDATEs all 25 existing rows with the correct
+HMAC value (idempotent: subsequent runs see matching HMACs and skip).
+
+### Bug #5 — Dashboard auto-refresh wiped operator's typed text
+
+The `#pending`, `#skills`, and `#skill-candidates` panels each had
+`hx-trigger="load, every 10s"` (or `30s`). Every poll did a full
+`hx-swap="innerHTML"`, which destroyed any `<input>`, `<textarea>`, or
+expanded `<details>` content the operator was mid-edit on. The
+"Confirm result_id" type-confirm inputs reset every 10 seconds, making
+approval/reject impossible to complete.
+
+**Fix:** changed all three panels to a focus-aware HTMX trigger filter:
+`hx-trigger="load, every 10s[!document.querySelector('#pending input:focus, #pending textarea:focus, #pending select:focus, #pending details[open]')]"`.
+Polling skips while ANY input/textarea/select is focused or any
+`<details>` is open. When the operator tabs away, polling resumes
+normally and the panel updates.
+
+### Live verification — the moment of truth
+
+After all four fixes, the full self-improvement loop ran end-to-end on
+Test_Agent_Coordination with real Claude agents. Evidence:
+
+| Step | Evidence |
+|---|---|
+| Developer agent invoked skill | `zc_skill_show developer-debugging-methodology` resolved from PG |
+| Developer recorded failed outcome | `skill_runs.run-9341abbf-dd1`, `status=failed`, `outcome_score=0.2` |
+| L1 hook fired | `outcomes.out-...` written with `outcome_kind=failed` |
+| Mutator-engineering task enqueued | `task_queue_pg.mut-...` with `role=mutator-engineering` |
+| Dispatcher auto-spawned mutator pool agent | Window opened, agent claimed task |
+| Mutator (`claude-sonnet-4-6`) generated 5 candidates | `mutation_results_pg.mres-423a388e-08b`, `candidate_count=5`, `best_score=0.86` |
+| Dashboard rendered candidates with type-confirm form | screenshot verified |
+| Operator approved candidate #0 | "Approved → promoted to `developer-debugging-methodology@1.1@global` (candidate #0)" |
+| Skill body version-bumped | v1 archived, v1.1 active in `skills_pg` |
+| Audit trail preserved | row in `skill_revisions_pg` |
+
+**This is Tier S item #2 (Skills + continuous self-improvement loop) from
+`HARNESS_EVOLUTION_PLAN.md` — the highest-leverage item in the entire
+plan — verified working end-to-end with live agents for the first time.**
+
+### Known follow-up (deferred to v0.20.2)
+
+The auto-reassign-on-approve feature exists but only fires when the
+failed `skill_run` has an `original_role` field. That field is populated
+when the failure came via an orchestrator REJECT broadcast resolved by
+`outcomes_reject_resolver.ts`. Synthetic `zc_record_skill_outcome` calls
+(like our test) don't preserve the original_role chain. To verify the
+full REJECT → mutate → approve → auto-reassign cycle, run a live test
+where the orchestrator REJECTs a developer's MERGE on a real task. The
+infrastructure is verified; only the live REJECT-driven path remains
+to be live-tested.
+
 ## [0.20.0] — 2026-04-30 — Sprint 4 + close the v0.19.0 gaps: 10 features in one release
 
 The biggest single release. Closes every 🔴 high and 🟠 medium item from the
