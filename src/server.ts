@@ -2724,10 +2724,15 @@ async function dispatchToolCall(
             status === "failed" || status === "timeout" ||
             (typeof outcome_score === "number" && outcome_score < 0.5);
           let outcomeId: string | null = null;
-          let l1Triggered = false;
+          // v0.22.1 — capture rich L1 trigger result so we can report
+          // accurately whether the mutator task was actually queued or which
+          // guardrail bailed (cooldown / threshold / daily-cap / etc.).
+          // Previously this was hardcoded to ZC_L1_MUTATION_ENABLED env-var
+          // detection — the agent saw "L1 fired" even when guardrails bailed.
+          let l1Result: { triggered: boolean; reason: string; task_id?: string; bailed_guardrail?: string } | null = null;
 
           if (isFailureLike) {
-            const { recordOutcome } = await import("./outcomes.js");
+            const { recordOutcome, tryTriggerL1Mutation } = await import("./outcomes.js");
             const outcomeKind: "failed" | "errored" =
               status === "timeout" ? "errored" : "failed";
             const result = await recordOutcome({
@@ -2741,9 +2746,19 @@ async function dispatchToolCall(
               createdByAgentId: AGENT_ID || "worker",
             });
             outcomeId = result?.outcome_id ?? null;
-            // L1 fires inside recordOutcome when ZC_L1_MUTATION_ENABLED=1.
-            // We surface a hint based on the env so the agent knows what to expect.
-            l1Triggered = process.env.ZC_L1_MUTATION_ENABLED === "1";
+            // recordOutcome auto-fires L1 internally; we ALSO call it here to
+            // capture rich status. The second call is guardrailed (idempotent
+            // via cooldown), so it correctly bails with "cooldown active 0h
+            // ago" if the auto-fire just queued a task.
+            if (process.env.ZC_L1_MUTATION_ENABLED === "1") {
+              try {
+                l1Result = await tryTriggerL1Mutation(PROJECT_PATH, runId);
+              } catch (e) {
+                l1Result = { triggered: false, reason: `error: ${(e as Error).message}` };
+              }
+            } else {
+              l1Result = { triggered: false, reason: "ZC_L1_MUTATION_ENABLED is not set", bailed_guardrail: "env_disabled" };
+            }
           }
 
           rsoDb.close();
@@ -2754,15 +2769,19 @@ async function dispatchToolCall(
             outcome_id: outcomeId,
             l1_trigger_eligible: isFailureLike,
             l1_env_enabled: process.env.ZC_L1_MUTATION_ENABLED === "1",
+            l1_triggered: l1Result?.triggered ?? false,
+            l1_reason:    l1Result?.reason ?? null,
+            l1_task_id:   l1Result?.task_id ?? null,
           };
           const lines: string[] = [];
           lines.push(`✓ Recorded skill_run ${runId} (status=${status}${typeof outcome_score === "number" ? `, score=${outcome_score}` : ""})`);
           if (isFailureLike) {
             lines.push(`✓ Recorded outcome ${outcomeId ?? "(null)"} (kind=${status === "timeout" ? "errored" : "failed"})`);
-            if (l1Triggered) {
-              lines.push(`→ L1 mutation hook fired (ZC_L1_MUTATION_ENABLED=1). If guardrails pass, a mutator task will be queued shortly. Check task_queue_pg WHERE role='mutator'.`);
-            } else {
-              lines.push(`(L1 mutation hook is DISABLED — set ZC_L1_MUTATION_ENABLED=1 in the MCP server env to enable autonomous mutation.)`);
+            // v0.22.1 — report ACTUAL L1 outcome, not env-var detection
+            if (l1Result?.triggered) {
+              lines.push(`→ L1 mutation hook FIRED — task ${l1Result.task_id} queued for mutator pool. Reason: ${l1Result.reason}`);
+            } else if (l1Result) {
+              lines.push(`→ L1 mutation hook checked, did NOT fire. Reason: ${l1Result.reason}${l1Result.bailed_guardrail ? ` (guardrail=${l1Result.bailed_guardrail})` : ""}`);
             }
           } else {
             lines.push(`(no outcome row written — run was successful and no mutation needed)`);
@@ -3159,13 +3178,32 @@ async function dispatchToolCall(
           }
           const picked = result.bodies[picked_candidate_index];
 
-          // Look up the active skill we're replacing
+          // Look up the skill we're replacing.
+          // v0.22.1 fix: resolve to the CURRENTLY-ACTIVE version by name+scope,
+          // NOT to result.skill_id (which may be archived if the L1 hook
+          // triggered against an old version that has since been promoted).
+          // Without this, approving a stale mutation_result against an
+          // archived parent creates a NEW skill at parent_version+1 (lower
+          // than the active one) — effectively reverting progress. Discovered
+          // live in v0.22.0 E2E test: mres-d700f998-d72 had skill_id=@1@global
+          // but @1.1@global was already active; bumping from @1.0.0 produced
+          // @1.0.1 which is < @1.1.
           const { getActiveSkill, getSkillById, archiveSkill, upsertSkill } = await import("./skills/storage_dual.js");
-          const targetScope = `project:${projectHash}` as const;
-          const current = await getSkillById(maDb, result.skill_id);
-          if (!current) {
+          const parentSkill = await getSkillById(maDb, result.skill_id);
+          if (!parentSkill) {
             maDb.close();
             return { content: [{ type: "text", text: `Skill ${result.skill_id} not found in storage.` }], isError: true };
+          }
+          // Try active-by-name first (handles version drift since the result was created)
+          const activeSkill = await getActiveSkill(maDb, parentSkill.frontmatter.name, parentSkill.frontmatter.scope).catch(() => null);
+          const current = activeSkill ?? parentSkill;
+          const versionDrifted = current.skill_id !== parentSkill.skill_id;
+          if (versionDrifted) {
+            logger.info("skills", "mutation_approve_version_drift", {
+              parent_skill_id: parentSkill.skill_id,
+              active_skill_id: current.skill_id,
+              note: "Approving mutation against currently-active version, not archived parent",
+            });
           }
           // bumpPatch helper inline (vs. bumpMinor for L2/global promotions)
           const bumpPatch = (v: string): string => {

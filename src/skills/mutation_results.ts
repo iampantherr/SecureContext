@@ -227,6 +227,36 @@ export async function recordMutationResult(
     input.original_task_id ?? null, input.original_role ?? null,
   );
 
+  // v0.22.1 — best-effort PG mirror in sqlite mode. Same architectural pattern
+  // as storage_dual.recordSkillRun (added in v0.22.0): the agent's launcher
+  // sets ZC_TELEMETRY_BACKEND=sqlite (default) but PG creds are available, so
+  // we mirror to mutation_results_pg so the operator dashboard can see the
+  // candidates. Without this, the dashboard at :3099/dashboard/pending shows
+  // 0 rows and operator review is blocked. Discovered live during v0.22.0
+  // E2E test: result mres-d700f998-d72 was in local SQLite but absent from PG.
+  if (backend === "sqlite" && (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD)) {
+    withClient(async (c) => {
+      await c.query(
+        `INSERT INTO mutation_results_pg
+          (result_id, mutation_id, skill_id, project_hash, proposer_model,
+           proposer_role, candidate_count, best_score, bodies, bodies_hash,
+           headline, created_at, original_task_id, original_role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         ON CONFLICT (result_id) DO NOTHING`,
+        [
+          result_id, input.mutation_id, input.skill_id, input.project_hash,
+          input.proposer_model ?? null, input.proposer_role ?? null,
+          candidate_count, best_score, bodies_json, bodies_hash,
+          headline, created_at,
+          input.original_task_id ?? null, input.original_role ?? null,
+        ],
+      );
+    }).catch((e: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error("[mutation_results] best-effort PG mirror failed:", (e as Error).message);
+    });
+  }
+
   return { result_id, mutation_id: input.mutation_id, bodies_hash, headline };
 }
 

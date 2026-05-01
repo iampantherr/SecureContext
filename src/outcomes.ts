@@ -153,23 +153,49 @@ export async function recordOutcome(input: RecordOutcomeInput): Promise<OutcomeR
   // Disabled by default; enable per-project by setting
   // ZC_L1_MUTATION_ENABLED=1 in the MCP server's env. Gives operators a
   // kill switch without touching code.
-  if (process.env.ZC_L1_MUTATION_ENABLED === "1"
-      && input.refType === "skill_run"
-      && ["failed","insufficient","errored","reverted","rejected"].includes(input.outcomeKind)) {
-    try {
-      await maybeTriggerL1Mutation(input.projectPath, input.refId);
-    } catch { /* never fail outcome write due to L1 trigger */ }
-  }
+  // v0.22.1 — L1 mutation hook firing moved entirely to the handler
+  // (zc_record_skill_outcome) so it can capture rich L1TriggerResult and
+  // surface accurate status to the user. Auto-firing here AND in the
+  // handler caused a double-enqueue bug (each call generates a new task_id;
+  // cooldown guardrail looks at skill_mutations not task_queue, so doesn't
+  // dedupe). The handler ALWAYS calls tryTriggerL1Mutation explicitly when
+  // outcome is failure-like + ZC_L1_MUTATION_ENABLED=1; resolvers
+  // (resolveGitCommitOutcome / resolveUserPromptOutcome / resolveFollowUpOutcomes)
+  // don't write skill_run outcomes so they're not affected.
+  // NOTE: if any future caller writes a skill_run outcome via recordOutcome
+  // directly (without going through zc_record_skill_outcome), they'll need
+  // to call tryTriggerL1Mutation themselves.
 
   return record;
 }
 
 /**
+ * v0.22.1 — public version of maybeTriggerL1Mutation that exposes rich
+ * status so handlers can surface accurate "fired" / "bailed: <reason>"
+ * feedback to the user. Idempotent: a second call within the cooldown
+ * window correctly bails on the cooldown guardrail.
+ */
+export async function tryTriggerL1Mutation(
+  projectPath: string,
+  runId: string,
+): Promise<L1TriggerResult> {
+  return maybeTriggerL1Mutation(projectPath, runId);
+}
+
+export interface L1TriggerResult {
+  triggered: boolean;
+  reason:    string;
+  task_id?:  string;
+  bailed_guardrail?: "cooldown" | "failure_threshold" | "daily_cap" | "skill_missing" | "retry_after_promotion" | "env_disabled";
+}
+
+/**
  * Internal helper for the L1 trigger. Looks up the skill_id from the
  * skill_run row, runs guardrails, and (if pass) enqueues a `role='mutator'`
- * task with the right payload.
+ * task with the right payload. v0.22.1: returns L1TriggerResult instead
+ * of void so callers can report accurate status.
  */
-async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promise<void> {
+async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promise<L1TriggerResult> {
   const { DatabaseSync } = await import("node:sqlite");
   const { join } = await import("node:path");
   const { mkdirSync } = await import("node:fs");
@@ -190,7 +216,7 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
       `SELECT skill_id, failure_trace, task_id, was_retry_after_promotion
          FROM skill_runs WHERE run_id = ?`
     ).get(runId) as { skill_id?: string; failure_trace?: string; task_id?: string; was_retry_after_promotion?: number } | undefined;
-    if (!row?.skill_id) return;
+    if (!row?.skill_id) return { triggered: false, reason: "skill_run row not found or skill_id missing", bailed_guardrail: "skill_missing" };
     const { logger } = await import("./logger.js");
     if (row.was_retry_after_promotion) {
       // The retry-cap safeguard: a recently-promoted skill failed on its first
@@ -198,13 +224,18 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
       logger.info("skills", "l1_mutation_skipped_retry_cap", {
         skill_id: row.skill_id, run_id: runId, reason: "was_retry_after_promotion",
       });
-      return;
+      return { triggered: false, reason: "retry-cap: this run was a retry-after-promotion; no mutation cascade", bailed_guardrail: "retry_after_promotion" };
     }
     const { checkMutationGuardrails } = await import("./skills/mutation_guardrails.js");
     const guard = checkMutationGuardrails(db, row.skill_id);
     if (!guard.trigger) {
       logger.debug("skills", "l1_mutation_skipped", { skill_id: row.skill_id, reason: guard.reason, metrics: guard.metrics });
-      return;
+      // v0.22.1 — derive bailed_guardrail tag from the reason text
+      const tag: L1TriggerResult["bailed_guardrail"] =
+        guard.reason.startsWith("cooldown")  ? "cooldown" :
+        guard.reason.startsWith("daily cap") ? "daily_cap" :
+                                                "failure_threshold";
+      return { triggered: false, reason: guard.reason, bailed_guardrail: tag };
     }
     // Resolve the skill so we can pass body + traces + fixtures into the mutator
     const { getActiveSkill } = await import("./skills/storage.js");
@@ -268,7 +299,7 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
         skill_id: row.skill_id,
         note: "checked both SQLite (local) and skills_pg (PG); not in either",
       });
-      return;
+      return { triggered: false, reason: `skill ${row.skill_id} not found in SQLite or PG`, bailed_guardrail: "skill_missing" };
     }
     // Recent failure traces from skill_runs
     const { getRecentSkillRuns } = await import("./skills/storage.js");
@@ -347,6 +378,7 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
       },
     });
     logger.info("skills", "l1_mutation_triggered", { skill_id: row.skill_id, task_id: taskId, reason: guard.reason });
+    return { triggered: true, reason: guard.reason, task_id: taskId };
   } finally {
     try { db.close(); } catch { /* noop */ }
   }

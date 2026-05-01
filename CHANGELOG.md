@@ -4,6 +4,49 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.1] — 2026-05-01 — 3 bug fixes from v0.22.0 live E2E + final pre-deployment polish
+
+The v0.22.0 live E2E surfaced 3 small but real bugs. v0.22.1 closes them all
+so the system is structurally complete before real-project deployment.
+
+### Bugs fixed
+
+1. **`mutation_results` PG mirror** (was: dashboard couldn't see candidates
+   in sqlite mode). Same architectural pattern as v0.22.0's skill_runs PG
+   mirror: best-effort `withClient` write to `mutation_results_pg` after
+   the local SQLite insert when PG creds are present. Closes the gap where
+   the operator dashboard at `:3099/dashboard/pending` showed 0 rows even
+   though the mutator pool had produced candidates locally.
+
+2. **`zc_mutation_approve` now resolves to the active skill version**
+   (was: bumped from archived parent → produced lower version). When the
+   L1 mutator targets `developer-debugging-methodology@1@global` but
+   `@1.1@global` has already been promoted, approving the candidate used
+   to bump from `1.0.0` → `1.0.1` (lower than the active `1.1.0`),
+   effectively reverting progress. The handler now calls `getActiveSkill`
+   by name+scope first; bumps from the active version; logs
+   `mutation_approve_version_drift` when correction kicks in.
+
+3. **`zc_record_skill_outcome` reports actual L1 outcome**
+   (was: hardcoded "L1 fired" based on env-var detection). Refactored
+   `maybeTriggerL1Mutation` to return rich `L1TriggerResult` (triggered,
+   reason, task_id, bailed_guardrail). Handler now calls
+   `tryTriggerL1Mutation` directly and surfaces accurate status to the
+   agent — e.g. `L1 mutation hook checked, did NOT fire. Reason: cooldown
+   active: last mutation 2.3h ago (need ≥6h) (guardrail=cooldown)`.
+
+### Why this matters
+
+These three bugs together meant the v0.22.0 self-improvement loop had a
+gap: candidates were generated but the dashboard couldn't see them, the
+operator-approval flow could revert progress, and agents got misleading
+status messages. v0.22.1 closes all three in ~80 LoC of surgical changes.
+
+After v0.22.1, the structural foundation for real-project data collection
+is complete. The 6 deferred-work memory entries (logic gaps, security
+gaps, observability gaps, mem0 borrow list, parameters needing data,
+unverified features) are the parking lot for post-deployment iteration.
+
 ## [0.22.0] — 2026-05-01 — Full skill attribution + operator audit log
 
 The v0.21.x cycle proved skill enforcement works (agents call `zc_skill_show`,
