@@ -4,6 +4,122 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.21.0] — 2026-05-01 — Skill enforcement levers (#1, #2, #4 of 5)
+
+The v0.20.1 mutator-loop verification exposed the **single biggest reliability
+gap** in the self-improvement system: nothing forces a Claude agent to actually
+invoke a skill. Even with `"you MUST"` language in role prompts, agents
+freelance with `Read`/`Edit`/`Bash` because that's "simpler" — and when they
+do, `skill_runs_pg` stays empty and the mutator has nothing to improve.
+
+This release ships three reinforcing soft-enforcement levers (designed to
+work together) and documents two more for future consideration. See
+`docs/SKILL_ENFORCEMENT.md` for the full design and decision log.
+
+### Lever #1 — Inject "## YOUR SKILLS" block at agent spawn ✅
+
+New helper: `A2A_dispatcher/generate-role-skill-block.mjs`. Given a role,
+queries `skills_pg` for skills with `intended_roles` containing the role,
+formats them into a markdown block with `zc_skill_show` +
+`zc_record_skill_outcome` workflow instructions.
+
+`start-agents.ps1` calls this helper:
+- Once for the orchestrator (role='orchestrator')
+- Once per worker (role=<roleName>)
+
+The block is appended to the role's `deepPrompt` BEFORE the system prompt
+file is written. Empty output (PG unreachable, no matches, etc.) is
+harmless — script just doesn't inject anything.
+
+After this fix, an agent at spawn sees something like:
+
+```
+## YOUR SKILLS — invoke these for measurable outcomes
+
+As a developer, you have the following skills available...
+
+### Skills available to you
+- `developer-debugging-methodology@1@global` — DEBUGGING METHODOLOGY...
+- `developer-prime-directives@1@global` — PRIME DIRECTIVES...
+- ...
+```
+
+### Lever #2 — Auto-inject applicable skills into `zc_recall_context` ✅
+
+`/api/v1/recall` now accepts a `?role=<role>` query param. When present,
+the response includes a `skills` array with active skills matching the role
+(filtered by `intended_roles` in `frontmatter::text ILIKE '%<role>%'`).
+
+The MCP server's `zc_recall_context` tool reads `ZC_AGENT_ROLE` env (set
+by start-agents.ps1) and forwards it to the API. The response text now
+includes a `## Skills available for role 'developer' (8)` section followed
+by a reminder about `zc_record_skill_outcome`.
+
+This fires automatically on every session start (the SessionStart hook
+calls `zc_recall_context` per CLAUDE.md). Result: skill awareness
+reinforced not just at spawn but on every recall.
+
+### Lever #4 — MERGE-time skill-record mandate in role prompts ✅
+
+Both `$orchSystem` and every `$workerSystem` now end with a
+"SKILL-OUTCOME RECORDING (MANDATORY before MERGE)" section:
+
+```
+Before broadcasting MERGE for any non-trivial task, you MUST call:
+
+  zc_record_skill_outcome({
+    skill_id: '<closest applicable skill_id from YOUR SKILLS section>',
+    status: 'succeeded' | 'failed' | 'timeout',
+    outcome_score: 0.0 to 1.0,
+    inputs: { task_summary, key_decisions },
+    evidence: { what_worked, what_didnt, recommendation_for_skill }
+  })
+
+This is how the system learns from your work...
+```
+
+Three reinforcing signals (#1 at spawn + #2 on every recall + #4 in the
+closing instruction) makes skill-recording natural rather than forced.
+
+### Lever #3 — PreTool hook nudge ⏸️ deferred to v0.22+
+
+Soft hint when agent uses Edit/Bash without a recent skill_run. Defer
+until we observe v0.21.0 skill-record rates and decide if the marginal
+nudge is worth the hint-fatigue cost. See `SKILL_ENFORCEMENT.md`.
+
+### Lever #5 — Hard PreTool block ⏸️ DESIGNED but DELIBERATELY UNSHIPPED
+
+Refuse `Edit`/`Write`/`Bash` until a `skill_run` is recorded this session.
+**Designed but not shipped** because the rigidity risk is high (agents get
+stuck if pattern-matcher fails) and #1+#2+#4 are likely sufficient.
+
+**Full design + implementation notes preserved in
+`docs/SKILL_ENFORCEMENT.md`** so the work isn't lost. Operator should
+ship #5 ONLY if v0.21.0 skill-record rate is observed below 50% for a
+week. The doc includes the implementation sketch, gating env var
+(`ZC_SKILL_HARD_ENFORCE=1`), escape hatch tool spec, and the decision
+criteria for when to revisit.
+
+### What this release does NOT change
+
+- Synthetic API tests pass unchanged (the changes are additive: new
+  query param, new response field, new prompt section)
+- Existing skill semantics unchanged
+- Mutator-loop architecture unchanged
+
+### Operator action required
+
+After upgrading to v0.21.0:
+1. Rebuild + restart API container (the auto-importer + recall endpoint
+   pick up the new code)
+2. Restart any A2A sessions: `stop-agents.ps1` then `start-agents.ps1`
+   to spawn fresh agents that get the v0.21.0 prompt injection
+
+### Tests
+
+(deferred to v0.21.1 — needs live multi-session observation rather than
+unit tests)
+
 ## [0.20.1] — 2026-05-01 — Live mutator-loop verification + 4 bugs found and fixed
 
 The v0.20.0 E2E flagged "full live mutator loop" as deferred — this release

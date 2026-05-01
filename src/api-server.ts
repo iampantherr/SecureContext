@@ -519,6 +519,33 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.21.0 lever #1 — return active skills for a role. Used by
+  // A2A_dispatcher/generate-role-skill-block.mjs at agent spawn to format
+  // the "## YOUR SKILLS" block. Public read-only (skill IDs + names +
+  // descriptions are not sensitive).
+  app.get("/api/v1/skills/by-role", async (request, reply) => {
+    try {
+      const { role } = request.query as Record<string, unknown>;
+      if (typeof role !== "string" || !role) throw new ApiError(400, "role query param is required");
+      const { withClient: wc } = await import("./pg_pool.js");
+      const rows = await wc(async (c) => {
+        const r = await c.query<{ skill_id: string; name: string; version: string; scope: string; description: string }>(
+          `SELECT skill_id, name, version, scope, description FROM skills_pg
+            WHERE archived_at IS NULL
+              AND frontmatter::text ILIKE $1
+              AND frontmatter::text ILIKE '%intended_roles%'
+            ORDER BY name`,
+          [`%${role}%`],
+        );
+        return r.rows;
+      });
+      reply.type("application/json").send({ ok: true, role, skills: rows });
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
   // v0.20.0 — Generate skill body from rejection cluster (LLM-driven)
   app.post("/dashboard/skill-candidates/:id/generate", async (request, reply) => {
     try {
@@ -735,11 +762,39 @@ export async function createApiServer(storeOverride?: Store) {
 
   app.get("/api/v1/recall", async (request, reply) => {
     try {
-      const { projectPath, agentId = "default" } = request.query as Record<string, unknown>;
+      const { projectPath, agentId = "default", role } = request.query as Record<string, unknown>;
       const pp    = validateProjectPath(projectPath);
       const facts = await store.recall(pp, String(agentId));
       const lims  = await store.getWorkingMemoryLimits(pp, true);
-      return { ok: true, facts, max: lims.max, complexity: lims.profile };
+
+      // v0.21.0 lever #2 — auto-inject applicable skills for this agent's role.
+      // The MCP server passes ?role=<role> (defaulting to ZC_AGENT_ROLE env).
+      // We query skills_pg for skills with intended_roles containing the role
+      // and return them alongside facts. The agent sees their skill inventory
+      // every time they call zc_recall_context — making skill awareness
+      // automatic at every session start (the SessionStart hook fires
+      // zc_recall_context already).
+      let skills: Array<{ skill_id: string; name: string; description: string }> = [];
+      const targetRole = typeof role === "string" ? role : null;
+      if (targetRole && (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD)) {
+        try {
+          const { withClient } = await import("./pg_pool.js");
+          const r = await withClient(async (c) => {
+            const res = await c.query<{ skill_id: string; name: string; description: string }>(
+              `SELECT skill_id, name, description FROM skills_pg
+                WHERE archived_at IS NULL
+                  AND frontmatter::text ILIKE $1
+                  AND frontmatter::text ILIKE '%intended_roles%'
+                ORDER BY name`,
+              [`%${targetRole}%`],
+            );
+            return res.rows;
+          });
+          skills = r;
+        } catch { /* best-effort; never fail the recall on skill-injection error */ }
+      }
+
+      return { ok: true, facts, max: lims.max, complexity: lims.profile, skills, role: targetRole };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

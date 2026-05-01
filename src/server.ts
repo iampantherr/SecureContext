@@ -1224,13 +1224,32 @@ async function _handleRemoteTool(
         return { content: [{ type: "text", text: (result["deleted"] ? `Forgotten: '${body["key"]}' removed.` : `Key '${body["key"]}' was not in working memory.`) }] };
 
       case "zc_recall_context": {
-        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(String(body["agent_id"] ?? "default"))}`);
+        // v0.21.0 lever #2 — pass agent role so the API can return applicable
+        // skills alongside facts. The role comes from ZC_AGENT_ROLE env (set
+        // by start-agents.ps1 per agent). Falls back to ZC_AGENT_ID if role
+        // wasn't pinned.
+        const agentRole = process.env.ZC_AGENT_ROLE || process.env.ZC_AGENT_ID || "default";
+        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(String(body["agent_id"] ?? "default"))}&role=${encodeURIComponent(agentRole)}`);
         const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number }> ?? [];
+        const skills    = recallRes["skills"] as Array<{ skill_id: string; name: string; description: string }> ?? [];
         const max       = recallRes["max"] as number ?? 50;
         const lines     = [`## Working Memory (${facts.length}/${max} facts)`];
         for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
         for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
         for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+        // v0.21.0 — append skill inventory so the agent sees what's available
+        // every time they recall context. Skip the section if no skills match
+        // the role (avoids noise for projects that haven't authored any skills).
+        if (skills.length > 0) {
+          lines.push("");
+          lines.push(`## Skills available for role '${agentRole}' (${skills.length})`);
+          lines.push("");
+          for (const s of skills) lines.push(`  • \`${s.skill_id}\` — ${(s.description ?? "").slice(0, 120)}`);
+          lines.push("");
+          lines.push("**Reminder:** before broadcasting MERGE on a non-trivial task, call");
+          lines.push("`zc_record_skill_outcome` with the closest skill_id, your status,");
+          lines.push("and a 0.0-1.0 outcome_score. This is what makes the system improve over time.");
+        }
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
