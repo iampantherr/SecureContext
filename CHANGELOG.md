@@ -4,6 +4,66 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.2] — 2026-05-02 — Agent Notebook Model: enforced per-agent + Read→Summary
+
+The big one. Closes the behavioral gap that's been in the system since v0.10.0:
+the semantic-summary infrastructure has been generating L0/L1 summaries for
+every project file (855 indexed files in A2A_communication alone) but **agents
+have never used them** — `zc_file_summary` had been called **0 times across
+every project ever**. Every Read was a full-file Read.
+
+v0.22.2 enforces the notebook model: agents read FROM the notebook (summaries +
+their own per-agent fact namespace) and write TO the notebook continuously.
+Touching raw files is now reserved for actual edits via `force_full_read:true`
+or `offset/limit`.
+
+### What's new
+
+- **PreRead hook redirects Read of indexed files to L0/L1 summary**
+  (~/.claude/hooks/preread-dedup.mjs). Indexed file Read → returns ~200-token
+  summary instead of ~5000-token full file. Un-indexed file Read → blocks +
+  tells agent to call `zc_file_summary` first (auto-indexes lazily). Bypass
+  via `force_full_read:true` or `offset/limit`. ~95% Read-token reduction.
+  Gated by `ZC_SUMMARY_REDIRECT=1` env (default OFF until operator opts in).
+- **`zc_file_summary` auto-indexes on miss** via new `summarizeAndIndexSingleFile()`
+  in harness.ts. AST → LLM → truncation chain. First call on un-indexed file
+  returns the new summary in one step (5–15s if LLM path).
+- **Per-agent namespacing**. `zc_remember` and `zc_recall_context` default
+  `agent_id = ZC_AGENT_ID` (the agent's role). Each agent has private notebook;
+  `recall()` UNIONs (private + shared "default" pool). Massive token cut on
+  recall responses.
+- **PreRead path-normalization** (found via E2E, fixed in real-time): Claude
+  Code passes absolute paths to Read; source_meta stores relative. Hook now
+  strips project root prefix before lookup.
+- **Honest savings calculator** in token_savings.ts. Per-call native_equivalent
+  uses `output_tokens × amplification factor` (recall sparse 1.2×, recall full
+  4×, search 3×, file_summary 25×). Replaces flat 30k baseline that
+  over-credited cache-hit recalls.
+- **SessionStart hook tightening**: only fires zc_recall_context on `startup` +
+  `resume`. Skipped on `compact` (already has prior summary) and `clear`
+  (operator wipe is intentional).
+- **Skill-block dedup per MCP_SESSION_ID**: full skill block once, then
+  "(skills unchanged)" placeholder. Saves ~640 tokens × every-recall-after-first.
+- **CLAUDE.md global** rewritten with "AGENT NOTEBOOK MODEL" front section
+  explaining Tier 1 (notebook) / Tier 2 (raw file when editing) paradigm,
+  per-agent namespacing, and force_full_read bypass.
+
+### Verified end-to-end live
+
+Test: 4 real Claude Sonnet 4.6 agents (orchestrator + developer + researcher +
+qa-engineer) on Test_Agent_Coordination. All 7 features verified live with
+agents quoting MCP responses verbatim in MERGEs. One bug discovered + fixed in
+the loop (path normalization).
+
+### Migration note
+
+Pre-v0.22.2, all facts wrote under `agent_id="default"`. After v0.22.2 those
+facts remain accessible via the recall UNION (default pool stays visible to
+all agents). For projects where the default pool got large, operators can
+run a migration to redistribute facts to per-agent namespaces; example
+migration file generated for A2A_communication at
+`learnings/notebook-migration-v0_22_2.md`.
+
 ## [0.22.1] — 2026-05-01 — 3 bug fixes from v0.22.0 live E2E + final pre-deployment polish
 
 The v0.22.0 live E2E surfaced 3 small but real bugs. v0.22.1 closes them all

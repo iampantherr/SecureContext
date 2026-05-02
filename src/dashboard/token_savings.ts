@@ -106,6 +106,26 @@ function avgCostPerToken(): number {
 
 /**
  * Pull aggregated tool-usage rows from tool_calls_pg for a project window.
+ *
+ * v0.22.2 — also returns per-call honest_native_tokens via SQL CASE expression.
+ * Previously the snapshotter applied a flat baseline (e.g. 30,000 tokens for
+ * every zc_recall_context call) which over-credited cache-hit/sparse recalls
+ * and could under-credit content-rich ones. The new model uses the actual
+ * output_tokens of each call multiplied by an amplification factor that
+ * varies by tool + content size. Discovered live: 7/19 zc_recall_context
+ * calls in A2A_communication returned only 326 tokens (sparse-content recalls)
+ * but were credited as 30,000 each — overstating savings by ~210k tokens.
+ *
+ * AMPLIFICATION FACTORS (per call) — what fraction of "what native Claude
+ * would have read to derive the same knowledge" each token represents:
+ *   zc_recall_context: 1.2× when output<1k (sparse), 4.0× when ≥1k (real)
+ *   zc_search:         3.0× (search results condense ~3 source files each)
+ *   zc_search_global:  3.0×
+ *   zc_file_summary:   25× (200-tok summary represents 5,000-tok file)
+ *   zc_check:          5.0× (memory-first answer represents pages of context)
+ *   zc_fetch:          1.5× (fetched content is essentially the source itself)
+ *   zc_batch:          3.0× (search-like)
+ * Tunable per-tool via env vars ZC_SAVINGS_AMPLIFICATION_<TOOL>.
  */
 export async function fetchToolUsage(
   projectHash: string,
@@ -113,32 +133,70 @@ export async function fetchToolUsage(
   untilIso: string,
 ): Promise<ToolUsageRow[]> {
   return withClient(async (c) => {
+    const envF = (k: string, dflt: number): number => {
+      const v = parseFloat(process.env[k] ?? "");
+      return Number.isFinite(v) && v > 0 ? v : dflt;
+    };
+    const amp = {
+      recall_sparse:  envF("ZC_SAVINGS_AMP_RECALL_SPARSE",  1.2),
+      recall_full:    envF("ZC_SAVINGS_AMP_RECALL_FULL",    4.0),
+      search:         envF("ZC_SAVINGS_AMP_SEARCH",         3.0),
+      file_summary:   envF("ZC_SAVINGS_AMP_FILE_SUMMARY",   25.0),
+      check:          envF("ZC_SAVINGS_AMP_CHECK",          5.0),
+      fetch:          envF("ZC_SAVINGS_AMP_FETCH",          1.5),
+    };
+    const sparseThreshold = parseInt(process.env.ZC_SAVINGS_RECALL_SPARSE_THRESHOLD ?? "1000", 10);
+
     const res = await c.query<{
       tool_name: string;
       call_count: string;
       input_tokens: string;
       output_tokens: string;
       cost_usd: string;
+      honest_native_tokens: string;
     }>(
       `SELECT tool_name,
               COUNT(*)::text         AS call_count,
               COALESCE(SUM(input_tokens),  0)::text AS input_tokens,
               COALESCE(SUM(output_tokens), 0)::text AS output_tokens,
-              COALESCE(SUM(cost_usd),      0)::text AS cost_usd
+              COALESCE(SUM(cost_usd),      0)::text AS cost_usd,
+              COALESCE(SUM(
+                CASE
+                  WHEN tool_name = 'zc_recall_context' AND output_tokens < $4
+                    THEN output_tokens * $5
+                  WHEN tool_name = 'zc_recall_context'
+                    THEN output_tokens * $6
+                  WHEN tool_name IN ('zc_search', 'zc_search_global', 'zc_batch')
+                    THEN output_tokens * $7
+                  WHEN tool_name = 'zc_file_summary'
+                    THEN output_tokens * $8
+                  WHEN tool_name = 'zc_check'
+                    THEN output_tokens * $9
+                  WHEN tool_name = 'zc_fetch'
+                    THEN output_tokens * $10
+                  ELSE 0
+                END
+              ), 0)::text AS honest_native_tokens
          FROM tool_calls_pg
         WHERE project_hash = $1
           AND ts >= $2::timestamptz
           AND ts <  $3::timestamptz
         GROUP BY tool_name
         ORDER BY tool_name`,
-      [projectHash, sinceIso, untilIso],
+      [
+        projectHash, sinceIso, untilIso,
+        sparseThreshold, amp.recall_sparse, amp.recall_full,
+        amp.search, amp.file_summary, amp.check, amp.fetch,
+      ],
     );
     return res.rows.map((r) => ({
-      tool_name:      r.tool_name,
-      call_count:     parseInt(r.call_count, 10),
-      input_tokens:   parseInt(r.input_tokens, 10),
-      output_tokens:  parseInt(r.output_tokens, 10),
-      cost_usd:       parseFloat(r.cost_usd),
+      tool_name:             r.tool_name,
+      call_count:            parseInt(r.call_count, 10),
+      input_tokens:          parseInt(r.input_tokens, 10),
+      output_tokens:         parseInt(r.output_tokens, 10),
+      cost_usd:              parseFloat(r.cost_usd),
+      // v0.22.2 — per-call honest native equivalent (sum of CASE expression)
+      honest_native_tokens:  parseInt(r.honest_native_tokens, 10),
     }));
   });
 }

@@ -231,10 +231,36 @@ export class PostgresStore implements Store {
   async recall(projectPath: string, agentId: string): Promise<MemoryFact[]> {
     const projectHash = ph(projectPath);
     const safeAgent   = sanitize(agentId, 64);
+    // v0.22.2 — per-agent namespacing with shared pool. Each agent gets its
+    // own private notebook (agent_id = ZC_AGENT_ID = "developer", "orchestrator",
+    // etc.) AND always sees the project-wide "default" pool (cross-agent
+    // coordination: ownership tracking, last_session_summary, project state).
+    //
+    // Why: previously every fact was written under "default" and recall
+    // returned all 101+ facts for any agent on any task — massive token
+    // overhead for "tiny work." Per-agent gives each agent ONLY their own
+    // private decisions + the shared coordination layer.
+    //
+    // When agentId="default" explicitly: return only the shared pool
+    // (avoids redundant self-join).
+    if (safeAgent === "default") {
+      const res = await this.pool.query<MemoryFact>(
+        `SELECT key, value, importance, agent_id, created_at
+         FROM working_memory WHERE project_hash = $1 AND agent_id = 'default'
+         ORDER BY importance DESC, created_at DESC`,
+        [projectHash]
+      );
+      return res.rows;
+    }
+    // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
     const res = await this.pool.query<MemoryFact>(
       `SELECT key, value, importance, agent_id, created_at
-       FROM working_memory WHERE project_hash = $1 AND agent_id = $2
-       ORDER BY importance DESC, created_at DESC`,
+       FROM working_memory
+       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default')
+       ORDER BY
+         CASE WHEN agent_id = $2 THEN 0 ELSE 1 END,
+         importance DESC,
+         created_at DESC`,
       [projectHash, safeAgent]
     );
     return res.rows;

@@ -1206,20 +1206,26 @@ async function _handleRemoteTool(
 
     switch (toolName) {
       case "zc_remember":
+        // v0.22.2 — default agent_id to ZC_AGENT_ID env (the agent's role like
+        // "developer"/"orchestrator") instead of hardcoded "default". Each
+        // agent now has its own private notebook. Fall back to "default" only
+        // when ZC_AGENT_ID isn't set (ad-hoc / non-A2A use).
+        // Agent can still explicitly pass agent_id="default" to write to the
+        // shared pool intentionally (cross-agent coordination notes).
         result = await apiCall("POST", "/api/v1/remember", {
           projectPath: PROJECT_PATH,
           key:         body["key"],
           value:       body["value"],
           importance:  body["importance"] ?? 3,
-          agentId:     body["agent_id"] ?? "default",
+          agentId:     body["agent_id"] ?? AGENT_ID,
         });
-        return { content: [{ type: "text", text: `Remembered. Working memory: ${result["count"]}/${result["max"]} facts` }] };
+        return { content: [{ type: "text", text: `Remembered under agent_id='${body["agent_id"] ?? AGENT_ID}'. Working memory: ${result["count"]}/${result["max"]} facts` }] };
 
       case "zc_forget":
         result = await apiCall("POST", "/api/v1/forget", {
           projectPath: PROJECT_PATH,
           key:         body["key"],
-          agentId:     body["agent_id"] ?? "default",
+          agentId:     body["agent_id"] ?? AGENT_ID,  // v0.22.2 — match per-agent default
         });
         return { content: [{ type: "text", text: (result["deleted"] ? `Forgotten: '${body["key"]}' removed.` : `Key '${body["key"]}' was not in working memory.`) }] };
 
@@ -1229,7 +1235,12 @@ async function _handleRemoteTool(
         // by start-agents.ps1 per agent). Falls back to ZC_AGENT_ID if role
         // wasn't pinned.
         const agentRole = process.env.ZC_AGENT_ROLE || process.env.ZC_AGENT_ID || "default";
-        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(String(body["agent_id"] ?? "default"))}&role=${encodeURIComponent(agentRole)}`);
+        // v0.22.2 — agent_id defaults to ZC_AGENT_ID (matches the per-agent
+        // namespacing used by zc_remember). The PG store's recall() returns
+        // UNION of (this agent's private facts) + (shared "default" pool) so
+        // the agent sees their own notes AND project-wide coordination notes.
+        const recallAgentId = String(body["agent_id"] ?? AGENT_ID);
+        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}`);
         const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number }> ?? [];
         const skills    = recallRes["skills"] as Array<{ skill_id: string; name: string; description: string }> ?? [];
         const max       = recallRes["max"] as number ?? 50;
@@ -1240,15 +1251,24 @@ async function _handleRemoteTool(
         // v0.21.0 — append skill inventory so the agent sees what's available
         // every time they recall context. Skip the section if no skills match
         // the role (avoids noise for projects that haven't authored any skills).
+        // v0.22.2 — dedup per session: full block once, then compact placeholder.
+        // Saves ~640 tokens × every-recall-after-first when role doesn't change.
         if (skills.length > 0) {
           lines.push("");
-          lines.push(`## Skills available for role '${agentRole}' (${skills.length})`);
-          lines.push("");
-          for (const s of skills) lines.push(`  • \`${s.skill_id}\` — ${(s.description ?? "").slice(0, 120)}`);
-          lines.push("");
-          lines.push("**Reminder:** before broadcasting MERGE on a non-trivial task, call");
-          lines.push("`zc_record_skill_outcome` with the closest skill_id, your status,");
-          lines.push("and a 0.0-1.0 outcome_score. This is what makes the system improve over time.");
+          const skillsForceFullBlock = process.env.ZC_SKILLS_FORCE_FULL === "1";
+          if (skillsForceFullBlock || !wasSkillBlockSent(MCP_SESSION_ID, agentRole)) {
+            lines.push(`## Skills available for role '${agentRole}' (${skills.length})`);
+            lines.push("");
+            for (const s of skills) lines.push(`  • \`${s.skill_id}\` — ${(s.description ?? "").slice(0, 120)}`);
+            lines.push("");
+            lines.push("**Reminder:** before broadcasting MERGE on a non-trivial task, call");
+            lines.push("`zc_record_skill_outcome` with the closest skill_id, your status,");
+            lines.push("and a 0.0-1.0 outcome_score. This is what makes the system improve over time.");
+            markSkillBlockSent(MCP_SESSION_ID, agentRole);
+          } else {
+            lines.push(`## Skills (${skills.length} available for role '${agentRole}' — unchanged from earlier in session)`);
+            lines.push("`zc_skill_show({name:\"<id>\"})` for any skill body. Set ZC_SKILLS_FORCE_FULL=1 to re-emit full inventory.");
+          }
         }
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
@@ -2032,21 +2052,54 @@ async function dispatchToolCall(
 
       case "zc_file_summary": {
         const { path: summaryPath } = args as { path: string };
-        const sum = getFileSummary(PROJECT_PATH, summaryPath);
+        let sum = getFileSummary(PROJECT_PATH, summaryPath);
+
+        // v0.22.2 — auto-index on miss. Previously returned "[not indexed]"
+        // and told the agent to run zc_index_project (heavyweight, indexes
+        // the whole project). Now we lazily index just THIS file via the
+        // existing summarizer pipeline (AST first, then LLM fallback). Cost:
+        // 1 LLM call (~$0.001) + 5–15s latency. Benefit: future Reads of
+        // this file in any session return the cached summary, saving ~95%
+        // tokens. Pairs with the v0.22.2 PreRead hook's summary-redirect
+        // behavior: when the hook blocks an un-indexed Read, agent calls
+        // zc_file_summary, which now creates the summary and returns it
+        // in one step. No more "build the index first" friction.
+        if (!sum) {
+          try {
+            const { summarizeAndIndexSingleFile } = await import("./harness.js");
+            const built = await summarizeAndIndexSingleFile(PROJECT_PATH, summaryPath);
+            if (built) sum = getFileSummary(PROJECT_PATH, summaryPath);
+          } catch (e) {
+            return {
+              content: [{
+                type: "text",
+                text: `[indexing failed] ${summaryPath}\n` +
+                      `Error: ${(e as Error).message}\n` +
+                      `Try Read with force_full_read:true to read the raw file.`,
+              }],
+              isError: true,
+            };
+          }
+        }
+
         if (!sum) {
           return {
             content: [{
               type: "text",
-              text: `[not indexed] ${summaryPath}\nRun zc_index_project first, or Read the file directly if you're about to edit it.`,
+              text: `[not indexed AND auto-index produced no summary] ${summaryPath}\n` +
+                    `The file may be empty, binary, or unreadable. Try Read with force_full_read:true.`,
             }],
           };
         }
         const staleFlag = sum.stale ? " [STALE — file newer than index]" : "";
+        const builtNote = sum.indexedAt && (Date.now() - new Date(sum.indexedAt).getTime() < 30_000)
+          ? "\n\n_(just built — first time this file was summarized)_"
+          : "";
         return {
           content: [{
             type: "text",
             text: `## ${sum.source}${staleFlag}\n` +
-                  `**indexed:** ${sum.indexedAt}\n\n` +
+                  `**indexed:** ${sum.indexedAt}${builtNote}\n\n` +
                   `### L0 (purpose)\n${sum.l0 || "(empty)"}\n\n` +
                   `### L1 (detail)\n${sum.l1 || "(empty)"}`,
           }],
@@ -3481,6 +3534,27 @@ interface CurrentSkillContext {
   tool_call_ids:   string[];
 }
 let currentSkillContext: CurrentSkillContext | null = null;
+
+/**
+ * v0.22.2 — Per-session skill-block dedup. zc_recall_context appends a "##
+ * Skills available for role 'X'" section every call. The skill block is
+ * stable within a session (agent's role doesn't change mid-session). Emitting
+ * the full block on every recall costs ~640 tokens × every-recall-after-first
+ * for no benefit. This Set tracks which (sessionId, role) pairs have already
+ * received the full block; subsequent recalls in the same session emit a
+ * compact "(skills unchanged from earlier in session)" placeholder.
+ *
+ * Reset on process restart (each MCP server instance starts fresh). Bypassed
+ * by setting ZC_SKILLS_FORCE_FULL=1 (operator can force full block on every
+ * recall for debugging).
+ */
+const skillBlockSentSessions: Set<string> = new Set();
+function markSkillBlockSent(sessionId: string, role: string): void {
+  skillBlockSentSessions.add(`${sessionId}::${role}`);
+}
+function wasSkillBlockSent(sessionId: string, role: string): boolean {
+  return skillBlockSentSessions.has(`${sessionId}::${role}`);
+}
 
 /** Classify an error for telemetry's error_class taxonomy. */
 /** v0.18.1 — bump the minor segment of a semver-ish string. Used by global skill promotion. */

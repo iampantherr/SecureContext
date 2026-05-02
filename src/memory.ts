@@ -314,12 +314,27 @@ export function recallWorkingMemory(
   ensureAgentIdColumn(db);
   const safeAgent = sanitize(agentId, 64);
 
-  const rows = db.prepare(`
-    SELECT key, value, importance, agent_id, created_at
-    FROM working_memory
-    WHERE agent_id = ?
-    ORDER BY importance DESC, created_at DESC
-  `).all(safeAgent) as unknown as MemoryFact[];
+  // v0.22.2 — per-agent namespacing with shared pool. Mirrors the PG path
+  // in store-postgres.ts. See that file's recall() for full rationale.
+  let rows: MemoryFact[];
+  if (safeAgent === "default") {
+    rows = db.prepare(`
+      SELECT key, value, importance, agent_id, created_at
+      FROM working_memory
+      WHERE agent_id = 'default'
+      ORDER BY importance DESC, created_at DESC
+    `).all() as unknown as MemoryFact[];
+  } else {
+    rows = db.prepare(`
+      SELECT key, value, importance, agent_id, created_at
+      FROM working_memory
+      WHERE agent_id = ? OR agent_id = 'default'
+      ORDER BY
+        CASE WHEN agent_id = ? THEN 0 ELSE 1 END,
+        importance DESC,
+        created_at DESC
+    `).all(safeAgent, safeAgent) as unknown as MemoryFact[];
+  }
 
   db.close();
   return rows;

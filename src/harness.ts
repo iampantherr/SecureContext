@@ -289,6 +289,82 @@ export async function indexProject(
 // ─── File Summary Accessor ────────────────────────────────────────────────────
 
 /**
+ * v0.22.2 — Lazy single-file indexer. Called by zc_file_summary on a miss
+ * to build a summary for one file without bulk-indexing the whole project.
+ * Mirrors the per-file logic inside indexProject() but for a single path:
+ * AST extraction first (deterministic, no LLM), falls back to semantic LLM
+ * summary, falls back to truncation.
+ *
+ * Returns true if file was successfully summarized + indexed; false on any
+ * failure (file missing, unreadable, all summarizer paths errored).
+ *
+ * USED BY: zc_file_summary handler when the file isn't in source_meta yet.
+ * Combined with the v0.22.2 PreRead hook's summary-redirect, this enables
+ * the "build the index as you work" flow — every Read of an un-indexed file
+ * triggers a redirect to zc_file_summary, which now creates the summary
+ * lazily and returns it in one step.
+ */
+export async function summarizeAndIndexSingleFile(
+  projectPath: string,
+  relPath: string,
+): Promise<boolean> {
+  const isAbs = relPath.startsWith("/") || /^[a-zA-Z]:/.test(relPath);
+  const fullPath = isAbs ? relPath : join(projectPath, relPath);
+  let content = "";
+  try {
+    if (!existsSync(fullPath)) return false;
+    const st = statSync(fullPath);
+    if (!st.isFile() || st.size === 0) return false;
+    const MAX_BYTES = 1_000_000;
+    if (st.size > MAX_BYTES) return false;
+    content = readFileSync(fullPath, "utf8");
+  } catch {
+    return false;
+  }
+
+  let l0 = "";
+  let l1 = "";
+  let provenance: "EXTRACTED" | "INFERRED" | "AMBIGUOUS" = "INFERRED";
+  let summarySource: "ast" | "semantic" | "truncation" = "truncation";
+
+  try {
+    const lang = detectLanguage(relPath);
+    if (lang) {
+      const astResult = await extractAst(content, lang);
+      if (astResult && astResult.stats.exportCount + astResult.stats.classCount + astResult.stats.functionCount > 0) {
+        l0 = astResult.l0;
+        l1 = astResult.l1;
+        provenance = "EXTRACTED";
+        summarySource = "ast";
+      }
+    }
+  } catch { /* fall through to LLM */ }
+
+  if (!l0 && !l1) {
+    try {
+      const sum = await summarizeFile(relPath, content);
+      l0 = sum.l0;
+      l1 = sum.l1;
+      summarySource = sum.source === "semantic" ? "semantic" : "truncation";
+      provenance = summarySource === "semantic" ? "INFERRED" : "AMBIGUOUS";
+    } catch {
+      l0 = content.slice(0, Config.TIER_L0_CHARS).trim();
+      l1 = content.slice(0, Config.TIER_L1_CHARS).trim();
+      summarySource = "truncation";
+      provenance = "AMBIGUOUS";
+    }
+  }
+
+  try {
+    const source = `file:${relPath}`;
+    indexContent(projectPath, content, source, "internal", "internal", l0, l1, provenance);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Direct L0/L1 accessor for a single file path. The primary Tier-1 verb —
  * agents call this for "check/review/what-does-X-do" questions instead of Read.
  *
