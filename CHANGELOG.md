@@ -4,6 +4,28 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.4] — 2026-05-02 — Fix: ZC_SUMMARY_REDIRECT default-ON in start-agents.ps1
+
+After v0.22.2 shipped, observed live: `zc_file_summary` calls stayed at 0
+across many real agent sessions. Root cause: the propagation in
+A2A_dispatcher/start-agents.ps1 was conditional on the operator's shell
+having `$env:ZC_SUMMARY_REDIRECT='1'` set BEFORE running the script. Most
+operators don't set arbitrary env vars in their shell, so the conditional
+silently no-op'd → flag never reached the launcher's env block → PreRead
+hook (which inherits the launcher's process env, not settings.json's MCP
+nested env) never saw the flag → Stage 2 redirect never fired → agents
+went straight to raw-file Reads, exactly the behavior v0.22.2 was meant
+to prevent.
+
+**Fix**: start-agents.ps1 now defaults `ZC_SUMMARY_REDIRECT='1'` if not
+explicitly set in operator's shell. To disable, operators can set
+`ZC_SUMMARY_REDIRECT=0` explicitly. Both orchestrator + worker launcher
+blocks updated.
+
+**Migration**: existing agent sessions need to be respawned to pick up the
+fix (their launcher files were generated before the patch and don't
+contain the env var line). Future spawns work automatically.
+
 ## [0.22.3] — 2026-05-02 — Hook fixes from first real-project use of v0.22.2
 
 Two hook bugs surfaced within minutes of v0.22.2 going live on the operator's
