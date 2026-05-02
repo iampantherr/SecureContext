@@ -4,6 +4,48 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.3] — 2026-05-02 — Hook fixes from first real-project use of v0.22.2
+
+Two hook bugs surfaced within minutes of v0.22.2 going live on the operator's
+real project. Both fixed; agents can now make forward progress without
+getting stuck in dedup loops or seeing schema-validation errors.
+
+### Bugs fixed
+
+- **PreRead dedup blocked partial-range reads** (`hooks/preread-dedup.mjs`).
+  v0.22.2 added `force_full_read:true` as a dedup bypass, but missed adding
+  `offset/limit` to the same bypass. Result: when an agent reads a large file
+  in chunks via offset/limit, the second chunk onwards gets dedup-blocked
+  ("file was already Read in this session"). Discovered live: orchestrator
+  on A2A_communication tried to chunk through a 65KB migration file and
+  looped on the dedup error. Fix: dedup bypass condition now reads
+  `!forceFullRead && !partialRead` instead of just `!forceFullRead`.
+  Hint message also updated to mention offset/limit as a bypass.
+
+- **PostBash hook failed schema validation** (`hooks/postbash-capture.mjs`).
+  The hook tried to use `{decision:"modify", modifiedOutput:...}` to inject
+  a head/tail summary in place of long bash outputs, but Claude Code's
+  current PostToolUse hook schema rejects that shape with
+  `Hook JSON output validation failed: (root): Invalid input`. Fix: the
+  hook now archives the bash output silently (still FTS-searchable via
+  `zc_search`) and exits 0 without any modify-output JSON. The
+  auto-replace-with-summary UX is sacrificed for agent reliability —
+  agent sees raw output, retrieves summaries via search when needed.
+
+### Why these matter
+
+v0.22.2 enforced the notebook model. The PreRead bug was masking it — agents
+appeared "stuck" trying to import migration data, when the underlying issue
+was just dedup being too aggressive. The PostBash bug was creating noise on
+every long bash command. Both fixed within minutes of discovery, and the
+v0.22.2 behaviors (Read→Summary, per-agent namespacing) keep working through
+the patch.
+
+### No version bump in core source code
+
+Only the `hooks/` files changed (plus version metadata). The dist/server.js
+behavior from v0.22.2 is unchanged.
+
 ## [0.22.2] — 2026-05-02 — Agent Notebook Model: enforced per-agent + Read→Summary
 
 The big one. Closes the behavioral gap that's been in the system since v0.10.0:

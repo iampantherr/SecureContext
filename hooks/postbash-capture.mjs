@@ -52,21 +52,16 @@ try {
   const scBase = `file://${scPath.replace(/\\/g, "/")}`;
   const { captureToolOutput } = await import(`${scBase}/harness.js`);
 
-  const cap = captureToolOutput(projectPath, command, stdout, exit);
-
-  // Tell Claude Code to replace the tool output with our summary.
-  // Different Claude Code versions use slightly different hook reply shapes;
-  // we emit the most compatible form: a decision with updated content.
-  const hint =
-    `[zc-ctx harness] Captured ${cap.lineCount} lines (exit ${cap.exitCode}, hash ${cap.hash.slice(0,12)}).\n` +
-    `Full output searchable: zc_search(["${command.replace(/"/g, "'")}"]) or source='${cap.fullRef}'.\n\n` +
-    `## Summary (head + tail)\n${cap.summary}`;
-
-  process.stdout.write(JSON.stringify({
-    continue: true,
-    decision: "modify",
-    modifiedOutput: hint,
-  }));
+  // Side-effect only: archive the bash output into PG/SQLite so it's
+  // FTS-searchable via zc_search. We do NOT try to modify the agent's
+  // tool output — Claude Code's current PostToolUse hook schema rejects
+  // {decision:"modify", modifiedOutput:...} with "Hook JSON output
+  // validation failed: (root): Invalid input". Discovered live during
+  // A2A_communication session.
+  // The original UX (auto-replace with summary) is sacrificed in favor
+  // of agent reliability — the archive still happens, agent retrieves
+  // via zc_search when needed.
+  captureToolOutput(projectPath, command, stdout, exit);
   process.exit(0);
 } catch {
   process.exit(0);
