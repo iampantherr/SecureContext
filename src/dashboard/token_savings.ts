@@ -93,6 +93,14 @@ export interface SavingsSummary {
   /** "high" / "medium" / "low" — heuristic on call count + tool diversity */
   confidence:             "low" | "medium" | "high";
   caveats:                string[];
+  /** v0.22.5 — PreRead summary intercepts (Read of indexed file → L0/L1 summary). */
+  read_redirects?: {
+    count:               number;
+    full_file_tokens:    number;  // what would have been Read raw
+    summary_tokens:      number;  // what was actually returned (much smaller)
+    saved_tokens:        number;  // full - summary
+    saved_cost_usd:      number;
+  };
 }
 
 /**
@@ -155,6 +163,11 @@ export async function fetchToolUsage(
       cost_usd: string;
       honest_native_tokens: string;
     }>(
+      // v0.22.2 fix: cast multiplier params explicitly to NUMERIC.
+      // Without ::numeric, PG infers param type from usage and treats them as
+      // INTEGER (since output_tokens is INTEGER). Then a float like 1.2 fails:
+      // "invalid input syntax for type integer: '1.2'". Discovered live on
+      // dashboard after v0.22.2 deploy.
       `SELECT tool_name,
               COUNT(*)::text         AS call_count,
               COALESCE(SUM(input_tokens),  0)::text AS input_tokens,
@@ -162,18 +175,18 @@ export async function fetchToolUsage(
               COALESCE(SUM(cost_usd),      0)::text AS cost_usd,
               COALESCE(SUM(
                 CASE
-                  WHEN tool_name = 'zc_recall_context' AND output_tokens < $4
-                    THEN output_tokens * $5
+                  WHEN tool_name = 'zc_recall_context' AND output_tokens < $4::int
+                    THEN (output_tokens::numeric * $5::numeric)::int
                   WHEN tool_name = 'zc_recall_context'
-                    THEN output_tokens * $6
+                    THEN (output_tokens::numeric * $6::numeric)::int
                   WHEN tool_name IN ('zc_search', 'zc_search_global', 'zc_batch')
-                    THEN output_tokens * $7
+                    THEN (output_tokens::numeric * $7::numeric)::int
                   WHEN tool_name = 'zc_file_summary'
-                    THEN output_tokens * $8
+                    THEN (output_tokens::numeric * $8::numeric)::int
                   WHEN tool_name = 'zc_check'
-                    THEN output_tokens * $9
+                    THEN (output_tokens::numeric * $9::numeric)::int
                   WHEN tool_name = 'zc_fetch'
-                    THEN output_tokens * $10
+                    THEN (output_tokens::numeric * $10::numeric)::int
                   ELSE 0
                 END
               ), 0)::text AS honest_native_tokens
@@ -246,12 +259,54 @@ export async function computeSavings(
     });
   }
 
+  // v0.22.5 — also pull PreRead summary-intercept savings from read_redirects_pg.
+  // Hooks fire-and-forget POST to /api/v1/telemetry/read-redirect after every
+  // successful redirect; rows accumulate the (full_file_tokens, summary_tokens,
+  // saved_tokens) per file. Each row is ~5000-token saving on average. Without
+  // this query the dashboard severely underrepresents real savings — the L0/L1
+  // intercept is the highest-ROI mechanism in the system.
+  let read_redirects: SavingsSummary["read_redirects"] | undefined;
+  try {
+    const rr = await withClient(async (c) => {
+      const res = await c.query<{ n: string; full: string; summ: string; saved: string }>(
+        `SELECT COUNT(*)::text AS n,
+                COALESCE(SUM(full_file_tokens), 0)::text AS full,
+                COALESCE(SUM(summary_tokens),   0)::text AS summ,
+                COALESCE(SUM(saved_tokens),     0)::text AS saved
+           FROM read_redirects_pg
+          WHERE project_hash = $1
+            AND ts >= $2::timestamptz
+            AND ts <  $3::timestamptz`,
+        [projectHash, sinceIso, untilIso],
+      );
+      return res.rows[0];
+    });
+    if (rr) {
+      const count = parseInt(rr.n, 10);
+      const full  = parseInt(rr.full, 10);
+      const summ  = parseInt(rr.summ, 10);
+      const saved = parseInt(rr.saved, 10);
+      if (count > 0) {
+        read_redirects = {
+          count,
+          full_file_tokens: full,
+          summary_tokens:   summ,
+          saved_tokens:     saved,
+          saved_cost_usd:   saved * cost_per_token,
+        };
+        // Roll into totals so headline numbers reflect TRUE savings
+        total_actual_tokens += summ;
+        total_native        += full;
+      }
+    }
+  } catch { /* no read_redirects table or PG unreachable — skip */ }
+
   const total_saved = Math.max(0, total_native - total_actual_tokens);
   const reduction   = total_native > 0 ? (total_saved / total_native) * 100 : 0;
 
   // Confidence heuristic: more calls + more tool diversity → higher confidence
-  const totalCalls = per_tool.reduce((a, t) => a + t.call_count, 0);
-  const distinctTools = per_tool.length;
+  const totalCalls = per_tool.reduce((a, t) => a + t.call_count, 0) + (read_redirects?.count ?? 0);
+  const distinctTools = per_tool.length + (read_redirects ? 1 : 0);
   let confidence: SavingsSummary["confidence"] = "low";
   if (totalCalls >= 50 && distinctTools >= 3)      confidence = "high";
   else if (totalCalls >= 15 && distinctTools >= 2) confidence = "medium";
@@ -277,6 +332,7 @@ export async function computeSavings(
     reduction_pct:          Math.round(reduction * 10) / 10,
     confidence,
     caveats,
+    read_redirects,
   };
 }
 
@@ -344,10 +400,38 @@ export function renderSavingsHtml(summary: SavingsSummary, projectName: string |
         </thead>
         <tbody>${rows}</tbody>
       </table>
+      ${summary.read_redirects ? `
+      <div class="savings-redirects" style="margin-top:16px; padding:12px; border:1px solid #334155; border-radius:6px; background:#0f172a">
+        <div style="font-weight:600; margin-bottom:8px; color:#a78bfa">📄 PreRead summary intercepts (v0.22.5)</div>
+        <div style="font-size:0.85rem; color:#94a3b8; margin-bottom:8px">
+          When agents call <code>Read</code> on an indexed file, the PreRead hook returns the L0/L1 summary instead.
+          ~95% token cut per file. Tracked separately so the savings panel reflects real wins.
+        </div>
+        <div class="savings-totals" style="display:grid; grid-template-columns:repeat(4, 1fr); gap:10px">
+          <div class="savings-tile">
+            <div class="savings-tile-num">${fmt(summary.read_redirects.count)}</div>
+            <div class="savings-tile-label">redirects</div>
+          </div>
+          <div class="savings-tile">
+            <div class="savings-tile-num">${fmt(summary.read_redirects.full_file_tokens)}</div>
+            <div class="savings-tile-label">would-have-Read tokens</div>
+          </div>
+          <div class="savings-tile">
+            <div class="savings-tile-num">${fmt(summary.read_redirects.summary_tokens)}</div>
+            <div class="savings-tile-label">summary tokens delivered</div>
+          </div>
+          <div class="savings-tile">
+            <div class="savings-tile-num"><strong>${fmt(summary.read_redirects.saved_tokens)}</strong></div>
+            <div class="savings-tile-label">saved (${fmtCost(summary.read_redirects.saved_cost_usd)})</div>
+          </div>
+        </div>
+      </div>
+      ` : ""}
       <details class="savings-methodology">
         <summary>How this is computed (caveats + assumptions)</summary>
         <ul>
           ${summary.caveats.map((c) => `<li>${c}</li>`).join("")}
+          ${summary.read_redirects ? `<li>v0.22.5 — PreRead summary intercepts: full_file_tokens estimated as file_size_bytes ÷ 4 (chars→tokens approximation); summary_tokens from the L0+L1 response length. saved = full − summary. Each redirect bypasses ~5000 raw-Read tokens on average.</li>` : ""}
         </ul>
       </details>
     </div>

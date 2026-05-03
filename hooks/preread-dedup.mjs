@@ -148,20 +148,56 @@ try {
       const staleHint = summary.stale
         ? "  (⚠️ summary may be stale — file modified after indexing)\n"
         : "";
+      const summaryText = `\n## L0 (purpose, 1 line)\n${summary.l0 || "(no L0)"}\n\n## L1 (detail, ~5 lines)\n${summary.l1 || "(no L1)"}\n`;
       const replacement =
         `[zc-ctx L0/L1 SUMMARY — file body NOT loaded]\n\n` +
         `Source: ${rawPath}\n` +
         `Indexed: ${summary.indexedAt}\n` +
         staleHint +
-        `\n## L0 (purpose, 1 line)\n${summary.l0 || "(no L0)"}\n\n` +
-        `## L1 (detail, ~5 lines)\n${summary.l1 || "(no L1)"}\n\n` +
-        `─────────────────────────────────────────────────────────────────\n` +
+        summaryText +
+        `\n─────────────────────────────────────────────────────────────────\n` +
         `If this summary answers your question, proceed.\n\n` +
         `If you need the FULL file content (e.g. to Edit/Write it), retry Read with:\n` +
         `  Read({ file_path: "${rawPath}", force_full_read: true })\n` +
         `  OR pass offset/limit to read a specific range:\n` +
         `  Read({ file_path: "${rawPath}", offset: 1, limit: 200 })\n\n` +
         `(This redirect saves ~95% of Read tokens. Set ZC_SUMMARY_REDIRECT=0 to disable globally.)`;
+
+      // v0.22.5 — fire-and-forget telemetry POST so dashboard reflects the
+      // savings. Without this, every redirect saves real tokens but the
+      // dashboard's Token Savings panel never knows. Estimates full-file
+      // tokens via the file's on-disk byte size (chars ÷ 4 ≈ tokens),
+      // summary tokens via the response text length. Best-effort: never
+      // blocks the redirect even on POST failure.
+      try {
+        const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
+        const apiKey = process.env.ZC_API_KEY ?? "";
+        if (apiUrl) {
+          let fileSize = 0;
+          try {
+            const { statSync } = await import("node:fs");
+            const { join } = await import("node:path");
+            const isAbs = rawPath.startsWith("/") || /^[a-zA-Z]:/.test(rawPath);
+            const full = isAbs ? rawPath : join(projectPath, rawPath);
+            fileSize = statSync(full).size;
+          } catch { /* file may be in indexed-but-disk-removed state; size 0 */ }
+          const fullFileTokens = Math.ceil(fileSize / 4);
+          const summaryTokens  = Math.ceil(summaryText.length / 4);
+          const agentId = process.env.ZC_AGENT_ID || "default";
+          // Fire-and-forget: don't await
+          fetch(`${apiUrl}/api/v1/telemetry/read-redirect`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+            },
+            body: JSON.stringify({
+              projectPath, agentId, filePath: rawPath, fullFileTokens, summaryTokens,
+            }),
+          }).catch(() => { /* fire-and-forget */ });
+        }
+      } catch { /* never break the redirect */ }
+
       process.stdout.write(JSON.stringify({
         continue: false,
         decision: "block",

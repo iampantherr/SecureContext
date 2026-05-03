@@ -1432,6 +1432,45 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.22.5 — record a PreRead summary intercept event. The hook calls this
+  // fire-and-forget after returning an L0/L1 summary instead of a full file.
+  // Without this, the savings are real but invisible to the dashboard
+  // (hooks don't write to tool_calls_pg). With this: every successful
+  // intercept lands in read_redirects_pg and feeds into the savings calc.
+  // Body shape: { projectPath, agentId, filePath, fullFileTokens, summaryTokens }
+  app.post("/api/v1/telemetry/read-redirect", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp        = validateProjectPath(b["projectPath"]);
+      const agentId   = typeof b["agentId"]   === "string" ? b["agentId"].slice(0, 64)  : "default";
+      const filePath  = typeof b["filePath"]  === "string" ? b["filePath"].slice(0, 1024) : "";
+      const fullFile  = Number(b["fullFileTokens"] ?? 0);
+      const summary   = Number(b["summaryTokens"]  ?? 0);
+      if (!filePath || !Number.isFinite(fullFile) || !Number.isFinite(summary)) {
+        return reply.status(400).send({ error: "filePath, fullFileTokens, summaryTokens required" });
+      }
+      const { createHash } = await import("node:crypto");
+      const { realpathSync } = await import("node:fs");
+      let normalized = pp;
+      try { normalized = realpathSync(pp); } catch { /* use raw */ }
+      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      const { withClient } = await import("./pg_pool.js");
+      await withClient(async (c) => {
+        await c.query(
+          `INSERT INTO read_redirects_pg
+             (project_hash, agent_id, file_path, full_file_tokens, summary_tokens)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [projectHash, agentId, filePath, Math.max(0, Math.floor(fullFile)), Math.max(0, Math.floor(summary))]
+        );
+      });
+      return { ok: true };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      // Don't 500 — hook is fire-and-forget, must not break agent flow
+      return { ok: false, error: (e as Error).message };
+    }
+  });
+
   // ── Graceful shutdown ──────────────────────────────────────────────────────
   const shutdown = async () => {
     await app.close();

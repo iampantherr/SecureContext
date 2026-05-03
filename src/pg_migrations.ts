@@ -557,6 +557,28 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 17,
+    description: "v0.22.5: read_redirects_pg — track PreRead hook L0/L1 summary intercepts so dashboard reflects the real token savings (every successful redirect saves ~95% on that file's Read tokens, but hooks don't write to tool_calls_pg so this was invisible to the dashboard prior to v0.22.5)",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS read_redirects_pg (
+          id                  BIGSERIAL PRIMARY KEY,
+          project_hash        TEXT NOT NULL,
+          agent_id            TEXT NOT NULL,
+          file_path           TEXT NOT NULL,
+          full_file_tokens    INTEGER NOT NULL,
+          summary_tokens      INTEGER NOT NULL,
+          saved_tokens        INTEGER GENERATED ALWAYS AS (full_file_tokens - summary_tokens) STORED,
+          ts                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_rr_pg_project_ts ON read_redirects_pg(project_hash, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_rr_pg_agent_ts ON read_redirects_pg(agent_id, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_rr_pg_project_agent_ts ON read_redirects_pg(project_hash, agent_id, ts DESC)`);
+    },
+  },
+
 ];
 
 /**

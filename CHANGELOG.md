@@ -4,6 +4,56 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.5] — 2026-05-02 — Track PreRead summary intercepts in dashboard savings
+
+**The big one for visibility.** Every `Read` of an indexed file is intercepted
+by the v0.22.2 PreRead hook and replaced with the L0/L1 summary. Each
+intercept saves ~95% of the file's Read tokens — but **the dashboard didn't
+know about any of them**, because hooks run in separate Claude CLI processes
+and don't write to `tool_calls_pg`. Operators saw `zc_file_summary` calls
+stuck at 0 and concluded the system wasn't saving tokens. Reality: it was
+saving massively, just invisibly.
+
+v0.22.5 makes those savings visible.
+
+### What's new
+
+- **PG migration 17**: new `read_redirects_pg` table with one row per
+  intercept (project_hash, agent_id, file_path, full_file_tokens,
+  summary_tokens, saved_tokens [GENERATED column], ts).
+- **API endpoint** `POST /api/v1/telemetry/read-redirect`: receives
+  fire-and-forget telemetry from the PreRead hook after each successful
+  L0/L1 summary serve.
+- **PreRead hook update** (`hooks/preread-dedup.mjs`): after writing the
+  summary block to stdout, fires a non-blocking `fetch()` to the new
+  endpoint with file_size_bytes (full estimate) + summary text length.
+- **Dashboard savings calc** (`src/dashboard/token_savings.ts`): pulls
+  `read_redirects_pg` aggregates and rolls them into the headline totals
+  (`total_saved_tokens`, `reduction_pct`). Adds new `read_redirects`
+  field to `SavingsSummary` shape.
+- **Dashboard UI**: new "📄 PreRead summary intercepts" panel in the
+  Token Savings card showing redirect count + would-have-Read tokens +
+  summary tokens delivered + total saved.
+
+### Verified live
+
+Smoke-tested end-to-end after deploy: POST returns `{ok:true}`, row
+lands in `read_redirects_pg`, GENERATED column computes
+`saved_tokens = full_file_tokens - summary_tokens` correctly.
+
+### Why this matters
+
+Without v0.22.5, the dashboard's savings number was a fraction of reality.
+With v0.22.5, every redirect adds visible savings — operators can finally
+see the L0/L1 system pay for itself.
+
+### Activation
+
+The hook is fire-and-forget, so deployment is zero-risk. Existing agent
+sessions don't need to be respawned — the hook file at
+`~/.claude/hooks/preread-dedup.mjs` is read by Claude CLI on every Read
+invocation, so the new POST starts on the next file Read by any agent.
+
 ## [0.22.4] — 2026-05-02 — Fix: ZC_SUMMARY_REDIRECT default-ON in start-agents.ps1
 
 After v0.22.2 shipped, observed live: `zc_file_summary` calls stayed at 0
