@@ -2052,7 +2052,8 @@ async function dispatchToolCall(
 
       case "zc_file_summary": {
         const { path: summaryPath } = args as { path: string };
-        let sum = getFileSummary(PROJECT_PATH, summaryPath);
+        // v0.22.8 — getFileSummary is now async (PG-first read; SQLite fallback)
+        let sum = await getFileSummary(PROJECT_PATH, summaryPath);
 
         // v0.22.2 — auto-index on miss. Previously returned "[not indexed]"
         // and told the agent to run zc_index_project (heavyweight, indexes
@@ -2068,7 +2069,7 @@ async function dispatchToolCall(
           try {
             const { summarizeAndIndexSingleFile } = await import("./harness.js");
             const built = await summarizeAndIndexSingleFile(PROJECT_PATH, summaryPath);
-            if (built) sum = getFileSummary(PROJECT_PATH, summaryPath);
+            if (built) sum = await getFileSummary(PROJECT_PATH, summaryPath);
           } catch (e) {
             return {
               content: [{

@@ -4,6 +4,61 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.8] — 2026-05-03 — source_meta PG parity (file summaries now visible to dashboard)
+
+**Closes a long-running architectural inconsistency.** The operator's stated
+storage rule is: PG and SQLite must have feature parity, with PG preferred
+when available. `source_meta` (file-level L0/L1 summaries) was violating
+this — `indexContent()` in `src/knowledge.ts` wrote SQLite only, and the
+PG `source_meta` table was used for a *different* code path
+(session_summary + memory keys via `store-postgres.ts`). Result on this
+machine: **977 file summaries in SQLite, 33 unrelated rows in PG**, and
+the dashboard saw nothing of the actual indexed corpus.
+
+### What's new
+
+- **`harness.ts` dual-write.** `summarizeAndIndexSingleFile` now fires a
+  best-effort PG mirror after every successful SQLite write, via a new
+  `mirrorSourceMetaToPg()` helper that uses the shared `pg_pool`. UPSERTs
+  by `(project_hash, source)`. Silent on failure — SQLite remains
+  authoritative for the agent; PG is the cross-machine view.
+
+- **`harness.ts` PG-first read.** `getFileSummary()` is now async and
+  tries PG first via `getFileSummaryFromPg()`. Falls back to local
+  SQLite if PG returns null or is unreachable. Includes opportunistic
+  backfill: when SQLite has the row but PG didn't, fires a fire-and-
+  forget mirror so the next read sees PG (handles partial backfill
+  scenarios automatically).
+
+- **`server.ts` updated.** Two `getFileSummary` call sites in the
+  `zc_file_summary` handler now await the async function. No behavior
+  change for the agent.
+
+- **One-shot backfill script** at `scripts/backfill-source-meta-to-pg.mjs`.
+  Walks all `~/.claude/zc-ctx/sessions/*.db` SQLite DBs on the operator's
+  machine, copies every `file:` source_meta row into PG. Idempotent
+  (UPSERTs). Supports `--dry-run` and per-project filter. Auto-discovers
+  PG creds from settings.json.
+
+### Verified live
+
+- A2A_communication SQLite had **831 file:* source_meta rows**.
+- After backfill: PG `source_meta` for project_hash `2ad17b41f181eac0`
+  reports **831 file:** rows (up from 0).
+- Dashboard's "Summarizer activity" panel now shows the real count.
+- Future indexing dual-writes automatically — operator no longer needs
+  to re-run the backfill unless onboarding a fresh PG database.
+
+### Architectural note
+
+This is the only `source_meta`-shaped code path that was SQLite-only;
+the rest of the storage subsystems (`tool_calls`, `outcomes`,
+`skill_runs`, `skills`, `read_redirects`, `summarizer_events`) already
+mirror to PG correctly via `storage_dual.ts` or telemetry POSTs. The
+PG-first storage rule is now uniformly applied. See
+`feedback_pg_first_storage.md` in operator memory for the canonical
+rule + anti-patterns to detect on review.
+
 ## [0.22.7] — 2026-05-03 — Summarizer visibility + dashboard inconsistency fixes
 
 Operator was completely blind to the summarizer (the LLM that generates

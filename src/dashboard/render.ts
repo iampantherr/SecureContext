@@ -1205,8 +1205,8 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
 //   3. Recent successes + recent failures (with full error messages)
 
 export interface SummarizerHealthData {
-  total_file_summaries: number;       // distinct sources seen in summarizer_events_pg
-  source_meta_pg_file_count?: number; // file: rows in PG source_meta (usually 0; file summaries live in agent SQLite)
+  total_file_summaries: number;          // file: rows in PG source_meta (authoritative since v0.22.8 dual-write + backfill)
+  distinct_summarized_v0227?: number;    // distinct sources in summarizer_events_pg since v0.22.7 (telemetry-tracked subset)
   events_24h: Array<{
     status:         string;
     summary_source: string;
@@ -1240,18 +1240,19 @@ export function renderSummarizerHealthFragment(
     ? (nameMap.get(projectFilter) ?? `project:${projectFilter.slice(0, 8)}…`)
     : "all projects";
 
+  const v0227Tracked = data.distinct_summarized_v0227 ?? 0;
   const headline = `<div class="summarizer-stats">
-    <div class="stat-tile" title="Counted from summarizer_events_pg (telemetry started v0.22.7). For files indexed before that, see the agent's local SQLite source_meta — those don't sync to PG and are invisible from this dashboard.">
+    <div class="stat-tile" title="Authoritative count from PG source_meta. Since v0.22.8 every file summary the agent creates is dual-written to PG + SQLite. Pre-v0.22.8 summaries were backfilled by scripts/backfill-source-meta-to-pg.mjs.">
       <div class="stat-num">${fmt(data.total_file_summaries)}</div>
-      <div class="stat-label">distinct files summarized (since v0.22.7)<br><span style="font-size:0.78rem; color:#94a3b8">${escapeHtml(projectScopeLabel)}</span></div>
+      <div class="stat-label">file summaries indexed (PG source_meta)<br><span style="font-size:0.78rem; color:#94a3b8">${escapeHtml(projectScopeLabel)}</span></div>
     </div>
-    <div class="stat-tile">
-      <div class="stat-num">${fmt(totalEvents)}</div>
-      <div class="stat-label">events (last 24h)</div>
+    <div class="stat-tile" title="Subset of the above: distinct files summarized since v0.22.7 telemetry started. Useful for 'how active was the indexer recently'.">
+      <div class="stat-num" style="color:#a78bfa">${fmt(v0227Tracked)}</div>
+      <div class="stat-label">summarized since v0.22.7 (telemetry)</div>
     </div>
     <div class="stat-tile">
       <div class="stat-num" style="color:${errorCount > 0 ? "#fbbf24" : "#4ade80"}">${fmt(successCount)}</div>
-      <div class="stat-label">successful summaries (24h)</div>
+      <div class="stat-label">successful events (24h)</div>
     </div>
     <div class="stat-tile">
       <div class="stat-num" style="color:${errorCount > 0 ? "#f87171" : "#94a3b8"}">${fmt(errorCount)}</div>
@@ -1259,10 +1260,10 @@ export function renderSummarizerHealthFragment(
     </div>
   </div>
   <div class="muted" style="margin-bottom:12px; font-size:0.82rem">
-    Note: file-level L0/L1 summaries live in each agent's <strong>local SQLite</strong>
-    project DB (<code>~/.claude/zc-ctx/sessions/{project_hash}.db</code>). PG only mirrors session
-    summaries + memory keys. For pre-v0.22.7 indexing activity, look at the local DB directly.
-    The counter above grows monotonically as new files are summarized via the telemetry path.
+    File summaries live in PG (<code>source_meta</code>) and mirror to each agent's local SQLite
+    (<code>~/.claude/zc-ctx/sessions/{project_hash}.db</code>) — both backends stay in sync via the
+    v0.22.8 dual-write. Reads prefer PG. <strong>${fmt(totalEvents)}</strong> summarizer events fired
+    in the last 24h.
   </div>`;
 
   let breakdown = "";

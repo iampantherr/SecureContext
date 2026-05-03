@@ -329,28 +329,29 @@ export async function createApiServer(storeOverride?: Store) {
       : null;
     try {
       const result = await withClient(async (c) => {
-        // 1) Two counts:
-        //    - total_distinct_summarized: distinct source files seen in
-        //      summarizer_events_pg with a successful outcome. This is what
-        //      the operator ACTUALLY wants — "how many unique files has the
-        //      system summarized". Grows monotonically as new files arrive.
-        //    - source_meta_files_pg: count from source_meta table filtered
-        //      to file: scheme. Note: file-level summaries live in the
-        //      agent's LOCAL SQLite per-project DB; only session_summary
-        //      and memory keys mirror to PG source_meta. So this is usually
-        //      0 unless a project has uploaded its index. We surface it
-        //      anyway with a tooltip explanation.
+        // v0.22.8 — total_file_summaries is now the AUTHORITATIVE count
+        // from source_meta (the STATE table). After v0.22.8, the agent's
+        // every L0/L1 write dual-mirrors here, and the v0.22.8 backfill
+        // copied existing SQLite-only summaries. So this count = "files
+        // the system actually has L0/L1 summaries for." Operator policy:
+        // PG and SQLite must have feature parity; PG is preferred when
+        // available. See feedback_pg_first_storage.md.
+        //
+        // distinct_summarized_v0227 is the secondary "telemetry-tracked"
+        // count — distinct sources seen in summarizer_events_pg since
+        // v0.22.7. Useful for "how much has been summarized in the last
+        // <window>" but not for "total available." Surfaced below.
+        const totalQ = projectFilter
+          ? `SELECT COUNT(*)::text AS n FROM source_meta WHERE project_hash = $1 AND source LIKE 'file:%'`
+          : `SELECT COUNT(*)::text AS n FROM source_meta WHERE source LIKE 'file:%'`;
+        const totalR = await c.query<{ n: string }>(totalQ, projectFilter ? [projectFilter] : []);
+        const total_file_summaries = Number(totalR.rows[0]?.n ?? 0);
+
         const distinctQ = projectFilter
           ? `SELECT COUNT(DISTINCT source)::text AS n FROM summarizer_events_pg WHERE project_hash = $1 AND status IN ('ok', 'fallback_truncation')`
           : `SELECT COUNT(DISTINCT source)::text AS n FROM summarizer_events_pg WHERE status IN ('ok', 'fallback_truncation')`;
         const distinctR = await c.query<{ n: string }>(distinctQ, projectFilter ? [projectFilter] : []);
-        const total_file_summaries = Number(distinctR.rows[0]?.n ?? 0);
-
-        const smPgQ = projectFilter
-          ? `SELECT COUNT(*)::text AS n FROM source_meta WHERE project_hash = $1 AND source LIKE 'file:%'`
-          : `SELECT COUNT(*)::text AS n FROM source_meta WHERE source LIKE 'file:%'`;
-        const smPgR = await c.query<{ n: string }>(smPgQ, projectFilter ? [projectFilter] : []);
-        const source_meta_pg_file_count = Number(smPgR.rows[0]?.n ?? 0);
+        const distinct_summarized_v0227 = Number(distinctR.rows[0]?.n ?? 0);
 
         // 2) breakdown of last 24h events by status × source
         const eventQ = projectFilter
@@ -405,7 +406,7 @@ export async function createApiServer(storeOverride?: Store) {
 
         return {
           total_file_summaries,
-          source_meta_pg_file_count,
+          distinct_summarized_v0227,
           events_24h,
           recent_success: recentR.rows,
           recent_failures: failR.rows,

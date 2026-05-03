@@ -399,6 +399,12 @@ export async function summarizeAndIndexSingleFile(
   try {
     const source = `file:${relPath}`;
     indexContent(projectPath, content, source, "internal", "internal", l0, l1, provenance);
+    // v0.22.8 — PG mirror for source_meta. Operator policy: PG and SQLite
+    // must have feature parity (see feedback_pg_first_storage.md). Without
+    // this, file-level L0/L1 summaries were SQLite-only on the agent's host
+    // — invisible to the dashboard and to any cross-machine reader. Fire-
+    // and-forget so the indexer doesn't block on PG availability.
+    void mirrorSourceMetaToPg(projectPath, source, "internal", "internal", l0, l1);
     // v0.22.7 — fire summarizer-event telemetry. Best-effort (catch errors so
     // the indexer never breaks). Schema: project_hash, agent_id, source,
     // sizes, durations, model, summary_source ('ast'/'semantic'/'truncation'),
@@ -429,6 +435,95 @@ export async function summarizeAndIndexSingleFile(
       error: `indexContent failed: ${(e as Error).message}`,
     });
     return false;
+  }
+}
+
+/**
+ * v0.22.8 — PG mirror for the file-level source_meta L0/L1 summary. Required
+ * by the operator's PG-first storage rule: every SQLite write of a file
+ * summary MUST also land in PG so the dashboard + any cross-machine reader
+ * sees the same view as the agent's local SQLite.
+ *
+ * Connects to PG directly via the shared pg_pool. No HTTP indirection: the
+ * MCP server already has PG creds (after the v0.22.7 settings.json
+ * fallback in the dispatcher launchers). UPSERTs by (project_hash, source)
+ * so re-indexing the same file overwrites the row instead of duplicating.
+ *
+ * Best-effort: catches all errors silently. The agent's local SQLite is
+ * still authoritative for the agent's own reads; this mirror is for
+ * everything else (dashboard, multi-host visibility, dual-host failover).
+ */
+async function mirrorSourceMetaToPg(
+  projectPath: string,
+  source: string,
+  sourceType: "internal" | "external",
+  retentionTier: string,
+  l0: string,
+  l1: string,
+): Promise<void> {
+  if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) {
+    // No PG creds in env — local-only deployment. Don't attempt the mirror.
+    return;
+  }
+  try {
+    const { withClient } = await import("./pg_pool.js");
+    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const now = new Date().toISOString();
+    await withClient(async (c) => {
+      await c.query(
+        `INSERT INTO source_meta(project_hash, source, source_type, retention_tier, created_at, l0_summary, l1_summary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT(project_hash, source) DO UPDATE SET
+           source_type    = EXCLUDED.source_type,
+           retention_tier = EXCLUDED.retention_tier,
+           created_at     = EXCLUDED.created_at,
+           l0_summary     = EXCLUDED.l0_summary,
+           l1_summary     = EXCLUDED.l1_summary`,
+        [projectHash, source, sourceType, retentionTier, now, l0, l1],
+      );
+    });
+  } catch {
+    // Silent failure: SQLite write already succeeded. The PG mirror is
+    // best-effort. We rely on the backfill script to repair missed rows.
+  }
+}
+
+/**
+ * v0.22.8 — PG-first read for getFileSummary. Operator policy: when PG is
+ * available, the dashboard, agent, and any other reader should see the
+ * same source_meta state. SQLite is the offline-only fallback. This
+ * function is called by getFileSummary BEFORE the SQLite read; if it
+ * returns a row, we use that. SQLite is consulted only when PG returns
+ * nothing or is unreachable.
+ */
+async function getFileSummaryFromPg(
+  projectPath: string,
+  source: string,
+): Promise<{ l0: string; l1: string; created_at: string; source_type: string } | null> {
+  if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) {
+    return null;
+  }
+  try {
+    const { withClient } = await import("./pg_pool.js");
+    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    return await withClient(async (c) => {
+      const r = await c.query<{ l0_summary: string; l1_summary: string; created_at: string; source_type: string }>(
+        `SELECT l0_summary, l1_summary, created_at::text AS created_at, source_type
+           FROM source_meta WHERE project_hash = $1 AND source = $2 LIMIT 1`,
+        [projectHash, source],
+      );
+      if (r.rows.length === 0) return null;
+      const row = r.rows[0];
+      if (!row) return null;
+      return {
+        l0: row.l0_summary ?? "",
+        l1: row.l1_summary ?? "",
+        created_at: String(row.created_at ?? ""),
+        source_type: row.source_type ?? "internal",
+      };
+    });
+  } catch {
+    return null;
   }
 }
 
@@ -495,14 +590,42 @@ async function emitSummarizerEvent(
  * Returns null if the file is not indexed yet. Sets stale=true if the file
  * on disk is newer than the indexed version (hint: run indexProject or the
  * PostEdit hook will refresh it automatically).
+ *
+ * v0.22.8 — PG-first read per the operator's storage rule
+ * (feedback_pg_first_storage.md). Try PG first; fall back to local SQLite
+ * if PG returns nothing or isn't reachable. Both backends are kept in sync
+ * via the dual-write in summarizeAndIndexSingleFile + the v0.22.8 backfill.
  */
-export function getFileSummary(
+export async function getFileSummary(
   projectPath: string,
   path: string
-): FileSummary | null {
+): Promise<FileSummary | null> {
   const source = path.startsWith("file:") ? path : `file:${path}`;
-  const db = openDb(projectPath);
 
+  // Try PG first
+  const pgRow = await getFileSummaryFromPg(projectPath, source);
+  if (pgRow) {
+    let stale = false;
+    try {
+      const abs = source.replace(/^file:/, "");
+      const full = abs.startsWith("/") || /^[a-zA-Z]:/.test(abs)
+        ? abs
+        : join(projectPath, abs);
+      const st = statSync(full);
+      stale = st.mtime.toISOString() > pgRow.created_at;
+    } catch { /* file may be gone or on a different host */ }
+    return {
+      source,
+      l0:         pgRow.l0,
+      l1:         pgRow.l1,
+      indexedAt:  pgRow.created_at,
+      sourceType: pgRow.source_type,
+      stale,
+    };
+  }
+
+  // Fallback: local SQLite (also the only path on local-only deployments)
+  const db = openDb(projectPath);
   try {
     type Row = {
       source: string;
@@ -528,6 +651,12 @@ export function getFileSummary(
       const st = statSync(full);
       stale = st.mtime.toISOString() > row.created_at;
     } catch { /* file may be gone or on a different host */ }
+
+    // v0.22.8 — best-effort opportunistic backfill: when SQLite has the row
+    // but PG didn't, mirror it now so the next read sees PG. Avoids needing
+    // a separate one-shot backfill for projects where the user's existing
+    // pre-v0.22.8 SQLite store is the source of truth.
+    void mirrorSourceMetaToPg(projectPath, source, row.source_type as "internal" | "external", row.source_type, row.l0_summary ?? "", row.l1_summary ?? "");
 
     return {
       source:     row.source,
