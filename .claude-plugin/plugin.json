@@ -1,7 +1,7 @@
 {
   "name": "zc-ctx",
-  "version": "0.9.0",
-  "description": "Persistent memory, token optimization, and secure A2A multi-agent coordination for Claude Code. 19 MCP tools: RBAC session tokens (Ch.14), SHA256 broadcast hash chain (Ch.13 Biba), L0/L1/L2 tiered retrieval, credential-isolated sandbox, hybrid BM25+vector KB, MemGPT working memory, SSRF-protected fetch, and append-only broadcast channel with scrypt-hardened key. MIT license.",
+  "version": "0.22.5",
+  "description": "Secure memory & context optimization MCP plugin for Claude Code — drop-in replacement for context-mode with credential isolation, SSRF protection, MemGPT-style persistent memory, and A2A multi-agent broadcast channel. 25+ MCP tools, HMAC-chained tool_calls + outcomes, per-agent HKDF subkey isolation, Postgres RLS, work-stealing queue, self-improving skills, and Agent Notebook Model (Read→Summary redirect). MIT license.",
 
   "type": "mcp",
   "mcp": {

@@ -3,7 +3,7 @@
 > **Persistent memory, verifiable telemetry, and work-stealing coordination for multi-agent Claude Code sessions.**
 > Built on the principle: *cybersecurity into the architecture, not bolted on.* HMAC-chained audit trail, per-agent cryptographic identity, Postgres Row-Level Security, atomic work distribution, closed learning loop. Zero cloud sync. MIT license.
 
-[![Version](https://img.shields.io/badge/version-0.18.0-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.22.5-blue)](package.json)
 [![Tests](https://img.shields.io/badge/tests-786%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
@@ -251,7 +251,7 @@ Three containers come up: `securecontext-postgres` (PG + pgvector), `secureconte
 Verify:
 ```bash
 curl http://localhost:3099/health
-# {"status":"ok","version":"0.18.0","store":"postgres","ollamaAvailable":true,"searchMode":"hybrid (BM25 + vector)"}
+# {"status":"ok","version":"0.22.5","store":"postgres","ollamaAvailable":true,"searchMode":"hybrid (BM25 + vector)"}
 ```
 
 Register with Claude:
@@ -405,6 +405,16 @@ Red-team categories:
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history. Highlights from the last quarter:
 
+- **[v0.22.5](CHANGELOG.md#0225)** (2026-05-02) — **PreRead intercepts now visible in the dashboard.** Migration 17 adds `read_redirects_pg` (with a GENERATED `saved_tokens` column); the PreRead hook fires fire-and-forget telemetry on every L0/L1 redirect; the savings card surfaces a new "📄 PreRead summary intercepts" panel rolling those rows into the headline totals. Fixes the silent-savings problem where the system was saving ~95% on every Read and the dashboard couldn't see any of it.
+- **[v0.22.4](CHANGELOG.md#0224)** (2026-05-02) — Fix: `ZC_SUMMARY_REDIRECT` defaults to `1` in `start-agents.ps1` (orchestrator + worker launcher blocks). v0.22.2 had landed the redirect but the env var was conditional on operator's shell having it set, which it usually wasn't, so the redirect silently no-op'd in real-project sessions.
+- **[v0.22.3](CHANGELOG.md#0223)** (2026-05-02) — Hook fixes from first real-project use of v0.22.2: PreRead dedup now bypasses for `offset/limit` partial reads (was looping on chunked Reads of large files); PostBash hook stops emitting `decision:"modify"` (rejected by current PostToolUse hook schema) and archives silently instead.
+- **[v0.22.2](CHANGELOG.md#0222)** (2026-05-02) — **Agent Notebook Model enforced.** PreRead hook redirects Read of indexed files to the L0/L1 summary (~95% Read-token reduction); `zc_file_summary` auto-indexes on miss; per-agent namespacing (`zc_remember`/`zc_recall_context` default to `agent_id = ZC_AGENT_ID`, recall UNIONs private + shared "default" pool); skill-block dedup per `MCP_SESSION_ID`. Closes the gap between having semantic summaries and agents actually using them.
+- **[v0.22.1](CHANGELOG.md#0221)** (2026-05-01) — 3 bug fixes from v0.22.0 live E2E: `mutation_results_pg` mirror (dashboard couldn't see candidates in sqlite mode), `zc_mutation_approve` resolves to active skill version (was bumping from archived parent → reverting progress), `zc_record_skill_outcome` reports actual L1 outcome (was hardcoded based on env-var detection).
+- **[v0.22.0](CHANGELOG.md#0220)** (2026-05-01) — **Full skill attribution + operator audit log.** PG migration 16 adds `skill_runs_pg.agent_id`; new `skill_run_tool_calls_pg` correlation table; new `mutation_reviews_pg` operator audit log; `tool_calls_pg.skill_id` finally populated end-to-end. API container runs PG migrations on startup. Verified live with 5 distinct roles + Playwright-driven dashboard approval.
+- **[v0.21.0](CHANGELOG.md#0210)** (2026-05-01) — **Skill enforcement levers (#1, #2, #4).** Inject "## YOUR SKILLS" block at agent spawn (`generate-role-skill-block.mjs`); `zc_recall_context` auto-injects applicable skills via new `?role=` query param; MERGE-time skill-record mandate appended to every role prompt. Lever #5 (hard PreTool block) deliberately designed-but-unshipped — see `docs/SKILL_ENFORCEMENT.md`.
+- **[v0.20.1](CHANGELOG.md#0201)** (2026-05-01) — **First fully verified self-improvement cycle live.** 4 bugs found and fixed: L1 hook PG fallback for skill lookup, `ZC_L1_MUTATION_ENABLED` propagation to per-agent launchers, dispatcher PG-creds propagation, skill auto-importer using HMAC-keyed hash (was plain SHA256). Live evidence: REJECT → outcome → mutator pool → 5 candidates → operator approve → `developer-debugging-methodology@1.1@global` promoted.
+- **[v0.20.0](CHANGELOG.md#0200)** (2026-04-30) — **Sprint 4 + closes every 🔴 high item from v0.19.0.** Auto-import `skills/*.skill.md` into `skills_pg` (25 skills imported on first run); LLM "Generate skill body from rejection cluster" (Sonnet default, Ollama fallback); context-budget tracking + `zc_context_status`; rolling compaction (`zc_compact_window`); reranker + HyDE + multi-hop retrieval modes for `zc_search`; vitest test isolation via dedicated `securecontext_test` DB. 803 unit tests passing; 14/14 live agent E2E.
+- **[v0.19.0](CHANGELOG.md#0190)** (2026-04-30) — **Sprint 2.10: closes the agent self-improvement loop.** Role-to-skill extractor (`scripts/extract-skills-from-roles.mjs`); orchestrator-REJECT outcome resolver (writes `outcomes_pg` + `learnings/failures.jsonl` + flags the failed `skill_run` for the mutator); skill-candidate detector + `skill_candidates_pg` (PG migration 15) — clusters repeated rejections into queued skill candidates the operator can author against.
 - **[v0.18.0](CHANGELOG.md#0180)** (2026-04-29) — **Sprint 2 baseline**: skill mutation engine. Versioned hash-protected skills, synthetic-fixture replay harness, pluggable mutators (`local-mock`, `realtime-sonnet`, `batch-sonnet`), composite outcome scoring, atomic promotion, cross-project promotion candidates. 7 new MCP tools, 132 new tests, 786/786 passing. Postgres mirror for multi-machine consistency. agentskills.io interop.
 - **[v0.17.2](CHANGELOG.md#0172)** (2026-04-20) — L1 env-pinning linter + L3 no-floating-promises ESLint + L4 outcome → failures.jsonl auto-feedback. Closes 3 architectural-bug classes pre-Sprint-2.
 - **[v0.17.1](CHANGELOG.md#0171)** — Agent-idle fixes (claim-drain, Stop-hook queue-drain, dispatcher wake-nudge) + 60s recall cache + Tier 1+2 pricing correctness.

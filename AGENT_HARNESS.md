@@ -1,6 +1,6 @@
 # SecureContext Agent Harness — Token-Optimized Workflow Rules
 
-**Version:** 0.10.0+
+**Version:** 0.22.5
 **Applies to:** every agent using the `zc-ctx` MCP plugin (Claude, GPT, Gemini, and any other LLM).
 
 These are the rules an agent should follow to maximize token efficiency while working with SecureContext. They convert SC from a *tool that's available* into a *tool that's the default*. Measured savings: **~80% reduction in context overhead** on typical multi-session project work.

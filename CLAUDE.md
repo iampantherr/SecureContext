@@ -8,7 +8,7 @@ MemGPT-style persistent memory, session continuity, SSRF-protected web fetch) wi
 maximum security — no pre-compiled bundles, no credential leakage, no cloud sync.
 
 **Plugin ID:** `zc-ctx`
-**Version:** `0.9.0`
+**Version:** `0.22.5`
 **License:** MIT
 **Language:** TypeScript (Node.js ≥ 22)
 

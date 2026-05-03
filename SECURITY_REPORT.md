@@ -1,6 +1,6 @@
 # SecureContext — Red Team Security Report
 
-> **Current version: 0.9.0 — 96 attack vectors · 91 PASS · 0 FAIL · 5 WARN**
+> **Current version: 0.22.5 — 96 attack vectors · 91 PASS · 0 FAIL · 5 WARN**
 > See the **[v0.9.0 RBAC Default-On & Channel-Key Enforcement](#v090----rbac-default-on--channel-key-enforcement-2026-04-17)**, **[v0.7.2 KB Injection Pre-filter](#v072----kb-injection-pre-filter)** and **[v0.7.1 Broadcast Channel Security Audit](#appendix----v071-broadcast-channel-security-audit-2026-03-29)** appendices for the latest findings.
 > The sections below document the v0.2.0 foundational red-team baseline (vulnerabilities found and fixed before initial release).
 
