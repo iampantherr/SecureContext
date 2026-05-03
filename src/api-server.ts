@@ -254,6 +254,90 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.22.6 — Skill-activity health: surface projects that are active
+  // (broadcasting) but recording zero skill outcomes. Catches the failure
+  // mode where the v0.21.0 enforcement levers got dropped from agent
+  // system prompts (e.g. spawn-agent.ps1 not patched, settings.json
+  // fallback missing on a worker). Run-once every 60s by HTMX from the
+  // top of the dashboard.
+  app.get("/dashboard/skill-health", async (_request, reply) => {
+    const { renderSkillHealthFragment, loadProjectNameMap } = await import(
+      "./dashboard/render.js"
+    );
+    const { withClient } = await import("./pg_pool.js");
+    try {
+      type Row = {
+        project_hash: string;
+        broadcasts_24h: string;
+        skill_runs_24h: string;
+        skill_show_calls_24h: string;
+        outcome_calls_24h: string;
+        unique_agents: string;
+        last_broadcast_at: string;
+      };
+      const rows = await withClient(async (c) => {
+        const res = await c.query<Row>(
+          `WITH broadcast_activity AS (
+             SELECT project_hash,
+                    COUNT(*) AS broadcasts_24h,
+                    COUNT(DISTINCT agent_id) AS unique_agents,
+                    MAX(created_at) AS last_broadcast_at
+               FROM broadcasts
+              WHERE created_at::timestamptz > NOW() - INTERVAL '24 hours'
+              GROUP BY project_hash
+             HAVING COUNT(*) >= 3
+           ),
+           skill_run_counts AS (
+             SELECT project_hash, COUNT(*) AS skill_runs_24h
+               FROM skill_runs_pg
+              WHERE ts > NOW() - INTERVAL '24 hours'
+              GROUP BY project_hash
+           ),
+           skill_show_counts AS (
+             SELECT project_hash,
+                    COUNT(*) FILTER (WHERE tool_name = 'zc_skill_show') AS skill_show_calls_24h,
+                    COUNT(*) FILTER (WHERE tool_name = 'zc_record_skill_outcome') AS outcome_calls_24h
+               FROM tool_calls_pg
+              WHERE ts > NOW() - INTERVAL '24 hours'
+                AND tool_name IN ('zc_skill_show', 'zc_record_skill_outcome')
+              GROUP BY project_hash
+           )
+           SELECT b.project_hash,
+                  b.broadcasts_24h::text,
+                  COALESCE(s.skill_runs_24h, 0)::text       AS skill_runs_24h,
+                  COALESCE(c.skill_show_calls_24h, 0)::text AS skill_show_calls_24h,
+                  COALESCE(c.outcome_calls_24h, 0)::text    AS outcome_calls_24h,
+                  b.unique_agents::text,
+                  b.last_broadcast_at
+             FROM broadcast_activity b
+        LEFT JOIN skill_run_counts s ON s.project_hash = b.project_hash
+        LEFT JOIN skill_show_counts c ON c.project_hash = b.project_hash
+            ORDER BY b.last_broadcast_at DESC
+            LIMIT 20`,
+        );
+        return res.rows;
+      });
+      const nameMap = await loadProjectNameMap();
+      const fragRows = rows.map((r) => ({
+        project_hash:         r.project_hash,
+        project_name:         nameMap.get(r.project_hash) ?? null,
+        broadcasts_24h:       Number(r.broadcasts_24h),
+        skill_runs_24h:       Number(r.skill_runs_24h),
+        skill_show_calls_24h: Number(r.skill_show_calls_24h),
+        outcome_calls_24h:    Number(r.outcome_calls_24h),
+        unique_agents:        Number(r.unique_agents),
+        last_broadcast_at:    String(r.last_broadcast_at ?? ""),
+      }));
+      reply.type("text/html").send(renderSkillHealthFragment(fragRows));
+    } catch (e) {
+      reply
+        .type("text/html")
+        .send(
+          `<div class="skill-health-empty">Failed to load skill health: ${(e as Error).message}</div>`,
+        );
+    }
+  });
+
   app.get("/dashboard/pending", async (_request, reply) => {
     const { renderPendingFragment, loadProjectNameMap } = await import("./dashboard/render.js");
     const { withClient } = await import("./pg_pool.js");

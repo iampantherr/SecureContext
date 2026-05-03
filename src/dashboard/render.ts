@@ -450,6 +450,38 @@ export function renderDashboardHtml(): string {
   .tooltip {
     border-bottom: 1px dotted #94a3b8; cursor: help; position: relative;
   }
+  /* v0.22.6 — Skill-activity health banner (top of dashboard) */
+  .skill-health-banner {
+    padding: 10px 14px; border-radius: 6px; margin-bottom: 10px;
+    font-size: 0.95rem; border-left: 4px solid;
+  }
+  .skill-health-banner-bad {
+    background: #3f1d1d; color: #fecaca; border-left-color: #ef4444;
+  }
+  .skill-health-banner-warn {
+    background: #3a2e0e; color: #fde68a; border-left-color: #f59e0b;
+  }
+  .skill-health-banner-ok {
+    background: #0e2f1f; color: #d1fae5; border-left-color: #10b981;
+  }
+  .skill-health-banner code {
+    background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
+  }
+  .skill-health-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px; font-size: 0.88rem;
+    border-bottom: 1px solid #1f2937;
+  }
+  .skill-health-row:last-child { border-bottom: none; }
+  .skill-health-row .skill-health-icon { width: 20px; font-weight: 700; font-size: 1rem; flex-shrink: 0; }
+  .skill-health-row .skill-health-name { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; min-width: 180px; }
+  .skill-health-row .skill-health-detail { color: #cbd5e1; flex: 1; }
+  .skill-health-bad .skill-health-icon { color: #f87171; }
+  .skill-health-warn .skill-health-icon { color: #fbbf24; }
+  .skill-health-ok .skill-health-icon { color: #4ade80; }
+  .skill-health-empty { color: #94a3b8; font-style: italic; padding: 8px 14px; }
+  .skill-health-empty .skill-health-icon { margin-right: 8px; }
 </style>
 </head>
 <body>
@@ -458,6 +490,20 @@ export function renderDashboardHtml(): string {
   <span id="badge" class="badge">…</span>
 </header>
 <main>
+
+<!-- v0.22.6 — Skill-activity health banner. First panel so operators see
+     immediately when the closed-loop self-improvement system has gone dark
+     on any active project. Polls every 60s (lower frequency than other
+     panels because it's a slow-moving signal). -->
+<div class="panel">
+  <h2>Skill-activity health <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(closed-loop status per active project, 24h window)</span></h2>
+  <div id="skill-health"
+       hx-get="/dashboard/skill-health"
+       hx-trigger="load, every 60s"
+       hx-target="this" hx-swap="innerHTML">
+    Loading skill-activity health…
+  </div>
+</div>
 
 <div class="panel">
   <h2>Pending mutation reviews</h2>
@@ -969,4 +1015,87 @@ function renderResultSection(row: Record<string, unknown>, projectNameMap: Map<s
     <div class="response"></div>
   </form>
 </div>`;
+}
+
+// ─── v0.22.6 — Skill-activity health banner ─────────────────────────────────
+//
+// Catches the failure mode that hid for 7+ days on A2A_communication: agents
+// are active (broadcasting ASSIGN/MERGE) but recording zero skill outcomes.
+// This means the closed-loop self-improvement system is silently broken on
+// that project — usually because the agents' system prompts are missing the
+// v0.21.0 enforcement levers (e.g. spawn-agent.ps1 wasn't patched, env-var
+// propagation gap, etc.). Hard to spot from any other panel; deserves a
+// first-class indicator.
+//
+// Renders red/yellow/green status PER active project. "Active" = ≥3
+// broadcasts in the last 24 hours. Quiet projects don't trigger the alert
+// (no work happening means nothing to skill-record about).
+
+export interface SkillHealthRow {
+  project_hash: string;
+  project_name: string | null;
+  broadcasts_24h: number;
+  skill_runs_24h: number;
+  skill_show_calls_24h: number;
+  outcome_calls_24h: number;
+  unique_agents: number;
+  last_broadcast_at: string;
+}
+
+export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
+  if (rows.length === 0) {
+    return `<div class="skill-health-empty">
+      <span class="skill-health-icon">○</span>
+      No projects with active broadcasts in the last 24 hours.
+    </div>`;
+  }
+
+  const unhealthy = rows.filter((r) => r.skill_runs_24h === 0);
+  const partial   = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h === 0);
+  const healthy   = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h > 0);
+
+  const renderProjectRow = (r: SkillHealthRow, severity: "bad" | "warn" | "ok"): string => {
+    const name = r.project_name ?? r.project_hash.slice(0, 12);
+    const icon = severity === "bad" ? "✗" : severity === "warn" ? "⚠" : "✓";
+    const detail = severity === "bad"
+      ? `${r.broadcasts_24h} broadcasts but 0 skill outcomes — closed-loop improvement is BROKEN here`
+      : severity === "warn"
+        ? `${r.skill_runs_24h} outcomes recorded but 0 zc_skill_show calls — agents are scoring skills they didn't load`
+        : `${r.skill_runs_24h} skill_runs · ${r.skill_show_calls_24h} skill_show · ${r.unique_agents} agent(s)`;
+    return `<div class="skill-health-row skill-health-${severity}">
+      <span class="skill-health-icon">${icon}</span>
+      <span class="skill-health-name" title="project_hash=${r.project_hash}">${escapeHtml(name)}</span>
+      <span class="skill-health-detail">${escapeHtml(detail)}</span>
+    </div>`;
+  };
+
+  const lines: string[] = [];
+
+  // Banner header summarizing overall state
+  if (unhealthy.length > 0) {
+    lines.push(`<div class="skill-health-banner skill-health-banner-bad">
+      <strong>${unhealthy.length} project${unhealthy.length === 1 ? "" : "s"} active without skill outcomes</strong>
+      — the self-improvement loop is dormant for these projects. Likely fix:
+      respawn agents to pick up the latest spawn-agent.ps1 (skill enforcement
+      levers must be in their system prompts). See SecureContext v0.22.5+.
+    </div>`);
+  } else if (partial.length > 0) {
+    lines.push(`<div class="skill-health-banner skill-health-banner-warn">
+      <strong>${partial.length} project${partial.length === 1 ? "" : "s"} recording outcomes without loading skill bodies</strong>
+      — agents are scoring skills they never read. The pre-task
+      <code>zc_skill_show</code> mandate may not be firing.
+    </div>`);
+  } else {
+    lines.push(`<div class="skill-health-banner skill-health-banner-ok">
+      <strong>All ${healthy.length} active project${healthy.length === 1 ? " is" : "s are"} healthy.</strong>
+      Each is loading skills before work and recording outcomes at MERGE.
+    </div>`);
+  }
+
+  // Per-project detail rows
+  for (const r of unhealthy) lines.push(renderProjectRow(r, "bad"));
+  for (const r of partial)   lines.push(renderProjectRow(r, "warn"));
+  for (const r of healthy)   lines.push(renderProjectRow(r, "ok"));
+
+  return lines.join("\n");
 }

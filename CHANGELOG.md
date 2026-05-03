@@ -4,6 +4,51 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.6] — 2026-05-03 — Skill-activity health banner on the dashboard
+
+The closed-loop self-improvement system on A2A_communication had been silently
+dark for a week — agents were broadcasting ASSIGN/MERGE actively but
+recording zero skill outcomes. Operator only noticed because of an
+unrelated investigation. The data was visible if you knew where to look,
+but no panel surfaced it.
+
+v0.22.6 adds a **Skill-activity health** panel as the first thing on the
+dashboard. Per active project (≥3 broadcasts in 24h), shows one of three
+states:
+
+- **🟢 OK** — recording outcomes AND loading skills before work
+- **🟡 WARN** — recording outcomes but never calling \`zc_skill_show\`
+  (agents are scoring procedures they never read — happens when the
+  pre-task mandate hasn't fired)
+- **🔴 BAD** — broadcasts but zero skill_runs (closed loop is dead;
+  usually means agents' system prompts are missing the v0.21.0
+  enforcement levers, e.g. spawn-agent.ps1 wasn't patched)
+
+Polls every 60s. Always tells the operator the truth in plain language
+("closed-loop improvement is BROKEN here" / "agents are scoring skills
+they didn't load" / "All N active projects are healthy").
+
+### Implementation
+
+- New \`renderSkillHealthFragment\` in \`src/dashboard/render.ts\` —
+  classifies each project into bad/warn/ok and renders a colored banner
+  + per-project detail rows. Self-tests via \`renderSkillHealthFragment\`
+  exercising all 4 cases (BAD / WARN / MIXED / EMPTY) confirmed.
+- New \`GET /dashboard/skill-health\` endpoint in \`src/api-server.ts\` —
+  one PG query joining \`broadcasts\`, \`skill_runs_pg\`, \`tool_calls_pg\`
+  with 24h window. Limits to 20 projects.
+- New panel in \`renderDashboardHtml\` at the top of \`<main>\` — first
+  thing operators see, before pending mutations / active skills /
+  token savings.
+- CSS for the three severity states (red/amber/green border-left + matching
+  background tint).
+
+### Operator action
+
+Just refresh the dashboard. The panel auto-loads + polls every 60s. If
+your projects show GREEN, the loop is firing. If RED, follow the inline
+hint to respawn agents.
+
 ## [0.22.5] — 2026-05-02 — Track PreRead summary intercepts in dashboard savings
 
 **The big one for visibility.** Every `Read` of an indexed file is intercepted
