@@ -579,6 +579,35 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 18,
+    description: "v0.22.7: summarizer_events_pg — telemetry for every L0/L1 summarization (success, fallback-truncation, error). Source_meta is the per-file STATE table; this is the EVENT log so the operator can see when summaries are created, which model was used, how long they took, and what failed. The state-vs-events split mirrors how tool_calls_pg pairs with the working_memory state.",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS summarizer_events_pg (
+          id                  BIGSERIAL PRIMARY KEY,
+          project_hash        TEXT NOT NULL,
+          agent_id            TEXT NOT NULL DEFAULT 'default',
+          source              TEXT NOT NULL,
+          source_size_bytes   INTEGER NOT NULL DEFAULT 0,
+          l0_length           INTEGER NOT NULL DEFAULT 0,
+          l1_length           INTEGER NOT NULL DEFAULT 0,
+          duration_ms         INTEGER NOT NULL DEFAULT 0,
+          model               TEXT,
+          summary_source      TEXT NOT NULL,
+          status              TEXT NOT NULL,
+          error_message       TEXT,
+          ts                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_se_summary_source CHECK (summary_source IN ('ast', 'semantic', 'truncation', 'unknown')),
+          CONSTRAINT chk_se_status         CHECK (status IN ('ok', 'fallback_truncation', 'error', 'skipped'))
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_se_pg_project_ts ON summarizer_events_pg(project_hash, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_se_pg_status_ts  ON summarizer_events_pg(status, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_se_pg_agent_ts   ON summarizer_events_pg(agent_id, ts DESC)`);
+    },
+  },
+
 ];
 
 /**

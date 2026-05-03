@@ -4,6 +4,69 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.7] — 2026-05-03 — Summarizer visibility + dashboard inconsistency fixes
+
+Operator was completely blind to the summarizer (the LLM that generates
+L0/L1 file summaries on demand) — could not see when summaries were
+created, which model was used, what failed, or how many were currently
+indexed. The local SQLite project DB on this machine had **977 file
+summaries**, but PG `source_meta` only had 33 rows (session summaries +
+memory keys), so the dashboard saw nothing about file-indexing activity.
+
+This release surfaces the summarizer through a new telemetry path and
+fixes three dashboard inconsistencies discovered live:
+
+### What's new
+
+- **PG migration 18: `summarizer_events_pg`** — telemetry log for every
+  L0/L1 summarization attempt (success, fallback-truncation, error,
+  skipped). Captures source path, agent_id, sizes, duration, model,
+  source ('ast' / 'semantic' / 'truncation'), error message. Indexed
+  by (project, ts), (status, ts), (agent, ts) for fast dashboard queries.
+- **API endpoint `POST /api/v1/telemetry/summarizer-event`** — receives
+  fire-and-forget telemetry from the summarizer. Mirror of the v0.22.5
+  PreRead-redirect pattern.
+- **harness.ts:summarizeAndIndexSingleFile** now fires the telemetry
+  after every indexing attempt — capturing both the AST fast-path and
+  the LLM (Ollama qwen2.5-coder:14b) path, plus the truncation fallback
+  when the LLM is unreachable. Best-effort: failures don't block the
+  indexer.
+- **API endpoint `GET /dashboard/summarizer-health`** — returns
+  rendered HTML with: distinct files summarized counter, last-24h event
+  breakdown by status × source, recent successful summaries (last 10
+  with timestamps + model + duration), recent failures (last 5 with
+  full error messages).
+- **Dashboard Summarizer activity panel** — second panel on the page,
+  with a project filter dropdown. Includes a clarifying note about
+  where file summaries actually live (per-project SQLite, not PG).
+
+### Dashboard inconsistencies fixed
+
+1. **Always-show PreRead intercepts panel.** Before, the panel only
+   rendered when count > 0 — making it look "missing" when the system
+   was healthy but no files had been redirected in the window. Now it
+   always renders, with an explanatory empty state listing the three
+   common reasons for zero intercepts (env var unset, no indexed files,
+   force_full_read bypass).
+2. **Trend graph footnote.** The "tokens saved over N days" trend was
+   showing a smaller number than the live-window headline because it
+   reflects sealed daily snapshots only (today's in-flight bucket isn't
+   written until midnight UTC). Added an inline note explaining this.
+3. **Source-meta vs SQLite clarification.** The summarizer panel
+   includes a note that file-level summaries live in agent SQLite and
+   the PG counter starts from the v0.22.7 telemetry-on event.
+
+### Operator action
+
+Just refresh the dashboard. The summarizer panel will populate as
+agents trigger new file summarization (via `zc_file_summary` calls or
+the auto-index path on first PreRead). For pre-v0.22.7 indexing
+activity, look at the local DB:
+\`\`\`
+sqlite3 ~/.claude/zc-ctx/sessions/<project_hash>.db \\
+  "SELECT COUNT(*) FROM source_meta WHERE source LIKE 'file:%'"
+\`\`\`
+
 ## [0.22.6] — 2026-05-03 — Skill-activity health banner on the dashboard
 
 The closed-loop self-improvement system on A2A_communication had been silently

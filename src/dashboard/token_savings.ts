@@ -400,13 +400,17 @@ export function renderSavingsHtml(summary: SavingsSummary, projectName: string |
         </thead>
         <tbody>${rows}</tbody>
       </table>
-      ${summary.read_redirects ? `
+      <!-- v0.22.7: this block is now ALWAYS rendered, even when count=0,
+           so the operator can SEE that intercepts aren't happening (a real
+           signal) instead of guessing whether the panel is missing. -->
       <div class="savings-redirects" style="margin-top:16px; padding:12px; border:1px solid #334155; border-radius:6px; background:#0f172a">
-        <div style="font-weight:600; margin-bottom:8px; color:#a78bfa">📄 PreRead summary intercepts (v0.22.5)</div>
+        <div style="font-weight:600; margin-bottom:8px; color:#a78bfa">📄 PreRead summary intercepts</div>
         <div style="font-size:0.85rem; color:#94a3b8; margin-bottom:8px">
           When agents call <code>Read</code> on an indexed file, the PreRead hook returns the L0/L1 summary instead.
-          ~95% token cut per file. Tracked separately so the savings panel reflects real wins.
+          ~95% token cut per file. Requires <code>ZC_SUMMARY_REDIRECT=1</code> on the agent's MCP server env (set automatically
+          by start-agents.ps1 / spawn-agent.ps1 since v0.22.4).
         </div>
+        ${summary.read_redirects ? `
         <div class="savings-totals" style="display:grid; grid-template-columns:repeat(4, 1fr); gap:10px">
           <div class="savings-tile">
             <div class="savings-tile-num">${fmt(summary.read_redirects.count)}</div>
@@ -425,8 +429,16 @@ export function renderSavingsHtml(summary: SavingsSummary, projectName: string |
             <div class="savings-tile-label">saved (${fmtCost(summary.read_redirects.saved_cost_usd)})</div>
           </div>
         </div>
+        ` : `
+        <div style="padding:8px; background:#1f2937; border-radius:4px; color:#fbbf24; font-size:0.85rem">
+          ⚠ <strong>0 PreRead intercepts in this window.</strong>
+          The hook is only firing when agents call <code>Read</code> on a file the system has already indexed.
+          If you expected intercepts, check: (1) is <code>ZC_SUMMARY_REDIRECT=1</code> set on the agent's launcher?
+          (2) are the files agents are reading already in <code>source_meta</code> (visible in the Summarizer activity panel)?
+          (3) are agents passing <code>force_full_read:true</code> on their Reads (intentional bypass for Edit-prep)?
+        </div>
+        `}
       </div>
-      ` : ""}
       <details class="savings-methodology">
         <summary>How this is computed (caveats + assumptions)</summary>
         <ul>

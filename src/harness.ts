@@ -311,15 +311,45 @@ export async function summarizeAndIndexSingleFile(
   const isAbs = relPath.startsWith("/") || /^[a-zA-Z]:/.test(relPath);
   const fullPath = isAbs ? relPath : join(projectPath, relPath);
   let content = "";
+  // v0.22.7 — capture timing + status for the summarizer-events telemetry
+  // panel on the operator dashboard. Fired at the end of the function via
+  // emitSummarizerEvent (best-effort; never blocks the indexing path).
+  const tStart = Date.now();
+  let modelUsed: string | undefined;
+  let errorMsg: string | undefined;
+  let statusVal: "ok" | "fallback_truncation" | "error" | "skipped" = "skipped";
   try {
-    if (!existsSync(fullPath)) return false;
+    if (!existsSync(fullPath)) {
+      errorMsg = "file does not exist";
+      return false;
+    }
     const st = statSync(fullPath);
-    if (!st.isFile() || st.size === 0) return false;
+    if (!st.isFile() || st.size === 0) {
+      errorMsg = st.isFile() ? "empty file" : "not a regular file";
+      return false;
+    }
     const MAX_BYTES = 1_000_000;
-    if (st.size > MAX_BYTES) return false;
+    if (st.size > MAX_BYTES) {
+      errorMsg = `file too large (${st.size} bytes > ${MAX_BYTES} cap)`;
+      return false;
+    }
     content = readFileSync(fullPath, "utf8");
-  } catch {
+  } catch (e) {
+    errorMsg = (e as Error).message;
     return false;
+  } finally {
+    // If we returned early above, emit a 'skipped' event so the operator can
+    // see the gap (helps diagnose why a file never got a summary).
+    // Real success/error events are emitted at the end of the function below.
+    if (statusVal === "skipped" && errorMsg) {
+      emitSummarizerEvent(projectPath, relPath, {
+        size: 0, l0Len: 0, l1Len: 0,
+        durationMs: Date.now() - tStart,
+        summarySource: "unknown",
+        status: "skipped",
+        error: errorMsg,
+      }).catch(() => {});
+    }
   }
 
   let l0 = "";
@@ -345,22 +375,116 @@ export async function summarizeAndIndexSingleFile(
       const sum = await summarizeFile(relPath, content);
       l0 = sum.l0;
       l1 = sum.l1;
+      modelUsed = sum.modelUsed;
       summarySource = sum.source === "semantic" ? "semantic" : "truncation";
       provenance = summarySource === "semantic" ? "INFERRED" : "AMBIGUOUS";
-    } catch {
+      // v0.22.7 — even when 'truncation' returns successfully, we want the
+      // operator to see "Ollama path unavailable, fell back to truncation"
+      // on the dashboard so they know to check the LLM service.
+      if (sum.source === "truncation") statusVal = "fallback_truncation";
+      else statusVal = "ok";
+    } catch (e) {
       l0 = content.slice(0, Config.TIER_L0_CHARS).trim();
       l1 = content.slice(0, Config.TIER_L1_CHARS).trim();
       summarySource = "truncation";
       provenance = "AMBIGUOUS";
+      errorMsg = (e as Error).message;
+      statusVal = "error";
     }
+  } else {
+    // AST path succeeded
+    statusVal = "ok";
   }
 
   try {
     const source = `file:${relPath}`;
     indexContent(projectPath, content, source, "internal", "internal", l0, l1, provenance);
+    // v0.22.7 — fire summarizer-event telemetry. Best-effort (catch errors so
+    // the indexer never breaks). Schema: project_hash, agent_id, source,
+    // sizes, durations, model, summary_source ('ast'/'semantic'/'truncation'),
+    // status. Powers the "Summarizer activity" dashboard panel — operator
+    // sees when summaries are created, which model, how long, and what failed.
+    void emitSummarizerEvent(projectPath, relPath, {
+      size: content.length,
+      l0Len: l0.length,
+      l1Len: l1.length,
+      durationMs: Date.now() - tStart,
+      model: modelUsed,
+      summarySource,
+      // statusVal is "ok" | "fallback_truncation" | "error" by here — the
+      // "skipped" path returned earlier and never reaches indexContent.
+      status: statusVal,
+      error: errorMsg,
+    });
     return true;
-  } catch {
+  } catch (e) {
+    void emitSummarizerEvent(projectPath, relPath, {
+      size: content.length,
+      l0Len: l0.length,
+      l1Len: l1.length,
+      durationMs: Date.now() - tStart,
+      model: modelUsed,
+      summarySource,
+      status: "error",
+      error: `indexContent failed: ${(e as Error).message}`,
+    });
     return false;
+  }
+}
+
+/**
+ * v0.22.7 — Best-effort POST to /api/v1/telemetry/summarizer-event so the
+ * dashboard can surface real-time summarizer activity (count, success/error
+ * breakdown, recent files, model usage). Mirrors the same fire-and-forget
+ * pattern as the v0.22.5 PreRead telemetry. Silent on failure so the indexer
+ * is never blocked by an API outage.
+ *
+ * Local SQLite source_meta still captures the full {l0, l1, provenance}
+ * STATE; this telemetry table only captures the EVENT (who/when/how/result)
+ * for operator visibility.
+ */
+async function emitSummarizerEvent(
+  projectPath: string,
+  source: string,
+  fields: {
+    size: number;
+    l0Len: number;
+    l1Len: number;
+    durationMs: number;
+    model?: string;
+    summarySource: "ast" | "semantic" | "truncation" | "unknown";
+    status: "ok" | "fallback_truncation" | "error" | "skipped";
+    error?: string;
+  },
+): Promise<void> {
+  const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
+  if (!apiUrl) return;
+  const apiKey = process.env.ZC_API_KEY ?? "";
+  const agentId = process.env.ZC_AGENT_ID ?? "default";
+  try {
+    await fetch(`${apiUrl}/api/v1/telemetry/summarizer-event`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        projectPath,
+        agentId,
+        source,
+        sourceSizeBytes: fields.size,
+        l0Length:        fields.l0Len,
+        l1Length:        fields.l1Len,
+        durationMs:      fields.durationMs,
+        model:           fields.model ?? null,
+        summarySource:   fields.summarySource,
+        status:          fields.status,
+        errorMessage:    fields.error ?? null,
+      }),
+      signal: AbortSignal.timeout(2000),
+    });
+  } catch {
+    // best-effort — don't disturb indexing
   }
 }
 

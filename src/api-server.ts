@@ -254,6 +254,174 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.22.7 — Summarizer-event telemetry receiver. Mirrors the v0.22.5
+  // read-redirect pattern: harness.ts fires POSTs after every L0/L1
+  // generation (success, fallback, error). Stores rows in
+  // summarizer_events_pg so the dashboard "Summarizer activity" panel
+  // can surface real-time indexing health — currently the operator was
+  // completely blind to whether file summaries were being created or
+  // failing silently.
+  app.post("/api/v1/telemetry/summarizer-event", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(b["projectPath"]);
+      const agentId = typeof b["agentId"] === "string" ? b["agentId"].slice(0, 64) : "default";
+      const source  = typeof b["source"]  === "string" ? b["source"].slice(0, 1024) : "";
+      const size    = Number(b["sourceSizeBytes"] ?? 0);
+      const l0Len   = Number(b["l0Length"] ?? 0);
+      const l1Len   = Number(b["l1Length"] ?? 0);
+      const durMs   = Number(b["durationMs"] ?? 0);
+      const model   = typeof b["model"] === "string" ? b["model"].slice(0, 128) : null;
+      const summarySource = String(b["summarySource"] ?? "unknown").slice(0, 32);
+      const status  = String(b["status"] ?? "error").slice(0, 32);
+      const errorMsg = typeof b["errorMessage"] === "string" ? b["errorMessage"].slice(0, 2048) : null;
+      if (!source) {
+        return reply.status(400).send({ error: "source is required" });
+      }
+      const allowedSrc = ["ast", "semantic", "truncation", "unknown"];
+      const allowedStat = ["ok", "fallback_truncation", "error", "skipped"];
+      if (!allowedSrc.includes(summarySource)) {
+        return reply.status(400).send({ error: `summarySource must be one of ${allowedSrc.join(", ")}` });
+      }
+      if (!allowedStat.includes(status)) {
+        return reply.status(400).send({ error: `status must be one of ${allowedStat.join(", ")}` });
+      }
+      const { createHash } = await import("node:crypto");
+      const { realpathSync } = await import("node:fs");
+      let normalized = pp;
+      try { normalized = realpathSync(pp); } catch { /* use raw */ }
+      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      const { withClient } = await import("./pg_pool.js");
+      await withClient(async (c) => {
+        await c.query(
+          `INSERT INTO summarizer_events_pg
+             (project_hash, agent_id, source, source_size_bytes, l0_length, l1_length,
+              duration_ms, model, summary_source, status, error_message)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [projectHash, agentId, source,
+           Math.max(0, Math.floor(size)),
+           Math.max(0, Math.floor(l0Len)),
+           Math.max(0, Math.floor(l1Len)),
+           Math.max(0, Math.floor(durMs)),
+           model, summarySource, status, errorMsg],
+        );
+      });
+      return { ok: true };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return { ok: false, error: (e as Error).message };
+    }
+  });
+
+  // v0.22.7 — Summarizer-activity dashboard panel. Returns rendered HTML
+  // with: (a) total file summaries indexed for the project (from
+  // source_meta), (b) recent summarizer events grouped by status, (c) the
+  // last 10 successful summarizations, (d) the last 5 failures with full
+  // error messages so the operator can debug. Polls every 60s from the UI.
+  app.get("/dashboard/summarizer-health", async (request, reply) => {
+    const { renderSummarizerHealthFragment, loadProjectNameMap } = await import(
+      "./dashboard/render.js"
+    );
+    const { withClient } = await import("./pg_pool.js");
+    const q = request.query as Record<string, unknown>;
+    const projectFilter = typeof q.project === "string" && /^[0-9a-f]{16}$/.test(q.project)
+      ? q.project
+      : null;
+    try {
+      const result = await withClient(async (c) => {
+        // 1) Two counts:
+        //    - total_distinct_summarized: distinct source files seen in
+        //      summarizer_events_pg with a successful outcome. This is what
+        //      the operator ACTUALLY wants — "how many unique files has the
+        //      system summarized". Grows monotonically as new files arrive.
+        //    - source_meta_files_pg: count from source_meta table filtered
+        //      to file: scheme. Note: file-level summaries live in the
+        //      agent's LOCAL SQLite per-project DB; only session_summary
+        //      and memory keys mirror to PG source_meta. So this is usually
+        //      0 unless a project has uploaded its index. We surface it
+        //      anyway with a tooltip explanation.
+        const distinctQ = projectFilter
+          ? `SELECT COUNT(DISTINCT source)::text AS n FROM summarizer_events_pg WHERE project_hash = $1 AND status IN ('ok', 'fallback_truncation')`
+          : `SELECT COUNT(DISTINCT source)::text AS n FROM summarizer_events_pg WHERE status IN ('ok', 'fallback_truncation')`;
+        const distinctR = await c.query<{ n: string }>(distinctQ, projectFilter ? [projectFilter] : []);
+        const total_file_summaries = Number(distinctR.rows[0]?.n ?? 0);
+
+        const smPgQ = projectFilter
+          ? `SELECT COUNT(*)::text AS n FROM source_meta WHERE project_hash = $1 AND source LIKE 'file:%'`
+          : `SELECT COUNT(*)::text AS n FROM source_meta WHERE source LIKE 'file:%'`;
+        const smPgR = await c.query<{ n: string }>(smPgQ, projectFilter ? [projectFilter] : []);
+        const source_meta_pg_file_count = Number(smPgR.rows[0]?.n ?? 0);
+
+        // 2) breakdown of last 24h events by status × source
+        const eventQ = projectFilter
+          ? `SELECT status, summary_source, COUNT(*)::text AS n,
+                    AVG(duration_ms)::int AS avg_ms
+               FROM summarizer_events_pg
+              WHERE ts > NOW() - INTERVAL '24 hours' AND project_hash = $1
+              GROUP BY status, summary_source
+              ORDER BY 3 DESC`
+          : `SELECT status, summary_source, COUNT(*)::text AS n,
+                    AVG(duration_ms)::int AS avg_ms
+               FROM summarizer_events_pg
+              WHERE ts > NOW() - INTERVAL '24 hours'
+              GROUP BY status, summary_source
+              ORDER BY 3 DESC`;
+        const eventP = projectFilter ? [projectFilter] : [];
+        const eventR = await c.query<{ status: string; summary_source: string; n: string; avg_ms: number }>(
+          eventQ, eventP,
+        );
+        const events_24h = eventR.rows.map((r) => ({
+          status: r.status, summary_source: r.summary_source,
+          count: Number(r.n), avg_duration_ms: Number(r.avg_ms ?? 0),
+        }));
+
+        // 3) recent successful summaries (last 10)
+        const recentQ = projectFilter
+          ? `SELECT source, summary_source, model, duration_ms, ts, agent_id, l0_length, l1_length
+               FROM summarizer_events_pg
+              WHERE project_hash = $1 AND status IN ('ok', 'fallback_truncation')
+              ORDER BY ts DESC LIMIT 10`
+          : `SELECT source, summary_source, model, duration_ms, ts, agent_id, l0_length, l1_length, project_hash
+               FROM summarizer_events_pg
+              WHERE status IN ('ok', 'fallback_truncation')
+              ORDER BY ts DESC LIMIT 10`;
+        const recentR = await c.query<Record<string, unknown>>(
+          recentQ, projectFilter ? [projectFilter] : [],
+        );
+
+        // 4) recent failures (last 5)
+        const failQ = projectFilter
+          ? `SELECT source, status, summary_source, error_message, ts, agent_id, model
+               FROM summarizer_events_pg
+              WHERE project_hash = $1 AND status IN ('error', 'skipped')
+              ORDER BY ts DESC LIMIT 5`
+          : `SELECT source, status, summary_source, error_message, ts, agent_id, model, project_hash
+               FROM summarizer_events_pg
+              WHERE status IN ('error', 'skipped')
+              ORDER BY ts DESC LIMIT 5`;
+        const failR = await c.query<Record<string, unknown>>(
+          failQ, projectFilter ? [projectFilter] : [],
+        );
+
+        return {
+          total_file_summaries,
+          source_meta_pg_file_count,
+          events_24h,
+          recent_success: recentR.rows,
+          recent_failures: failR.rows,
+        };
+      });
+      const nameMap = await loadProjectNameMap();
+      reply.type("text/html").send(renderSummarizerHealthFragment(result, nameMap, projectFilter));
+    } catch (e) {
+      reply
+        .type("text/html")
+        .send(
+          `<div class="skill-health-empty">Failed to load summarizer health: ${(e as Error).message}</div>`,
+        );
+    }
+  });
+
   // v0.22.6 — Skill-activity health: surface projects that are active
   // (broadcasting) but recording zero skill outcomes. Catches the failure
   // mode where the v0.21.0 enforcement levers got dropped from agent

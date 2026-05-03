@@ -482,6 +482,57 @@ export function renderDashboardHtml(): string {
   .skill-health-ok .skill-health-icon { color: #4ade80; }
   .skill-health-empty { color: #94a3b8; font-style: italic; padding: 8px 14px; }
   .skill-health-empty .skill-health-icon { margin-right: 8px; }
+  /* v0.22.7 — Summarizer activity panel */
+  .summarizer-stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px; margin-bottom: 14px;
+  }
+  .summarizer-stats .stat-tile {
+    background: #0e1116; border: 1px solid #1f2937; border-radius: 6px;
+    padding: 12px; text-align: center;
+  }
+  .summarizer-stats .stat-num {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 1.6rem; font-weight: 700; color: #4ade80; margin-bottom: 4px;
+  }
+  .summarizer-stats .stat-label { font-size: 0.78rem; color: #94a3b8; line-height: 1.3; }
+  .summarizer-breakdown {
+    background: #0a0d12; border: 1px solid #1f2937; border-radius: 4px;
+    padding: 10px 12px; margin-bottom: 12px;
+  }
+  .summarizer-breakdown .breakdown-title {
+    font-size: 0.85rem; color: #94a3b8; margin-bottom: 6px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .summarizer-breakdown .breakdown-row {
+    font-size: 0.9rem; color: #cbd5e1; padding: 3px 0;
+  }
+  .summarizer-breakdown .badge-source {
+    display: inline-block; padding: 1px 8px; border-radius: 3px;
+    font-size: 0.78rem; font-weight: 600; margin-right: 6px;
+    font-family: ui-monospace, monospace;
+  }
+  .badge-source.semantic    { background: #064e3b; color: #d1fae5; }
+  .badge-source.ast         { background: #1e3a8a; color: #dbeafe; }
+  .badge-source.truncation  { background: #4a2e0e; color: #fde68a; }
+  .badge-source.unknown     { background: #1f2937; color: #94a3b8; }
+  .badge-status { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 0.78rem; font-weight: 600; font-family: ui-monospace, monospace; }
+  .badge-status.error    { background: #7f1d1d; color: #fecaca; }
+  .badge-status.skipped  { background: #4a2e0e; color: #fde68a; }
+  .badge-status.ok       { background: #064e3b; color: #d1fae5; }
+  .badge-status.fallback_truncation { background: #4a2e0e; color: #fde68a; }
+  .summarizer-empty { padding: 12px; }
+  .summarizer-empty.muted { color: #94a3b8; font-style: italic; }
+  .summarizer-list { margin: 12px 0; }
+  .summarizer-list summary { font-size: 0.9rem; color: #cbd5e1; padding: 6px 0; cursor: pointer; }
+  .summarizer-list summary:hover { color: #38bdf8; }
+  .summarizer-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 0.82rem; }
+  .summarizer-table th { text-align: left; padding: 4px 8px; color: #94a3b8; font-weight: 500; border-bottom: 1px solid #1f2937; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .summarizer-table td { padding: 4px 8px; border-bottom: 1px solid #161b22; vertical-align: top; }
+  .summarizer-table td.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .summarizer-table td.small { font-size: 0.78rem; color: #94a3b8; }
+  .summarizer-table td.error-msg { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #fecaca; max-width: 480px; word-break: break-word; }
+  .muted { color: #94a3b8; font-size: 0.85rem; }
 </style>
 </head>
 <body>
@@ -503,6 +554,45 @@ export function renderDashboardHtml(): string {
        hx-target="this" hx-swap="innerHTML">
     Loading skill-activity health…
   </div>
+</div>
+
+<!-- v0.22.7 — Summarizer activity. Operator visibility into the L0/L1
+     indexer: how many summaries exist, when they were created, what failed,
+     which model is being used. Without this, the operator was blind to
+     summarization activity and could only "hope it was working." -->
+<div class="panel">
+  <h2>Summarizer activity <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(L0/L1 file summary index — total + last 24h)</span></h2>
+  <div class="savings-controls" style="margin-bottom:10px">
+    <label>Project filter:
+      <select id="summarizer-project" name="project"
+              hx-get="/dashboard/summarizer-health"
+              hx-trigger="change"
+              hx-target="#summarizer-health"
+              hx-swap="innerHTML">
+        <option value="">— all projects —</option>
+      </select>
+    </label>
+  </div>
+  <div id="summarizer-health"
+       hx-get="/dashboard/summarizer-health"
+       hx-trigger="load, every 60s[!document.querySelector('#summarizer-health input:focus, #summarizer-health select:focus, #summarizer-health details[open] table')]"
+       hx-target="this" hx-swap="innerHTML">
+    Loading summarizer activity…
+  </div>
+  <script>
+    // Lazy-populate project filter (reuses the savings projects endpoint —
+    // it returns the same set of projects with activity).
+    (async function loadSummarizerProjects() {
+      try {
+        const r = await fetch('/dashboard/savings/projects', { cache: 'no-store' });
+        const html = await r.text();
+        const sel = document.getElementById('summarizer-project');
+        if (sel && sel.options.length <= 1) {
+          sel.innerHTML = '<option value="">— all projects —</option>' + html;
+        }
+      } catch { /* tolerate */ }
+    })();
+  </script>
 </div>
 
 <div class="panel">
@@ -1098,4 +1188,156 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
   for (const r of healthy)   lines.push(renderProjectRow(r, "ok"));
 
   return lines.join("\n");
+}
+
+// ─── v0.22.7 — Summarizer activity panel ─────────────────────────────────────
+//
+// Operator was completely blind to the summarizer (the LLM that generates
+// L0/L1 file summaries on demand): when did it run, which model did it use,
+// what failed, how many summaries are currently indexed. With 977 summaries
+// in the SQLite DB but only 33 in PG source_meta, the operator literally
+// could not see most of the indexing activity. This panel surfaces it.
+//
+// Renders three subsections:
+//   1. Headline: total file summaries currently indexed
+//   2. Last 24h activity grouped by status × source (ast / semantic /
+//      truncation, ok / fallback_truncation / error / skipped)
+//   3. Recent successes + recent failures (with full error messages)
+
+export interface SummarizerHealthData {
+  total_file_summaries: number;       // distinct sources seen in summarizer_events_pg
+  source_meta_pg_file_count?: number; // file: rows in PG source_meta (usually 0; file summaries live in agent SQLite)
+  events_24h: Array<{
+    status:         string;
+    summary_source: string;
+    count:          number;
+    avg_duration_ms: number;
+  }>;
+  recent_success:  Array<Record<string, unknown>>;
+  recent_failures: Array<Record<string, unknown>>;
+}
+
+export function renderSummarizerHealthFragment(
+  data: SummarizerHealthData,
+  nameMap: Map<string, string>,
+  projectFilter: string | null,
+): string {
+  const ev = data.events_24h;
+  const totalEvents = ev.reduce((a, e) => a + e.count, 0);
+  const successCount =
+    ev.filter((e) => e.status === "ok" || e.status === "fallback_truncation")
+      .reduce((a, e) => a + e.count, 0);
+  const errorCount = ev.filter((e) => e.status === "error" || e.status === "skipped")
+    .reduce((a, e) => a + e.count, 0);
+  const semanticCount = ev.filter((e) => e.summary_source === "semantic")
+    .reduce((a, e) => a + e.count, 0);
+  const astCount = ev.filter((e) => e.summary_source === "ast")
+    .reduce((a, e) => a + e.count, 0);
+  const truncCount = ev.filter((e) => e.summary_source === "truncation")
+    .reduce((a, e) => a + e.count, 0);
+
+  const projectScopeLabel = projectFilter
+    ? (nameMap.get(projectFilter) ?? `project:${projectFilter.slice(0, 8)}…`)
+    : "all projects";
+
+  const headline = `<div class="summarizer-stats">
+    <div class="stat-tile" title="Counted from summarizer_events_pg (telemetry started v0.22.7). For files indexed before that, see the agent's local SQLite source_meta — those don't sync to PG and are invisible from this dashboard.">
+      <div class="stat-num">${fmt(data.total_file_summaries)}</div>
+      <div class="stat-label">distinct files summarized (since v0.22.7)<br><span style="font-size:0.78rem; color:#94a3b8">${escapeHtml(projectScopeLabel)}</span></div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-num">${fmt(totalEvents)}</div>
+      <div class="stat-label">events (last 24h)</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-num" style="color:${errorCount > 0 ? "#fbbf24" : "#4ade80"}">${fmt(successCount)}</div>
+      <div class="stat-label">successful summaries (24h)</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-num" style="color:${errorCount > 0 ? "#f87171" : "#94a3b8"}">${fmt(errorCount)}</div>
+      <div class="stat-label">failures + skipped (24h)</div>
+    </div>
+  </div>
+  <div class="muted" style="margin-bottom:12px; font-size:0.82rem">
+    Note: file-level L0/L1 summaries live in each agent's <strong>local SQLite</strong>
+    project DB (<code>~/.claude/zc-ctx/sessions/{project_hash}.db</code>). PG only mirrors session
+    summaries + memory keys. For pre-v0.22.7 indexing activity, look at the local DB directly.
+    The counter above grows monotonically as new files are summarized via the telemetry path.
+  </div>`;
+
+  let breakdown = "";
+  if (totalEvents > 0) {
+    breakdown = `<div class="summarizer-breakdown">
+      <div class="breakdown-title">Source mix (last 24h)</div>
+      <div class="breakdown-row"><span class="badge-source semantic">semantic LLM</span> ${fmt(semanticCount)} files</div>
+      <div class="breakdown-row"><span class="badge-source ast">AST extracted</span> ${fmt(astCount)} files</div>
+      <div class="breakdown-row"><span class="badge-source truncation">truncation fallback</span> ${fmt(truncCount)} files ${
+        truncCount > 0 ? `<span class="muted">— Ollama unreachable or output malformed</span>` : ""
+      }</div>
+    </div>`;
+  } else {
+    breakdown = `<div class="summarizer-empty muted">No summarizer events recorded in the last 24 hours.${
+      data.total_file_summaries === 0
+        ? ` (No file summaries are indexed yet for this project — agents will index lazily on first <code>zc_file_summary</code> call.)`
+        : ""
+    }</div>`;
+  }
+
+  let recent = "";
+  if (data.recent_success.length > 0) {
+    const rows = data.recent_success.map((r) => {
+      const ph = String(r["project_hash"] ?? "");
+      const projName = ph ? (nameMap.get(ph) ?? null) : null;
+      const tsStr = (r["ts"] instanceof Date) ? (r["ts"] as Date).toISOString() : String(r["ts"] ?? "");
+      const when = tsStr.slice(11, 19); // HH:MM:SS
+      const date = tsStr.slice(0, 10);
+      return `<tr>
+        <td class="mono">${escapeHtml(when)}</td>
+        <td class="mono small">${escapeHtml(date)}</td>
+        <td class="mono">${escapeHtml(String(r["source"] ?? "").slice(0, 60))}</td>
+        <td><span class="badge-source ${escapeHtml(String(r["summary_source"] ?? ""))}">${escapeHtml(String(r["summary_source"] ?? ""))}</span></td>
+        <td class="mono small">${escapeHtml(String(r["model"] ?? "—"))}</td>
+        <td class="mono small">${fmt(Number(r["duration_ms"] ?? 0))}ms</td>
+        <td class="mono small">${escapeHtml(String(r["agent_id"] ?? "default"))}</td>
+        ${!projectFilter ? `<td class="mono small">${escapeHtml(projName ?? ph.slice(0, 8) + "…")}</td>` : ""}
+      </tr>`;
+    }).join("");
+    recent = `<details class="summarizer-list" open>
+      <summary>Recent summaries (last ${data.recent_success.length})</summary>
+      <table class="summarizer-table">
+        <thead><tr><th>Time</th><th>Date</th><th>File</th><th>Source</th><th>Model</th><th>Duration</th><th>Agent</th>${!projectFilter ? "<th>Project</th>" : ""}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>`;
+  }
+
+  let failures = "";
+  if (data.recent_failures.length > 0) {
+    const rows = data.recent_failures.map((r) => {
+      const ph = String(r["project_hash"] ?? "");
+      const projName = ph ? (nameMap.get(ph) ?? null) : null;
+      const tsStr = (r["ts"] instanceof Date) ? (r["ts"] as Date).toISOString() : String(r["ts"] ?? "");
+      const when = tsStr.slice(0, 19).replace("T", " ");
+      return `<tr>
+        <td class="mono small">${escapeHtml(when)}</td>
+        <td class="mono">${escapeHtml(String(r["source"] ?? "").slice(0, 60))}</td>
+        <td><span class="badge-status ${escapeHtml(String(r["status"] ?? ""))}">${escapeHtml(String(r["status"] ?? ""))}</span></td>
+        <td class="error-msg">${escapeHtml(String(r["error_message"] ?? "").slice(0, 240))}</td>
+        ${!projectFilter ? `<td class="mono small">${escapeHtml(projName ?? ph.slice(0, 8) + "…")}</td>` : ""}
+      </tr>`;
+    }).join("");
+    failures = `<details class="summarizer-list summarizer-failures" open>
+      <summary>Recent failures (last ${data.recent_failures.length})</summary>
+      <table class="summarizer-table">
+        <thead><tr><th>Time</th><th>File</th><th>Status</th><th>Error</th>${!projectFilter ? "<th>Project</th>" : ""}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </details>`;
+  }
+
+  return headline + breakdown + recent + failures;
+}
+
+function fmt(n: number): string {
+  return n.toLocaleString("en-US");
 }
