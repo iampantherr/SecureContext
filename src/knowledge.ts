@@ -246,6 +246,61 @@ export function indexContent(
 
   // Async embedding — never blocks the indexing call
   storeEmbeddingAsync(projectPath, content, source).catch(() => undefined);
+
+  // v0.22.9 — async PG mirror of source_meta. Operator policy
+  // (feedback_pg_first_storage.md): PG and SQLite must have feature parity.
+  // Pushing the mirror into indexContent itself ensures EVERY caller gets it:
+  // summarizeAndIndexSingleFile, indexProject (bulk), GRAPH_REPORT.md indexing,
+  // zc_capture_output, and any future callers. Without this, v0.22.8's mirror
+  // (which was added only to summarizeAndIndexSingleFile) missed the bulk
+  // indexer and caused PG/SQLite drift — bug found via post-deploy audit
+  // (831 PG vs 842 SQLite on A2A_communication).
+  //
+  // Fire-and-forget: catches all errors silently. SQLite is authoritative for
+  // the agent's own reads; PG is the cross-machine view.
+  storeSourceMetaPgAsync(projectPath, source, sourceType, retentionTier, l0, l1, now)
+    .catch(() => undefined);
+}
+
+/**
+ * v0.22.9 — Best-effort PG mirror of source_meta. Same fire-and-forget shape
+ * as storeEmbeddingAsync. Skips silently when PG creds aren't in the env
+ * (local-only deployment) or when the pool is unreachable. Pushed inside
+ * indexContent so every code path that creates a knowledge entry gets the
+ * mirror automatically — no per-callsite plumbing.
+ */
+async function storeSourceMetaPgAsync(
+  projectPath: string,
+  source: string,
+  sourceType: "internal" | "external",
+  retentionTier: string,
+  l0: string,
+  l1: string,
+  ts: string,
+): Promise<void> {
+  if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) {
+    return;
+  }
+  try {
+    const { withClient } = await import("./pg_pool.js");
+    const { createHash } = await import("node:crypto");
+    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    await withClient(async (c) => {
+      await c.query(
+        `INSERT INTO source_meta(project_hash, source, source_type, retention_tier, created_at, l0_summary, l1_summary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT(project_hash, source) DO UPDATE SET
+           source_type    = EXCLUDED.source_type,
+           retention_tier = EXCLUDED.retention_tier,
+           created_at     = EXCLUDED.created_at,
+           l0_summary     = EXCLUDED.l0_summary,
+           l1_summary     = EXCLUDED.l1_summary`,
+        [projectHash, source, sourceType, retentionTier, ts, l0, l1],
+      );
+    });
+  } catch {
+    // best-effort — SQLite write already succeeded
+  }
 }
 
 /**

@@ -1,37 +1,34 @@
 /**
  * PreToolUse hook — Read dedup guard + L0/L1 summary redirect (v0.22.2)
+ * + per-invocation observability (v0.22.9)
  * =====================================================================
  *
  * Two-stage interception of Read tool calls:
  *
  *   STAGE 1 (existing v0.10.0 dedup): if the file was already Read in this
- *   session → block with a redirect message. Reading the same file twice is
- *   a classic token-waste pattern.
+ *   session → block with a redirect message.
  *
  *   STAGE 2 (NEW in v0.22.2): on FIRST read of an indexed file (one that has
  *   an L0/L1 semantic summary in source_meta), REPLACE the Read response with
- *   the summary unless the agent explicitly opts out. Cuts Read tokens
- *   dramatically — a 5,000-token file becomes a ~200-token summary.
+ *   the summary unless the agent explicitly opts out. ~95% Read-token cut.
+ *
+ *   v0.22.9 OBSERVABILITY: every invocation fires telemetry to
+ *   /api/v1/telemetry/pretool-event with the outcome (redirect / block_dedup
+ *   / block_unindexed / bypass_force_read / bypass_partial_read /
+ *   pass_through / error). Diagnoses "is this hook firing at all" — silent-
+ *   failure mode that bit us in the post-v0.22.5 audit when read_redirects=0
+ *   forever could've meant either "no indexed Reads" or "hook never running."
  *
  *   Bypass mechanisms (any of these makes the Read pass through normally):
  *     1. ZC_SUMMARY_REDIRECT=0 in the agent's env (kill switch)
  *     2. ZC_SUMMARY_REDIRECT not set OR set to 0/false (default OFF until
  *        operator opts in, so legacy behavior is preserved)
  *     3. tool args contain "force_full_read": true
- *     4. tool args have offset OR limit set (intentional partial read; agent
- *        wants specific lines, summary wouldn't help)
+ *     4. tool args have offset OR limit set (intentional partial read)
  *     5. tool args contain "force": true (legacy compat with v0.10.0 hint)
  *     6. file is not indexed (no L0/L1 summary available)
  *
- * Response shape when summary is returned:
- *   The agent sees a structured block clearly marked as a summary, with
- *   instructions on how to get the full file. They CANNOT confuse this for
- *   actual file content because:
- *     - The block starts with "[zc-ctx L0/L1 SUMMARY — file body NOT loaded]"
- *     - It tells them how to bypass: pass force_full_read:true OR offset/limit
- *
- * Failure mode: any error → fail open, allow Read through. The agent never
- * gets stuck because of this hook.
+ * Failure mode: any error → fail open, allow Read through.
  */
 
 import { readFileSync, statSync } from "node:fs";
@@ -57,55 +54,87 @@ const rawPath = toolArgs.file_path ?? toolArgs.path ?? "";
 if (!rawPath) process.exit(0);
 
 // v0.22.2 fix — normalize absolute paths to project-root-relative.
-// Claude Code's Read tool passes absolute paths (e.g.
-// "C:\Users\Amit\AI_projects\Test_Agent_Coordination\utils\format-duration.js")
-// but source_meta stores relative ("file:utils/format-duration.js"). Without
-// normalization, getFileSummary lookup MISSES indexed files for absolute
-// paths and the hook falls into "NOT indexed yet" mode incorrectly.
-// Discovered live via E2E: developer agent reported Step 1 returned "NOT
-// indexed yet" for a file that IS indexed — root cause was abs-vs-rel mismatch.
 function normalizeForLookup(p, projectRoot) {
   if (!p) return p;
-  // Already prefixed with file:
   if (p.startsWith("file:")) return p.slice(5);
-  // Try stripping the project root prefix (Windows + Unix)
   const root = projectRoot.replace(/[\\/]+$/, "");
   if (p.toLowerCase().startsWith(root.toLowerCase())) {
     let rel = p.slice(root.length);
-    rel = rel.replace(/^[\\/]+/, "");        // strip leading slash
-    rel = rel.replace(/\\/g, "/");           // win→posix slashes
+    rel = rel.replace(/^[\\/]+/, "");
+    rel = rel.replace(/\\/g, "/");
     return rel;
   }
-  // Already relative (or in a different project) — return as-is
   return p.replace(/\\/g, "/");
 }
 
 const projectPath0 = input.cwd ?? process.cwd();
 const path = normalizeForLookup(rawPath, projectPath0);
 
-// ─── Bypass checks (any true → pass through) ────────────────────────────────
+// ─── Bypass checks ──────────────────────────────────────────────────────────
 const forceFullRead = toolArgs.force_full_read === true || toolArgs.force === true;
 const partialRead   = toolArgs.offset !== undefined || toolArgs.limit !== undefined;
 const summaryRedirectEnabled = process.env.ZC_SUMMARY_REDIRECT === "1";
 const dedupEnabled = process.env.ZC_READ_DEDUP_ENABLED !== "0";
 
-// Session ID — Claude Code provides this in the hook payload
 const sessionId = input.session_id ?? input.sessionId ?? "default";
-// Project path — same value used for path normalization above
 const projectPath = projectPath0;
+
+/**
+ * v0.22.9 — fire-and-forget telemetry for every hook invocation outcome.
+ * Mirrors the v0.22.5 read-redirect telemetry pattern. Lets the dashboard
+ * answer "is the PreRead hook firing at all?" — without this, an idle
+ * read_redirects table is ambiguous (could mean hook isn't running, or
+ * could mean all reads are of unindexed files). With this, the operator
+ * can see the FULL outcome distribution.
+ */
+function emitPretoolEvent(outcome, detail) {
+  try {
+    const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
+    if (!apiUrl) return;
+    const apiKey = process.env.ZC_API_KEY ?? "";
+    const agentId = process.env.ZC_AGENT_ID || "default";
+    fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        projectPath, agentId,
+        toolName: "Read",
+        filePath: rawPath,
+        outcome,
+        detail: detail ? String(detail).slice(0, 1024) : null,
+      }),
+    }).catch(() => { /* fire-and-forget */ });
+  } catch { /* never break the hook on telemetry failure */ }
+}
 
 try {
   const scPath = process.env.ZC_CTX_DIST ?? resolve(process.env.HOME ?? process.env.USERPROFILE ?? "", "AI_projects/SecureContext/dist");
   const harness = await import(`file://${scPath.replace(/\\/g, "/")}/harness.js`);
   const { wasReadThisSession, recordSessionRead, getFileSummary } = harness;
 
-  // ─── STAGE 1 — DEDUP (v0.10.0) ──────────────────────────────────────────
-  // v0.22.2 fix: dedup ALSO bypasses on partialRead (offset/limit). Without
-  // this, agents reading a large file in chunks via offset/limit get blocked
-  // by dedup on the second chunk onwards. Discovered live during A2A_communication
-  // notebook re-import: agent tried to chunk through a 65KB migration file and
-  // got dedup-blocked on every chunk after the first.
-  if (dedupEnabled && !forceFullRead && !partialRead && wasReadThisSession(projectPath, sessionId, path)) {
+  // ─── Bypass: force_full_read ────────────────────────────────────────────
+  if (forceFullRead) {
+    emitPretoolEvent("bypass_force_read", "agent passed force_full_read=true");
+    if (dedupEnabled) {
+      try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
+    }
+    process.exit(0);
+  }
+
+  // ─── Bypass: partial read (offset/limit) ────────────────────────────────
+  if (partialRead) {
+    emitPretoolEvent("bypass_partial_read", `offset=${toolArgs.offset} limit=${toolArgs.limit}`);
+    if (dedupEnabled) {
+      try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
+    }
+    process.exit(0);
+  }
+
+  // ─── STAGE 1 — DEDUP ────────────────────────────────────────────────────
+  if (dedupEnabled && wasReadThisSession(projectPath, sessionId, path)) {
     const hint =
       `[zc-ctx harness] Read blocked: '${path}' was already Read in this session.\n\n` +
       `Use one of:\n` +
@@ -115,6 +144,7 @@ try {
       `  - Read with offset/limit to read a specific range (bypasses dedup)\n\n` +
       `If you genuinely need to re-Read (e.g. the file was externally modified), ` +
       `add "force_full_read": true to the Read arguments or set ZC_READ_DEDUP_ENABLED=0.`;
+    emitPretoolEvent("block_dedup", "duplicate read in same session");
     process.stdout.write(JSON.stringify({
       continue: false,
       decision: "block",
@@ -123,22 +153,18 @@ try {
     process.exit(0);
   }
 
-  // ─── STAGE 2 — SUMMARY REDIRECT (v0.22.2) ───────────────────────────────
-  // Only fires when:
-  //   1. ZC_SUMMARY_REDIRECT=1 (operator opted in)
-  //   2. force_full_read NOT set (agent didn't override)
-  //   3. offset/limit NOT set (agent wants whole file, not range)
-  //
-  // Two sub-cases:
-  //   2a. File IS indexed → return L0/L1 summary as the Read response
-  //   2b. File NOT indexed → BLOCK + ask agent to index it first (so future
-  //       reads in any session benefit). Agent can opt out with force_full_read.
-  //       This enforces "build the index as you work" — every file the system
-  //       reads gets a summary, compounding savings over time.
-  if (summaryRedirectEnabled && !forceFullRead && !partialRead) {
+  // ─── STAGE 2 — SUMMARY REDIRECT ─────────────────────────────────────────
+  if (summaryRedirectEnabled) {
     let summary = null;
     try {
-      summary = getFileSummary(projectPath, path);
+      // getFileSummary is async since v0.22.8 (PG-first); handle both shapes
+      // for forward/backward compat with installed-vs-source dist.
+      const result = getFileSummary(projectPath, path);
+      if (result && typeof result.then === "function") {
+        summary = await result;
+      } else {
+        summary = result;
+      }
     } catch {
       summary = null;
     }
@@ -163,20 +189,13 @@ try {
         `  Read({ file_path: "${rawPath}", offset: 1, limit: 200 })\n\n` +
         `(This redirect saves ~95% of Read tokens. Set ZC_SUMMARY_REDIRECT=0 to disable globally.)`;
 
-      // v0.22.5 — fire-and-forget telemetry POST so dashboard reflects the
-      // savings. Without this, every redirect saves real tokens but the
-      // dashboard's Token Savings panel never knows. Estimates full-file
-      // tokens via the file's on-disk byte size (chars ÷ 4 ≈ tokens),
-      // summary tokens via the response text length. Best-effort: never
-      // blocks the redirect even on POST failure.
+      // v0.22.5 — fire read_redirects telemetry (the existing per-success path)
       try {
         const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
         const apiKey = process.env.ZC_API_KEY ?? "";
         if (apiUrl) {
           let fileSize = 0;
           try {
-            const { statSync } = await import("node:fs");
-            const { join } = await import("node:path");
             const isAbs = rawPath.startsWith("/") || /^[a-zA-Z]:/.test(rawPath);
             const full = isAbs ? rawPath : join(projectPath, rawPath);
             fileSize = statSync(full).size;
@@ -184,7 +203,6 @@ try {
           const fullFileTokens = Math.ceil(fileSize / 4);
           const summaryTokens  = Math.ceil(summaryText.length / 4);
           const agentId = process.env.ZC_AGENT_ID || "default";
-          // Fire-and-forget: don't await
           fetch(`${apiUrl}/api/v1/telemetry/read-redirect`, {
             method: "POST",
             headers: {
@@ -198,6 +216,9 @@ try {
         }
       } catch { /* never break the redirect */ }
 
+      // v0.22.9 — also fire the generic pretool-event telemetry
+      emitPretoolEvent("redirect", `summary served, l0=${summary.l0?.length ?? 0}b l1=${summary.l1?.length ?? 0}b`);
+
       process.stdout.write(JSON.stringify({
         continue: false,
         decision: "block",
@@ -207,10 +228,6 @@ try {
     }
 
     // 2b — Not indexed: block + ask agent to index OR force-read.
-    // This is enforcement: every file the system reads should produce a
-    // summary so future reads (and other agents/sessions) save tokens.
-    // Agent retains full control via force_full_read for cases where
-    // indexing would be wasteful (one-off scripts, generated files, etc.).
     {
       const hint =
         `[zc-ctx] '${rawPath}' is NOT indexed yet (no L0/L1 summary in SecureContext).\n\n` +
@@ -229,6 +246,7 @@ try {
         `WHY: every Read of an un-summarized file is a missed savings opportunity. By forcing\n` +
         `summaries to be created on-demand, the index builds as you work. Set\n` +
         `ZC_SUMMARY_REDIRECT=0 to disable globally.`;
+      emitPretoolEvent("block_unindexed", "no L0/L1 summary in source_meta");
       process.stdout.write(JSON.stringify({
         continue: false,
         decision: "block",
@@ -238,12 +256,14 @@ try {
     }
   }
 
-  // First-Read path — record it and allow through
+  // ─── Pass-through (ZC_SUMMARY_REDIRECT off, no dedup hit) ──────────────
   if (dedupEnabled) {
     try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
   }
+  emitPretoolEvent("pass_through", `redirect_enabled=${summaryRedirectEnabled} dedup_enabled=${dedupEnabled}`);
   process.exit(0);
-} catch {
+} catch (e) {
   // Never break the agent on hook failure — let the Read through.
+  emitPretoolEvent("error", String(e && e.message ? e.message : e).slice(0, 512));
   process.exit(0);
 }

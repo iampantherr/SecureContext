@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.22.8",
+  VERSION: "0.22.9",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),

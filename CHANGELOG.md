@@ -4,6 +4,102 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.9] — 2026-05-03 — Loop verification + 4 audit-driven bug fixes
+
+After v0.22.8 declared the loop "done," operator pushed back: *"do not
+implement on top of an already broken process. Comb through past bugs to
+ensure no regressions. No mistakes this time."* Right call. The audit
+caught 4 real bugs we'd missed plus surfaced 1 content-coverage gap — all
+fixed in this release.
+
+### Bug 1: indexContent() bulk path missing PG mirror
+
+v0.22.8 added `mirrorSourceMetaToPg()` only to `summarizeAndIndexSingleFile`.
+The other indexContent callers — `indexProject` (bulk indexer),
+`zc_capture_output`, GRAPH_REPORT.md indexing — bypassed the mirror.
+On A2A_communication: 11-row drift (831 PG vs 842 SQLite) appeared
+overnight as new files got bulk-indexed.
+
+**Fix:** push the PG mirror INSIDE `indexContent()` itself in
+`src/knowledge.ts`. Same fire-and-forget pattern as `storeEmbeddingAsync`.
+Now every caller gets it automatically — `summarizeAndIndexSingleFile`,
+`indexProject` workers, GRAPH_REPORT.md ingestion, future call sites.
+Removed the redundant explicit mirror in harness.ts (was a v0.22.8
+stopgap, now centralized).
+
+**Backfill swept across 11 projects, 1958 file summaries → PG. Final
+parity: 1960 = 1960 across all projects.**
+
+### Bug 2: PreRead hook had no observability for non-success paths
+
+`read_redirects_pg` only logs SUCCESSFUL redirects. When count==0, the
+operator couldn't tell if the hook was firing at all (silent-fail mode)
+or if all reads were of unindexed files (correct behavior).
+
+**Fix:** new PG migration 19 → `pretool_events_pg` with 7 outcomes:
+`redirect`, `block_unindexed`, `block_dedup`, `bypass_force_read`,
+`bypass_partial_read`, `pass_through`, `error`. New endpoint
+`POST /api/v1/telemetry/pretool-event`. The PreRead hook
+(`hooks/preread-dedup.mjs`) now fires telemetry on EVERY invocation
+exit point. Operator can finally see the full outcome distribution.
+
+### Bug 3: start-agents.ps1 worker path missing pre-task mandate
+
+The v0.22.7 fix landed in spawn-agent.ps1 (dispatcher path) but
+start-agents.ps1's worker section still called the OLD
+`generate-role-skill-block.mjs` directly — which only emits the
+"## YOUR SKILLS" block. Workers spawned via initial bootstrap had only
+2 of 3 levers, missing the v0.22.7 "## SKILL LOADING (MANDATORY before
+starting any task)" pre-task mandate. Symmetrical to the v0.22.7 bug
+but on the OPPOSITE spawn path.
+
+**Fix:** refactored start-agents.ps1 worker section to call the shared
+`augment-role-prompt.mjs` (single source of truth for both initial and
+dynamic spawn), removed the inline MERGE-mandate heredoc. Now ALL spawn
+paths share the same code.
+
+### Bug 4: spawn-agent.ps1 didn't default ZC_L1_MUTATION_ENABLED
+
+When `spawn-agent.ps1` is invoked without inheriting from a configured
+parent shell (e.g., direct invocation, fresh dispatcher session), the
+generated launcher omitted `ZC_L1_MUTATION_ENABLED` because the
+condition was `if ($env:ZC_L1_MUTATION_ENABLED) { ... }`. Mutator hook
+silently disabled in that path.
+
+**Fix:** default to `'1'` if not set, same pattern as v0.22.4's
+ZC_SUMMARY_REDIRECT default-on. Matches the explicit auto-enable in
+start-agents.ps1.
+
+### Coverage gap surfaced (not fixed in this release): 7 roles have no skills
+
+The new E2E test caught: only 5 of 12 launchable roles
+(developer/devops/designer/writer/analyst) have skills tagged in
+`skills_pg`. Researcher, qa-engineer, security, strategist, growth,
+marketer, mutator-engineering have ZERO skills → augmenter falls back
+to MERGE-mandate-only. These agents get no skill awareness in their
+prompts. **Documented as Phase-2 work** (marketplace pull from
+`anthropics/skills` per the v0.23.x roadmap will close this gap).
+
+### New: e2e-loop-verification.ps1
+
+A 71-check end-to-end test covering 9 sections:
+
+1. API health (3 checks)
+2. PG schema (14 checks — every telemetry table)
+3. Telemetry endpoints (6 checks — POST + DB-write verification for all 3)
+4. Augmenter output for every role (12 checks — with-skills vs no-skills)
+5. start-agents.ps1 source-level audits (5 checks)
+6. spawn-agent.ps1 source + env propagation (13 checks)
+7. PG/SQLite source_meta parity
+8. Hook installed-vs-repo hashes (7 checks)
+9. **Real DryRun spawn** (10 checks — actually invokes spawn-agent.ps1
+   for 5 roles, inspects generated prompt + launcher files)
+
+Result: **71 PASS / 0 FAIL — 100% green** after the bug fixes.
+
+The script lives at `A2A_dispatcher/e2e-loop-verification.ps1`. Run it
+manually anytime: `pwsh ./e2e-loop-verification.ps1 [-VerboseOutput]`.
+
 ## [0.22.8] — 2026-05-03 — source_meta PG parity (file summaries now visible to dashboard)
 
 **Closes a long-running architectural inconsistency.** The operator's stated

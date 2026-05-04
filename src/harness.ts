@@ -398,13 +398,10 @@ export async function summarizeAndIndexSingleFile(
 
   try {
     const source = `file:${relPath}`;
+    // v0.22.9 — indexContent now does the PG mirror internally for ALL
+    // callers (was previously an explicit call here only, missing the bulk
+    // indexProject path). Operator-policy compliance is now centralized.
     indexContent(projectPath, content, source, "internal", "internal", l0, l1, provenance);
-    // v0.22.8 — PG mirror for source_meta. Operator policy: PG and SQLite
-    // must have feature parity (see feedback_pg_first_storage.md). Without
-    // this, file-level L0/L1 summaries were SQLite-only on the agent's host
-    // — invisible to the dashboard and to any cross-machine reader. Fire-
-    // and-forget so the indexer doesn't block on PG availability.
-    void mirrorSourceMetaToPg(projectPath, source, "internal", "internal", l0, l1);
     // v0.22.7 — fire summarizer-event telemetry. Best-effort (catch errors so
     // the indexer never breaks). Schema: project_hash, agent_id, source,
     // sizes, durations, model, summary_source ('ast'/'semantic'/'truncation'),

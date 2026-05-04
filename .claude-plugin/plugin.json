@@ -1,6 +1,6 @@
 {
   "name": "zc-ctx",
-  "version": "0.22.8",
+  "version": "0.22.9",
   "description": "Secure memory & context optimization MCP plugin for Claude Code — drop-in replacement for context-mode with credential isolation, SSRF protection, MemGPT-style persistent memory, and A2A multi-agent broadcast channel. 25+ MCP tools, HMAC-chained tool_calls + outcomes, per-agent HKDF subkey isolation, Postgres RLS, work-stealing queue, self-improving skills, and Agent Notebook Model (Read→Summary redirect). MIT license.",
   "type": "mcp",
   "mcp": {

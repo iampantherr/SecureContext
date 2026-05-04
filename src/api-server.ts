@@ -254,6 +254,51 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.22.9 — Generic pretool-event telemetry. Records EVERY PreRead hook
+  // invocation regardless of outcome (redirect / block_unindexed /
+  // bypass_force_read / bypass_partial_read / pass_through / error).
+  // Diagnoses the "read_redirects=0 forever" silent-failure mode found
+  // in the v0.22.x audit: read_redirects_pg only logs the success path,
+  // so the operator couldn't tell if the hook was firing at all when
+  // count==0. With this table, the dashboard can show "hook fires N
+  // times/day, 0 of them produce redirects because all reads are of
+  // unindexed project-root files" — actionable signal vs invisible gap.
+  app.post("/api/v1/telemetry/pretool-event", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(b["projectPath"]);
+      const agentId  = typeof b["agentId"]  === "string" ? b["agentId"].slice(0, 64)  : "default";
+      const toolName = typeof b["toolName"] === "string" ? b["toolName"].slice(0, 64) : "Read";
+      const filePath = typeof b["filePath"] === "string" ? b["filePath"].slice(0, 1024) : null;
+      const outcome  = String(b["outcome"] ?? "error").slice(0, 32);
+      const detail   = typeof b["detail"] === "string" ? b["detail"].slice(0, 2048) : null;
+      const allowed = ["redirect", "block_unindexed", "block_dedup",
+                       "bypass_force_read", "bypass_partial_read", "pass_through", "error"];
+      if (!allowed.includes(outcome)) {
+        return reply.status(400).send({ error: `outcome must be one of ${allowed.join(", ")}` });
+      }
+      const { createHash } = await import("node:crypto");
+      const { realpathSync } = await import("node:fs");
+      let normalized = pp;
+      try { normalized = realpathSync(pp); } catch { /* use raw */ }
+      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      const { withClient } = await import("./pg_pool.js");
+      await withClient(async (c) => {
+        await c.query(
+          `INSERT INTO pretool_events_pg
+             (project_hash, agent_id, tool_name, file_path, outcome, detail)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [projectHash, agentId, toolName, filePath, outcome, detail],
+        );
+      });
+      return { ok: true };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      // Hook is fire-and-forget — never break agent flow on telemetry failures
+      return { ok: false, error: (e as Error).message };
+    }
+  });
+
   // v0.22.7 — Summarizer-event telemetry receiver. Mirrors the v0.22.5
   // read-redirect pattern: harness.ts fires POSTs after every L0/L1
   // generation (success, fallback, error). Stores rows in

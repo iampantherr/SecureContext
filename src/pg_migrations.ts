@@ -608,6 +608,37 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 19,
+    description: "v0.22.9: pretool_events_pg — generic observability for the PreRead/PreEdit hooks. read_redirects_pg only logs the SUCCESS path (file was indexed, redirect happened); this table logs EVERY hook invocation regardless of outcome (redirect, block, bypass, error) so the operator can see if the hook is firing at all and what the outcome distribution looks like. Diagnoses the 'read_redirects=0 forever' silent-failure mode that bit us in the post-v0.22.5 audit.",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS pretool_events_pg (
+          id            BIGSERIAL PRIMARY KEY,
+          project_hash  TEXT NOT NULL,
+          agent_id      TEXT NOT NULL DEFAULT 'default',
+          tool_name     TEXT NOT NULL,
+          file_path     TEXT,
+          outcome       TEXT NOT NULL,
+          detail        TEXT,
+          ts            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_pte_outcome CHECK (outcome IN (
+            'redirect',
+            'block_unindexed',
+            'block_dedup',
+            'bypass_force_read',
+            'bypass_partial_read',
+            'pass_through',
+            'error'
+          ))
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_pte_project_ts ON pretool_events_pg(project_hash, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_pte_outcome_ts ON pretool_events_pg(outcome, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_pte_agent_ts   ON pretool_events_pg(agent_id, ts DESC)`);
+    },
+  },
+
 ];
 
 /**
