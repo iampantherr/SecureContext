@@ -975,6 +975,190 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.23.2 — HTML variant for the dashboard ⭐ button. Same DB write, but
+  // returns a single rendered <tr> so HTMX can swap it inline in the runs
+  // table. The note comes from HTMX's hx-prompt header (operator's typed
+  // input on click).
+  app.post("/dashboard/skill-runs/:run_id/tag-exemplar/html", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const runId = String(params.run_id ?? "").trim();
+    // HTMX URL-encodes the HX-Prompt header value because HTTP headers can't
+    // carry raw non-ASCII bytes (em dashes, emoji, multi-byte UTF-8). Without
+    // decodeURIComponent here the operator's note lands in PG as
+    // "Hello%20world%20%E2%80%94" instead of "Hello world —". Caught in
+    // browser E2E click-through.
+    const headers = request.headers as Record<string, string | string[] | undefined>;
+    const promptRaw = headers["hx-prompt"];
+    let note: string | null = null;
+    if (typeof promptRaw === "string" && promptRaw.length > 0) {
+      try { note = decodeURIComponent(promptRaw).slice(0, 1024); }
+      catch { note = promptRaw.slice(0, 1024); }  // graceful fallback if not valid percent-encoding
+    }
+    if (!runId) {
+      reply.status(400).type("text/html").send(`<tr><td colspan="6" class="error">missing run_id</td></tr>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const updated = await withClient(async (c) => {
+        const r = await c.query(
+          `UPDATE skill_runs_pg
+              SET is_exemplar = TRUE,
+                  exemplar_tagged_by = $1,
+                  exemplar_tagged_at = NOW(),
+                  exemplar_note = $2
+            WHERE run_id = $3
+            RETURNING run_id, skill_id, status, outcome_score, ts, agent_id,
+                      is_exemplar, exemplar_note`,
+          ["operator", note, runId],
+        );
+        return r.rows[0] ?? null;
+      });
+      if (!updated) {
+        reply.status(404).type("text/html").send(`<tr><td colspan="6" class="error">run ${escapeHtml(runId)} not found</td></tr>`);
+        return;
+      }
+      const { renderSkillRunRow } = await import("./dashboard/render.js");
+      const html = renderSkillRunRow({
+        run_id:        updated.run_id,
+        skill_id:      updated.skill_id,
+        status:        updated.status,
+        outcome_score: updated.outcome_score === null ? null : Number(updated.outcome_score),
+        ts:            updated.ts instanceof Date ? updated.ts.toISOString() : String(updated.ts),
+        agent_id:      updated.agent_id,
+        is_exemplar:   Boolean(updated.is_exemplar),
+        exemplar_note: updated.exemplar_note,
+      });
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.status(500).type("text/html").send(`<tr><td colspan="6" class="error">error: ${escapeHtml((e as Error).message)}</td></tr>`);
+    }
+  });
+
+  // v0.23.2 — Recent skill_runs for a skill (HTML for HTMX)
+  app.get("/dashboard/skills/:id/runs", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const skillId = String(params.id ?? "").trim();
+    if (!skillId) {
+      reply.status(400).type("text/html").send(`<div class="error">missing skill_id</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const rows = await withClient(async (c) => {
+        const r = await c.query(
+          `SELECT run_id, skill_id, status, outcome_score, ts, agent_id,
+                  is_exemplar, exemplar_note
+             FROM skill_runs_pg
+             WHERE skill_id = $1
+             ORDER BY ts DESC
+             LIMIT 50`,
+          [skillId],
+        );
+        return r.rows;
+      });
+      const { renderSkillRunsFragment } = await import("./dashboard/render.js");
+      const html = renderSkillRunsFragment(skillId, rows.map((r: Record<string, unknown>) => ({
+        run_id:        String(r.run_id),
+        skill_id:      String(r.skill_id),
+        status:        String(r.status),
+        outcome_score: r.outcome_score === null ? null : Number(r.outcome_score),
+        ts:            r.ts instanceof Date ? r.ts.toISOString() : String(r.ts),
+        agent_id:      r.agent_id === null ? null : String(r.agent_id),
+        is_exemplar:   Boolean(r.is_exemplar),
+        exemplar_note: r.exemplar_note === null ? null : String(r.exemplar_note),
+      })));
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.status(500).type("text/html").send(`<div class="error">error: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.23.2 — Security scan history for a skill (HTML for HTMX)
+  app.get("/dashboard/skills/:id/security", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const skillId = String(params.id ?? "").trim();
+    if (!skillId) {
+      reply.status(400).type("text/html").send(`<div class="error">missing skill_id</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const rows = await withClient(async (c) => {
+        const r = await c.query(
+          `SELECT scanned_at, score, passed, source, failures
+             FROM skill_security_scans_pg
+             WHERE skill_id = $1
+             ORDER BY scanned_at DESC
+             LIMIT 30`,
+          [skillId],
+        );
+        return r.rows;
+      });
+      const { renderSecurityScansFragment } = await import("./dashboard/render.js");
+      const html = renderSecurityScansFragment(skillId, rows.map((r: Record<string, unknown>) => ({
+        scanned_at: r.scanned_at instanceof Date ? r.scanned_at.toISOString() : String(r.scanned_at),
+        score:      Number(r.score),
+        passed:     Boolean(r.passed),
+        source:     String(r.source),
+        failures:   typeof r.failures === "string" ? JSON.parse(r.failures) : (r.failures as Array<{ name: string; severity: string; detail: string | null }>),
+      })));
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.status(500).type("text/html").send(`<div class="error">error: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.23.2 — HTML wrapper around the JSON polish endpoint. Same logic, but
+  // returns a rendered preview <div> with the diff + Apply button.
+  app.post("/dashboard/skills/:id/polish/html", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const skillId = String(params.id ?? "").trim();
+    if (!skillId) {
+      reply.status(400).type("text/html").send(`<div class="error">missing skill_id</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const skill = await withClient(async (c) => {
+        const r = await c.query("SELECT skill_id, frontmatter, body, body_hmac FROM skills_pg WHERE skill_id = $1 AND archived_at IS NULL", [skillId]);
+        if (r.rows.length === 0) return null;
+        const row = r.rows[0];
+        return {
+          skill_id: row.skill_id,
+          frontmatter: typeof row.frontmatter === "string" ? JSON.parse(row.frontmatter) : row.frontmatter,
+          body: row.body,
+          body_hmac: row.body_hmac,
+          source_path: null,
+          promoted_from: null,
+          created_at: new Date().toISOString(),
+          archived_at: null,
+          archive_reason: null,
+        };
+      });
+      if (!skill) {
+        reply.status(404).type("text/html").send(`<div class="error">skill ${escapeHtml(skillId)} not found or archived</div>`);
+        return;
+      }
+      const { polishSkillDescription } = await import("./skills/polisher.js");
+      const result = await polishSkillDescription(skill);
+      const { renderPolishPreview } = await import("./dashboard/render.js");
+      const html = renderPolishPreview({
+        skill_id:      skill.skill_id,
+        original:      result.original,
+        polished:      result.polished,
+        lint_passed:   result.lint_passed,
+        lint_warnings: result.lint_warnings,
+        lint_errors:   result.lint_errors,
+        backend:       result.backend,
+        duration_ms:   result.duration_ms,
+      });
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.status(500).type("text/html").send(`<div class="error">polish error: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   // v0.23.0 Phase 1 #2 — Polish a skill's description.
   // Operator-triggered via dashboard button. Returns the suggested polish
   // (does NOT auto-apply); operator reviews and POSTs to /apply if approved.

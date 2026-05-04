@@ -355,9 +355,61 @@ export function renderDashboardHtml(): string {
   .skill-meta { color: #94a3b8; font-size: 0.85rem; margin-top: 4px; }
   .skill-meta .role-tag { background: #1e3a8a; color: #dbeafe; padding: 1px 6px; border-radius: 3px; font-size: 0.78rem; margin-right: 4px; }
   .skill-meta .guidance-preview { color: #cbd5e1; font-style: italic; }
-  .edit-btn { background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  .edit-btn, .polish-btn, .runs-btn, .security-btn {
+    background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37;
+    padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem;
+    margin-left: 4px;
+  }
   .edit-btn:hover { background: #2a2f37; color: #38bdf8; }
+  .polish-btn:hover { background: #2a2f37; color: #c4b5fd; }
+  .runs-btn:hover { background: #2a2f37; color: #fbbf24; }
+  .security-btn:hover { background: #2a2f37; color: #34d399; }
+  .skill-actions { display: flex; gap: 4px; }
   .skill-edit-zone { margin-top: 8px; }
+  /* v0.23.2 — polish preview / runs list / security scans */
+  .polish-result { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
+  .polish-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .polish-meta { font-size: 0.8rem; color: #94a3b8; }
+  .polish-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .polish-col { background: #0e1116; border: 1px solid #1f2937; border-radius: 4px; padding: 8px; }
+  .polish-col-title { font-size: 0.78rem; color: #94a3b8; margin-bottom: 6px; }
+  .polish-col-text { font-size: 0.9rem; color: #e6e8eb; line-height: 1.4; white-space: pre-wrap; }
+  .polish-actions { margin-top: 10px; }
+  .apply-polish-btn { background: #166534; color: #dcfce7; border: 1px solid #15803d; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  .apply-polish-btn:hover:not(:disabled) { background: #15803d; }
+  .apply-polish-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .lint-errors { margin-top: 8px; padding: 6px 8px; background: #450a0a; border-left: 3px solid #ef4444; border-radius: 0 4px 4px 0; }
+  .lint-err { color: #fecaca; font-size: 0.85rem; }
+  .lint-warns { margin-top: 8px; }
+  .lint-warns summary { cursor: pointer; font-size: 0.85rem; color: #fbbf24; }
+  .lint-warn { font-size: 0.82rem; color: #cbd5e1; padding-left: 16px; }
+  .badge { padding: 2px 8px; border-radius: 3px; font-size: 0.75rem; font-weight: 600; }
+  .badge.ok { background: #166534; color: #dcfce7; }
+  .badge.err { background: #7f1d1d; color: #fecaca; }
+  .runs-list, .scans-list { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
+  .runs-header, .scans-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .runs-meta, .scans-meta { font-size: 0.78rem; color: #94a3b8; }
+  .runs-table, .scans-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .runs-table th, .scans-table th { background: #1f2937; color: #94a3b8; padding: 6px 8px; text-align: left; font-weight: 500; }
+  .runs-table td, .scans-table td { padding: 6px 8px; border-top: 1px solid #1f2937; color: #e6e8eb; }
+  .runs-table .mono.small, .scans-table .mono.small { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #94a3b8; }
+  .star-btn { background: #1f2937; color: #fbbf24; border: 1px solid #2a2f37; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 0.82rem; }
+  .star-btn:hover { background: #2a2f37; }
+  .star-btn.star-on { background: #422006; color: #fde047; border-color: #ca8a04; cursor: default; }
+  .star-btn:disabled { opacity: 0.85; cursor: default; }
+  .score { padding: 2px 6px; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 0.82rem; }
+  .score-high { background: #052e16; color: #4ade80; }
+  .score-mid { background: #422006; color: #fbbf24; }
+  .score-low { background: #450a0a; color: #f87171; }
+  .badge-status { padding: 2px 8px; border-radius: 3px; font-size: 0.75rem; }
+  .badge-status.succeeded { background: #052e16; color: #4ade80; }
+  .badge-status.failed { background: #450a0a; color: #f87171; }
+  .scan-fail { padding: 6px 8px; margin: 4px 0; border-radius: 3px; font-size: 0.82rem; }
+  .scan-sev-block { background: #450a0a; border-left: 3px solid #ef4444; }
+  .scan-sev-warn { background: #422006; border-left: 3px solid #fbbf24; }
+  .scan-sev-tag { font-size: 0.7rem; background: #1f2937; padding: 1px 6px; border-radius: 2px; margin-left: 6px; color: #cbd5e1; }
+  .scan-detail { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #cbd5e1; margin-top: 4px; }
+  .dim { color: #6b7280; }
   .skill-edit-form { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
   .skill-edit-form .form-banner { background: #1f2937; border-left: 3px solid #fbbf24; padding: 8px 12px; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; border-radius: 0 4px 4px 0; }
   .skill-edit-form label { display: block; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; }
@@ -614,7 +666,7 @@ export function renderDashboardHtml(): string {
   <h2>Active skills <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(edit frontmatter — body is mutator-managed)</span></h2>
   <div id="skills"
        hx-get="/dashboard/skills"
-       hx-trigger="load, every 30s[!document.querySelector('#skills input:focus, #skills textarea:focus, #skills select:focus, #skills details[open]')]"
+       hx-trigger="load, every 30s[!document.querySelector('#skills input:focus, #skills textarea:focus, #skills select:focus, #skills details[open], #skills .skill-edit-zone:not(:empty)')]"
        hx-target="this" hx-swap="innerHTML">
     Loading…
   </div>
@@ -878,11 +930,33 @@ export function renderSkillsListFragment(
         <div class="skill-row" data-skill-id="${escapeHtml(s.skill_id)}">
           <div class="skill-header">
             <span class="skill-name">${escapeHtml(s.name)} <span style="color:#94a3b8">v${escapeHtml(s.version)}</span></span>
-            <button class="edit-btn"
-                    hx-get="/dashboard/skills/edit?skill_id=${encodeURIComponent(s.skill_id)}"
-                    hx-target="next .skill-edit-zone" hx-swap="innerHTML">
-              Edit frontmatter
-            </button>
+            <span class="skill-actions">
+              <button class="edit-btn"
+                      hx-get="/dashboard/skills/edit?skill_id=${encodeURIComponent(s.skill_id)}"
+                      hx-target="next .skill-edit-zone" hx-swap="innerHTML">
+                Edit frontmatter
+              </button>
+              <button class="polish-btn"
+                      title="v0.23.0 Phase 1 #2 — let the polisher refine this skill's description"
+                      hx-post="/dashboard/skills/${encodeURIComponent(s.skill_id)}/polish/html"
+                      hx-target="next .skill-edit-zone" hx-swap="innerHTML"
+                      hx-on:htmx:before-request="this.disabled=true; this.textContent='Polishing…'"
+                      hx-on:htmx:after-request="this.disabled=false; this.textContent='✨ Polish'">
+                ✨ Polish
+              </button>
+              <button class="runs-btn"
+                      title="View recent skill runs and tag exemplars"
+                      hx-get="/dashboard/skills/${encodeURIComponent(s.skill_id)}/runs"
+                      hx-target="next .skill-edit-zone" hx-swap="innerHTML">
+                Recent runs
+              </button>
+              <button class="security-btn"
+                      title="View security scan history"
+                      hx-get="/dashboard/skills/${encodeURIComponent(s.skill_id)}/security"
+                      hx-target="next .skill-edit-zone" hx-swap="innerHTML">
+                🛡 Security
+              </button>
+            </span>
           </div>
           <div class="skill-meta">
             ${escapeHtml(s.description || "(no description)")}<br>
@@ -1341,4 +1415,203 @@ export function renderSummarizerHealthFragment(
 
 function fmt(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+// ─── v0.23.2 — Phase 1 dashboard surfaces ───────────────────────────────────
+// Three HTML fragments rendered inline on the skills list, swapped into the
+// .skill-edit-zone div by HTMX:
+//   1. polish preview (after ✨ Polish click) — shows original + polished + Apply button
+//   2. recent runs list (after Recent runs click) — each row has ⭐ button to tag exemplar
+//   3. security scan history (after 🛡 Security click) — table of scans with status
+
+export interface PolishResultRow {
+  skill_id:        string;
+  original:        string;
+  polished:        string;
+  lint_passed:     boolean;
+  lint_warnings:   string[];
+  lint_errors:     string[];
+  backend:         string;
+  duration_ms:     number;
+}
+
+export function renderPolishPreview(r: PolishResultRow): string {
+  const sameText = r.original === r.polished;
+  const lintBadge = r.lint_passed
+    ? `<span class="badge ok">lint OK</span>`
+    : `<span class="badge err">lint FAILED — apply blocked</span>`;
+  const errs = r.lint_errors.length > 0
+    ? `<div class="lint-errors">${r.lint_errors.map((e) => `<div class="lint-err">⚠ ${escapeHtml(e)}</div>`).join("")}</div>`
+    : "";
+  const warns = r.lint_warnings.length > 0
+    ? `<details class="lint-warns"><summary>${r.lint_warnings.length} warning(s)</summary>${r.lint_warnings.map((w) => `<div class="lint-warn">${escapeHtml(w)}</div>`).join("")}</details>`
+    : "";
+  // Apply button: HTMX POSTs JSON to /apply-polish; on success the row reloads.
+  // Disabled when polished == original (no change) or lint failed.
+  const canApply = !sameText && r.lint_passed;
+  const applyBtn = canApply
+    ? `<button class="apply-polish-btn"
+              hx-post="/dashboard/skills/${encodeURIComponent(r.skill_id)}/apply-polish"
+              hx-vals='{"description":${JSON.stringify(r.polished)}}'
+              hx-headers='{"Content-Type":"application/json"}'
+              hx-ext="json-enc"
+              hx-target="closest .skill-edit-zone"
+              hx-swap="innerHTML"
+              hx-on:htmx:after-request="this.disabled=true; this.textContent='Applied — reload to refresh'">
+        Apply polish
+      </button>`
+    : `<button class="apply-polish-btn" disabled title="${sameText ? "polished == original (no change)" : "lint failed"}">
+        Apply polish
+      </button>`;
+
+  return `
+    <div class="polish-result">
+      <div class="polish-header">
+        <strong>Polish suggestion</strong>
+        <span class="polish-meta">backend: <code>${escapeHtml(r.backend)}</code> · ${r.duration_ms}ms · ${lintBadge}</span>
+      </div>
+      <div class="polish-grid">
+        <div class="polish-col">
+          <div class="polish-col-title">Original</div>
+          <div class="polish-col-text">${escapeHtml(r.original)}</div>
+        </div>
+        <div class="polish-col">
+          <div class="polish-col-title">Polished${sameText ? " <em>(no change)</em>" : ""}</div>
+          <div class="polish-col-text">${escapeHtml(r.polished)}</div>
+        </div>
+      </div>
+      ${errs}
+      ${warns}
+      <div class="polish-actions">${applyBtn}</div>
+    </div>
+  `;
+}
+
+export interface SkillRunRow {
+  run_id:        string;
+  skill_id:      string;
+  status:        string;
+  outcome_score: number | null;
+  ts:            string;
+  agent_id:      string | null;
+  is_exemplar:   boolean;
+  exemplar_note: string | null;
+}
+
+export function renderSkillRunsFragment(skillId: string, rows: SkillRunRow[]): string {
+  if (rows.length === 0) {
+    return `<div class="runs-list-empty">No runs recorded yet for <code>${escapeHtml(skillId)}</code>.</div>`;
+  }
+  const trs = rows.map((r) => {
+    const score = r.outcome_score === null
+      ? `<span class="dim">—</span>`
+      : `<span class="score score-${r.outcome_score >= 0.8 ? "high" : r.outcome_score >= 0.5 ? "mid" : "low"}">${r.outcome_score.toFixed(2)}</span>`;
+    const star = r.is_exemplar
+      ? `<button class="star-btn star-on" disabled title="Already tagged as exemplar${r.exemplar_note ? ': ' + r.exemplar_note : ''}">★ Exemplar</button>`
+      : `<button class="star-btn"
+                title="Tag as operator exemplar — flows into mutator proposer prompt"
+                hx-post="/dashboard/skill-runs/${encodeURIComponent(r.run_id)}/tag-exemplar/html"
+                hx-target="closest tr" hx-swap="outerHTML"
+                hx-prompt="Optional note for this exemplar (what makes it good?)">
+          ☆ Tag exemplar
+        </button>`;
+    const when = r.ts.slice(0, 19).replace("T", " ");
+    return `
+      <tr data-run-id="${escapeHtml(r.run_id)}">
+        <td class="mono small">${escapeHtml(when)}</td>
+        <td><span class="badge-status ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>
+        <td>${score}</td>
+        <td class="mono small">${escapeHtml(r.agent_id ?? "—")}</td>
+        <td class="mono small">${escapeHtml(r.run_id.slice(0, 16))}…</td>
+        <td>${star}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <div class="runs-list">
+      <div class="runs-header">
+        <strong>Recent runs</strong>
+        <span class="runs-meta">tag a run as ★ exemplar — it flows into the mutator's proposer prompt as positive training signal</span>
+      </div>
+      <table class="runs-table">
+        <thead><tr><th>When</th><th>Status</th><th>Score</th><th>Agent</th><th>Run ID</th><th></th></tr></thead>
+        <tbody>${trs}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+export function renderSkillRunRow(r: SkillRunRow): string {
+  // Renders a SINGLE <tr> — used as the swap target after tagging an exemplar.
+  const score = r.outcome_score === null
+    ? `<span class="dim">—</span>`
+    : `<span class="score score-${r.outcome_score >= 0.8 ? "high" : r.outcome_score >= 0.5 ? "mid" : "low"}">${r.outcome_score.toFixed(2)}</span>`;
+  const star = r.is_exemplar
+    ? `<button class="star-btn star-on" disabled title="Tagged${r.exemplar_note ? ': ' + r.exemplar_note : ''}">★ Exemplar</button>`
+    : `<button class="star-btn"
+              hx-post="/dashboard/skill-runs/${encodeURIComponent(r.run_id)}/tag-exemplar/html"
+              hx-target="closest tr" hx-swap="outerHTML"
+              hx-prompt="Optional note for this exemplar (what makes it good?)">
+        ☆ Tag exemplar
+      </button>`;
+  const when = r.ts.slice(0, 19).replace("T", " ");
+  return `<tr data-run-id="${escapeHtml(r.run_id)}">
+    <td class="mono small">${escapeHtml(when)}</td>
+    <td><span class="badge-status ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>
+    <td>${score}</td>
+    <td class="mono small">${escapeHtml(r.agent_id ?? "—")}</td>
+    <td class="mono small">${escapeHtml(r.run_id.slice(0, 16))}…</td>
+    <td>${star}</td>
+  </tr>`;
+}
+
+export interface SecurityScanRow {
+  scanned_at:   string;
+  score:        number;
+  passed:       boolean;
+  source:       string;
+  failures:     Array<{ name: string; severity: string; detail: string | null }>;
+}
+
+export function renderSecurityScansFragment(skillId: string, rows: SecurityScanRow[]): string {
+  if (rows.length === 0) {
+    return `<div class="scans-list-empty">No security scans recorded for <code>${escapeHtml(skillId)}</code> yet. Scans are written every time the skill is upserted (mutator, marketplace, operator).</div>`;
+  }
+  const trs = rows.map((r) => {
+    const when = r.scanned_at.slice(0, 19).replace("T", " ");
+    const verdict = r.passed
+      ? `<span class="badge ok">8/8 PASS</span>`
+      : `<span class="badge err">${r.score}/8 FAIL</span>`;
+    const failsList = r.failures.length > 0
+      ? `<details><summary>${r.failures.length} failure(s)</summary>${
+          r.failures.map((f) =>
+            `<div class="scan-fail scan-sev-${escapeHtml(f.severity)}">
+              <strong>${escapeHtml(f.name)}</strong>
+              <span class="scan-sev-tag">${escapeHtml(f.severity)}</span>
+              ${f.detail ? `<div class="scan-detail">${escapeHtml(f.detail)}</div>` : ""}
+            </div>`
+          ).join("")
+        }</details>`
+      : `<span class="dim">none</span>`;
+    return `
+      <tr>
+        <td class="mono small">${escapeHtml(when)}</td>
+        <td>${verdict}</td>
+        <td><code>${escapeHtml(r.source)}</code></td>
+        <td>${failsList}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <div class="scans-list">
+      <div class="scans-header">
+        <strong>Security scan history</strong>
+        <span class="scans-meta">8-point check (v0.23.0 #1) — every upsert through storage_dual is logged</span>
+      </div>
+      <table class="scans-table">
+        <thead><tr><th>When</th><th>Verdict</th><th>Source</th><th>Failures</th></tr></thead>
+        <tbody>${trs}</tbody>
+      </table>
+    </div>
+  `;
 }
