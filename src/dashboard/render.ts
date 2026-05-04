@@ -376,6 +376,46 @@ export function renderDashboardHtml(): string {
   .polish-current { font-size: 0.85rem; color: #cbd5e1; padding: 6px 8px; background: #0a0d12; border-radius: 3px; }
   .polish-col-new { border-color: #15803d; background: #052e16; }
   .apply-polish-btn-blocked { background: #450a0a !important; color: #fecaca !important; border-color: #7f1d1d !important; }
+  /* v0.24.0 Phase 2 — marketplace pulls */
+  .market-pull-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .pull-marketplace-btn { background: #1e3a8a; color: #dbeafe; border: 1px solid #1e40af; padding: 8px 18px; border-radius: 5px; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+  .pull-marketplace-btn:hover:not(:disabled) { background: #1e40af; }
+  .pull-marketplace-btn:disabled { opacity: 0.6; cursor: progress; }
+  .market-meta { font-size: 0.82rem; color: #94a3b8; }
+  .market-summary { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
+  .market-summary-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .market-summary-counts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .count { padding: 3px 10px; border-radius: 3px; font-size: 0.82rem; font-family: ui-monospace, monospace; }
+  .count-added    { background: #052e16; color: #4ade80; }
+  .count-rejlint  { background: #7f1d1d; color: #fecaca; }
+  .count-rejscan  { background: #450a0a; color: #fecaca; }
+  .count-already  { background: #1e3a8a; color: #93c5fd; }
+  .count-stale    { background: #422006; color: #fbbf24; }
+  .count-error    { background: #7f1d1d; color: #fecaca; }
+  .count-total    { background: #1f2937; color: #cbd5e1; }
+  .market-details-link { color: #38bdf8; font-size: 0.85rem; text-decoration: none; cursor: pointer; }
+  .market-details-link:hover { text-decoration: underline; }
+  .market-details-zone { margin-top: 8px; }
+  .market-pulls-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }
+  .market-pulls-table th { background: #1f2937; color: #94a3b8; padding: 6px 8px; text-align: left; font-weight: 500; }
+  .market-pulls-table td { padding: 6px 8px; border-top: 1px solid #1f2937; color: #e6e8eb; vertical-align: top; }
+  .market-pulls-table .pull-details-row { background: transparent; }
+  .market-pulls-table .pull-details-row td { border-top: none; padding: 0; }
+  .pull-details { background: #0a0d12; border: 1px solid #1f2937; border-radius: 4px; padding: 10px; margin: 4px 8px 12px 8px; }
+  .pull-details-header { font-size: 0.85rem; color: #cbd5e1; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #1f2937; }
+  .pull-details-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .pull-details-table th { background: #1f2937; color: #94a3b8; padding: 5px 8px; text-align: left; }
+  .pull-details-table td { padding: 5px 8px; border-top: 1px solid #1f2937; }
+  .pull-details-table tr.decision-added { background: rgba(74, 222, 128, 0.05); }
+  .pull-details-table tr.decision-rejected-lint { background: rgba(248, 113, 113, 0.05); }
+  .pull-details-table tr.decision-rejected-scan { background: rgba(248, 113, 113, 0.07); }
+  .pull-details-table tr.decision-already-exists { background: rgba(147, 197, 253, 0.05); }
+  .pull-details-table tr.decision-stale-version { background: rgba(251, 191, 36, 0.05); }
+  .pull-details-table tr.decision-error { background: rgba(248, 113, 113, 0.10); }
+  .pull-details-table .reason-cell { max-width: 360px; word-wrap: break-word; }
+  .pull-details-btn { background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 0.78rem; }
+  .pull-details-btn:hover { background: #2a2f37; color: #38bdf8; }
+  .badge.dim-badge { background: #374151; color: #9ca3af; }
   .polish-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
   .polish-meta { font-size: 0.8rem; color: #94a3b8; }
   .polish-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -677,6 +717,28 @@ export function renderDashboardHtml(): string {
        hx-trigger="load, every 30s[!document.querySelector('#skills input:focus, #skills textarea:focus, #skills select:focus, #skills details[open], #skills .skill-edit-zone:not(:empty)')]"
        hx-target="this" hx-swap="innerHTML">
     Loading…
+  </div>
+</div>
+
+<!-- v0.24.0 Phase 2 — marketplace pulls panel -->
+<div class="panel">
+  <h2>Marketplace pulls <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(historic skill imports from anthropics/skills + others — see what was added vs rejected, with reasons)</span></h2>
+  <div class="market-pull-actions">
+    <button class="pull-marketplace-btn"
+            hx-post="/dashboard/marketplace/pull"
+            hx-target="#market-summary" hx-swap="innerHTML"
+            hx-on:htmx:before-request="this.disabled=true; this.textContent='Pulling… (may take 30-60s)'"
+            hx-on:htmx:after-request="this.disabled=false; this.textContent='🛒 Pull from anthropics/skills'; htmx.trigger('#market-pulls-list', 'refresh')">
+      🛒 Pull from anthropics/skills
+    </button>
+    <span class="market-meta">Walks repo tree, runs lint + 8-point scan on each SKILL.md, upserts only those that pass. Every attempt logged.</span>
+  </div>
+  <div id="market-summary"></div>
+  <div id="market-pulls-list"
+       hx-get="/dashboard/marketplace/pulls"
+       hx-trigger="load, refresh from:body, every 60s[!document.querySelector('#market-pulls-list .pull-row-expanded')]"
+       hx-target="this" hx-swap="innerHTML">
+    Loading historic pulls…
   </div>
 </div>
 
@@ -1610,6 +1672,188 @@ export interface SecurityScanRow {
   passed:       boolean;
   source:       string;
   failures:     Array<{ name: string; severity: string; detail: string | null }>;
+}
+
+// v0.24.0 Phase 2 — marketplace pull rendering
+export interface MarketplacePullSummaryRow {
+  pull_id:        string;
+  source:         string;
+  source_commit:  string;
+  total:          number;
+  added:          number;
+  rejected_lint:  number;
+  rejected_scan:  number;
+  already_exists: number;
+  stale_version:  number;
+  errors:         number;
+  duration_ms:    number;
+}
+
+export function renderMarketplacePullSummary(s: MarketplacePullSummaryRow): string {
+  const verdict = s.added > 0
+    ? `<span class="badge ok">${s.added} added</span>`
+    : `<span class="badge dim-badge">0 added</span>`;
+  return `
+    <div class="market-summary">
+      <div class="market-summary-header">
+        <strong>Pull complete</strong>
+        ${verdict}
+        <span class="polish-meta">source: <code>${escapeHtml(s.source)}</code> @ <code>${escapeHtml(s.source_commit.slice(0, 8))}</code> · ${s.duration_ms}ms · <code>pull_id ${escapeHtml(s.pull_id.slice(0, 8))}…</code></span>
+      </div>
+      <div class="market-summary-counts">
+        <span class="count count-added">${s.added} added</span>
+        <span class="count count-already">${s.already_exists} already exists</span>
+        <span class="count count-stale">${s.stale_version} stale</span>
+        <span class="count count-rejlint">${s.rejected_lint} rejected (lint)</span>
+        <span class="count count-rejscan">${s.rejected_scan} rejected (scan)</span>
+        <span class="count count-error">${s.errors} errors</span>
+        <span class="count count-total">${s.total} total</span>
+      </div>
+      <a href="#" class="market-details-link"
+         hx-get="/dashboard/marketplace/pulls/${encodeURIComponent(s.pull_id)}"
+         hx-target="next .market-details-zone" hx-swap="innerHTML">View per-skill verdicts →</a>
+      <div class="market-details-zone"></div>
+    </div>
+  `;
+}
+
+export interface MarketplacePullsListRow {
+  pull_id:        string;
+  source:         string;
+  source_commit:  string;
+  pulled_at:      string;
+  pulled_by:      string;
+  total:          number;
+  added:          number;
+  rejected_lint:  number;
+  rejected_scan:  number;
+  already_exists: number;
+  stale_version:  number;
+  errors:         number;
+}
+
+export function renderMarketplacePullsList(rows: MarketplacePullsListRow[]): string {
+  if (rows.length === 0) {
+    return `<p class="empty">No marketplace pulls recorded yet. Click the 🛒 button above to import skills from anthropics/skills.</p>`;
+  }
+  const trs = rows.map((r) => {
+    const when = r.pulled_at.slice(0, 19).replace("T", " ");
+    const totalRejected = r.rejected_lint + r.rejected_scan;
+    const verdictBadge = r.errors > 0
+      ? `<span class="badge err">errors</span>`
+      : (r.added > 0 ? `<span class="badge ok">+${r.added}</span>` : `<span class="badge dim-badge">no-op</span>`);
+    return `
+      <tr class="pull-row" data-pull-id="${escapeHtml(r.pull_id)}">
+        <td class="mono small">${escapeHtml(when)}</td>
+        <td>${verdictBadge}</td>
+        <td><code>${escapeHtml(r.source)}</code><br><span class="mono small">@${escapeHtml(r.source_commit.slice(0, 8))}</span></td>
+        <td class="mono small">${r.total} skills</td>
+        <td>
+          <span class="count count-added">+${r.added}</span>
+          ${r.already_exists > 0 ? `<span class="count count-already">${r.already_exists}↻</span>` : ""}
+          ${totalRejected > 0 ? `<span class="count count-rejlint">${totalRejected}✗</span>` : ""}
+          ${r.errors > 0 ? `<span class="count count-error">${r.errors}!</span>` : ""}
+        </td>
+        <td>
+          <button class="pull-details-btn"
+                  hx-get="/dashboard/marketplace/pulls/${encodeURIComponent(r.pull_id)}"
+                  hx-target="next .pull-details-zone" hx-swap="innerHTML"
+                  hx-on:htmx:after-request="this.closest('tr').classList.add('pull-row-expanded')">
+            View details
+          </button>
+        </td>
+      </tr>
+      <tr class="pull-details-row">
+        <td colspan="6"><div class="pull-details-zone"></div></td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <table class="market-pulls-table">
+      <thead><tr>
+        <th>When</th><th>Verdict</th><th>Source</th><th>Total</th><th>Counts</th><th></th>
+      </tr></thead>
+      <tbody>${trs}</tbody>
+    </table>
+  `;
+}
+
+export interface MarketplacePullDetailRow {
+  skill_name:        string;
+  skill_version:     string;
+  skill_scope:       string;
+  candidate_skill_id: string;
+  source_path:       string;
+  decision:          string;
+  decision_reason:   string;
+  lint_passed:       boolean | null;
+  lint_errors:       string[] | null;
+  lint_warnings:     string[] | null;
+  scan_score:        number | null;
+  scan_passed:       boolean | null;
+  scan_block_failures: Array<{ name: string; severity: string; detail: string | null }> | null;
+  pulled_at:         string;
+}
+
+export function renderMarketplacePullDetails(pullId: string, rows: MarketplacePullDetailRow[]): string {
+  if (rows.length === 0) {
+    return `<div class="pull-details-empty">No detail rows for pull ${escapeHtml(pullId)}.</div>`;
+  }
+  const trs = rows.map((r) => {
+    const decisionClass = `decision-${r.decision.replace(/_/g, "-")}`;
+    const decisionLabel = r.decision === "added" ? "✓ ADDED"
+      : r.decision === "rejected_lint" ? "✗ REJECTED (lint)"
+      : r.decision === "rejected_scan" ? "✗ REJECTED (scan)"
+      : r.decision === "already_exists" ? "↻ already exists"
+      : r.decision === "stale_version" ? "⚠ stale"
+      : r.decision === "error" ? "! ERROR"
+      : r.decision;
+    const scanCol = r.scan_score === null
+      ? `<span class="dim">—</span>`
+      : `<span class="score score-${r.scan_passed ? "high" : "low"}">${r.scan_score}/8</span>`;
+    const lintCol = r.lint_passed === null
+      ? `<span class="dim">—</span>`
+      : (r.lint_passed ? `<span class="badge ok">OK</span>` : `<span class="badge err">FAIL</span>`);
+    const errorList = (r.lint_errors && r.lint_errors.length > 0)
+      ? `<details class="lint-errors"><summary>lint errors (${r.lint_errors.length})</summary>${r.lint_errors.map((e) => `<div class="lint-err">⚠ ${escapeHtml(e)}</div>`).join("")}</details>`
+      : "";
+    const blockList = (r.scan_block_failures && r.scan_block_failures.length > 0)
+      ? `<details class="scan-block"><summary>scan block failures (${r.scan_block_failures.length})</summary>${r.scan_block_failures.map((f) => `<div class="scan-fail scan-sev-${escapeHtml(f.severity)}"><strong>${escapeHtml(f.name)}</strong> — ${escapeHtml(f.detail ?? "")}</div>`).join("")}</details>`
+      : "";
+    return `
+      <tr class="${decisionClass}">
+        <td class="mono small">${escapeHtml(r.skill_name)}</td>
+        <td><strong>${decisionLabel}</strong></td>
+        <td>${lintCol}</td>
+        <td>${scanCol}</td>
+        <td class="reason-cell">${escapeHtml(r.decision_reason)}${errorList}${blockList}</td>
+        <td class="mono small"><code>${escapeHtml(r.source_path)}</code></td>
+      </tr>
+    `;
+  }).join("");
+  const summary = {
+    added: rows.filter((r) => r.decision === "added").length,
+    rejected: rows.filter((r) => r.decision.startsWith("rejected")).length,
+    already_exists: rows.filter((r) => r.decision === "already_exists").length,
+    error: rows.filter((r) => r.decision === "error").length,
+  };
+  return `
+    <div class="pull-details">
+      <div class="pull-details-header">
+        Pull <code>${escapeHtml(pullId.slice(0, 8))}…</code> · ${rows.length} skills processed ·
+        <span class="count count-added">+${summary.added}</span>
+        <span class="count count-rejlint">${summary.rejected}✗</span>
+        <span class="count count-already">${summary.already_exists}↻</span>
+        ${summary.error > 0 ? `<span class="count count-error">${summary.error}!</span>` : ""}
+      </div>
+      <table class="pull-details-table">
+        <thead><tr>
+          <th>Skill</th><th>Decision</th><th>Lint</th><th>Scan</th><th>Reason</th><th>Path</th>
+        </tr></thead>
+        <tbody>${trs}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 export function renderSecurityScansFragment(skillId: string, rows: SecurityScanRow[]): string {

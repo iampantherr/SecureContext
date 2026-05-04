@@ -677,6 +677,45 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 22,
+    description: "v0.24.0 Phase 2: skill_marketplace_pulls_pg — audit log for marketplace skill pulls. Every pull attempt (operator-triggered or future cron) writes one row per skill: source repo, source commit SHA at pull time, the candidate's lint+scan verdict, decision (added / rejected_lint / rejected_scan / already_exists / stale_version / error), reason. Operator-visible via the dashboard 'Marketplace pulls' panel; lets the operator see ALL historic pulls — what was added, what was rejected, why — without losing audit trail.",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_marketplace_pulls_pg (
+          id                BIGSERIAL PRIMARY KEY,
+          pull_id           UUID NOT NULL,
+          source            TEXT NOT NULL,
+          source_commit     TEXT,
+          source_path       TEXT,
+          skill_name        TEXT NOT NULL,
+          skill_version     TEXT,
+          skill_scope       TEXT,
+          candidate_skill_id TEXT,
+          candidate_body_hash TEXT,
+          lint_passed       BOOLEAN,
+          lint_errors       JSONB,
+          lint_warnings     JSONB,
+          scan_score        INTEGER,
+          scan_passed       BOOLEAN,
+          scan_block_failures JSONB,
+          decision          TEXT NOT NULL,
+          decision_reason   TEXT,
+          pulled_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          pulled_by         TEXT NOT NULL DEFAULT 'operator',
+          CONSTRAINT chk_smp_decision CHECK (decision IN (
+            'added', 'rejected_lint', 'rejected_scan', 'already_exists',
+            'stale_version', 'error'
+          ))
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_smp_pull_id    ON skill_marketplace_pulls_pg(pull_id)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_smp_pulled_at  ON skill_marketplace_pulls_pg(pulled_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_smp_decision   ON skill_marketplace_pulls_pg(decision, pulled_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_smp_skill_name ON skill_marketplace_pulls_pg(skill_name, pulled_at DESC)`);
+    },
+  },
+
 ];
 
 /**

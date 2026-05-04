@@ -1168,6 +1168,116 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.24.0 Phase 2 — marketplace pull endpoints
+  //
+  // POST /dashboard/marketplace/pull — runs a pull, returns HTML summary
+  // GET /dashboard/marketplace/pulls — historic pulls table
+  // GET /dashboard/marketplace/pulls/:pull_id — per-skill verdicts for one pull
+  app.post("/dashboard/marketplace/pull", async (request, reply) => {
+    try {
+      const { pullFromMarketplace } = await import("./skills/marketplace_pull.js");
+      const summary = await pullFromMarketplace({});
+      const { renderMarketplacePullSummary } = await import("./dashboard/render.js");
+      reply.type("text/html").send(renderMarketplacePullSummary(summary));
+    } catch (e) {
+      reply.status(500).type("text/html").send(
+        `<div class="error">Marketplace pull failed: ${escapeHtml((e as Error).message)}</div>`,
+      );
+    }
+  });
+
+  app.get("/dashboard/marketplace/pulls", async (_request, reply) => {
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const rows = await withClient(async (c) => {
+        // Aggregate per pull_id: latest pulled_at, total skills + decision counts
+        const r = await c.query(
+          `SELECT pull_id::text, source, source_commit,
+                  MIN(pulled_at)::text AS pulled_at,
+                  pulled_by,
+                  COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE decision = 'added') AS added,
+                  COUNT(*) FILTER (WHERE decision = 'rejected_lint') AS rejected_lint,
+                  COUNT(*) FILTER (WHERE decision = 'rejected_scan') AS rejected_scan,
+                  COUNT(*) FILTER (WHERE decision = 'already_exists') AS already_exists,
+                  COUNT(*) FILTER (WHERE decision = 'stale_version') AS stale_version,
+                  COUNT(*) FILTER (WHERE decision = 'error') AS errors
+             FROM skill_marketplace_pulls_pg
+             GROUP BY pull_id, source, source_commit, pulled_by
+             ORDER BY MIN(pulled_at) DESC
+             LIMIT 30`,
+        );
+        return r.rows;
+      });
+      const { renderMarketplacePullsList } = await import("./dashboard/render.js");
+      reply.type("text/html").send(renderMarketplacePullsList(rows.map((r: Record<string, unknown>) => ({
+        pull_id:        String(r.pull_id),
+        source:         String(r.source),
+        source_commit:  String(r.source_commit ?? ""),
+        pulled_at:      String(r.pulled_at),
+        pulled_by:      String(r.pulled_by),
+        total:          Number(r.total),
+        added:          Number(r.added),
+        rejected_lint:  Number(r.rejected_lint),
+        rejected_scan:  Number(r.rejected_scan),
+        already_exists: Number(r.already_exists),
+        stale_version:  Number(r.stale_version),
+        errors:         Number(r.errors),
+      }))));
+    } catch (e) {
+      reply.status(500).type("text/html").send(
+        `<div class="error">Failed to load marketplace pulls: ${escapeHtml((e as Error).message)}</div>`,
+      );
+    }
+  });
+
+  app.get("/dashboard/marketplace/pulls/:pull_id", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const pullId = String(params.pull_id ?? "").trim();
+    if (!pullId) {
+      reply.status(400).type("text/html").send(`<div class="error">missing pull_id</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const rows = await withClient(async (c) => {
+        const r = await c.query(
+          `SELECT skill_name, skill_version, skill_scope, candidate_skill_id,
+                  source_path, decision, decision_reason,
+                  lint_passed, lint_errors, lint_warnings,
+                  scan_score, scan_passed, scan_block_failures,
+                  pulled_at::text AS pulled_at
+             FROM skill_marketplace_pulls_pg
+             WHERE pull_id = $1::uuid
+             ORDER BY pulled_at`,
+          [pullId],
+        );
+        return r.rows;
+      });
+      const { renderMarketplacePullDetails } = await import("./dashboard/render.js");
+      reply.type("text/html").send(renderMarketplacePullDetails(pullId, rows.map((r: Record<string, unknown>) => ({
+        skill_name:        String(r.skill_name),
+        skill_version:     String(r.skill_version ?? ""),
+        skill_scope:       String(r.skill_scope ?? ""),
+        candidate_skill_id: String(r.candidate_skill_id ?? ""),
+        source_path:       String(r.source_path ?? ""),
+        decision:          String(r.decision),
+        decision_reason:   String(r.decision_reason ?? ""),
+        lint_passed:       r.lint_passed === null ? null : Boolean(r.lint_passed),
+        lint_errors:       typeof r.lint_errors === "string" ? JSON.parse(r.lint_errors) : (r.lint_errors as string[] | null),
+        lint_warnings:     typeof r.lint_warnings === "string" ? JSON.parse(r.lint_warnings) : (r.lint_warnings as string[] | null),
+        scan_score:        r.scan_score === null ? null : Number(r.scan_score),
+        scan_passed:       r.scan_passed === null ? null : Boolean(r.scan_passed),
+        scan_block_failures: typeof r.scan_block_failures === "string" ? JSON.parse(r.scan_block_failures) : (r.scan_block_failures as Array<{ name: string; severity: string; detail: string | null }> | null),
+        pulled_at:         String(r.pulled_at),
+      }))));
+    } catch (e) {
+      reply.status(500).type("text/html").send(
+        `<div class="error">Failed to load pull details: ${escapeHtml((e as Error).message)}</div>`,
+      );
+    }
+  });
+
   // v0.23.0 Phase 1 #2 — Polish a skill's description.
   // Operator-triggered via dashboard button. Returns the suggested polish
   // (does NOT auto-apply); operator reviews and POSTs to /apply if approved.
