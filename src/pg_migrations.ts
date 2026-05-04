@@ -639,6 +639,44 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 20,
+    description: "v0.23.0 Phase 1 #1: skill_security_scans_pg — audit log for the 8-point security scan that gates every skill before it lands in skills_pg. Captures the body hash being scanned, score (0-8), pass/fail, and structured failure detail per check. Operator-visible via the dashboard 'Security scans' panel.",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_security_scans_pg (
+          id              BIGSERIAL PRIMARY KEY,
+          skill_id        TEXT NOT NULL,
+          candidate_hmac  TEXT,
+          body_hash       TEXT NOT NULL,
+          score           INTEGER NOT NULL,
+          passed          BOOLEAN NOT NULL,
+          failures        JSONB NOT NULL DEFAULT '[]'::jsonb,
+          source          TEXT NOT NULL DEFAULT 'unknown',
+          scanned_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT chk_sss_score    CHECK (score BETWEEN 0 AND 8),
+          CONSTRAINT chk_sss_source   CHECK (source IN ('mutator', 'marketplace', 'operator', 'auto-import', 'unknown'))
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sss_skill_ts   ON skill_security_scans_pg(skill_id, scanned_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sss_passed_ts  ON skill_security_scans_pg(passed, scanned_at DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_sss_source_ts  ON skill_security_scans_pg(source, scanned_at DESC)`);
+    },
+  },
+
+  {
+    id: 21,
+    description: "v0.23.0 Phase 1 F: skill_runs_pg.is_exemplar + tagging metadata. Operator clicks ⭐ on the dashboard to flag a skill_run as a textbook example. The mutator pulls these as positive training signal when generating new candidates — turning a human's qualitative judgment into a measurable input to the improvement loop.",
+    up: async (client) => {
+      // Add columns to skill_runs_pg (idempotent: IF NOT EXISTS)
+      await client.query(`ALTER TABLE skill_runs_pg ADD COLUMN IF NOT EXISTS is_exemplar BOOLEAN NOT NULL DEFAULT FALSE`);
+      await client.query(`ALTER TABLE skill_runs_pg ADD COLUMN IF NOT EXISTS exemplar_tagged_by TEXT`);
+      await client.query(`ALTER TABLE skill_runs_pg ADD COLUMN IF NOT EXISTS exemplar_tagged_at TIMESTAMPTZ`);
+      await client.query(`ALTER TABLE skill_runs_pg ADD COLUMN IF NOT EXISTS exemplar_note TEXT`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_runs_exemplar ON skill_runs_pg(skill_id, is_exemplar) WHERE is_exemplar = TRUE`);
+    },
+  },
+
 ];
 
 /**

@@ -66,14 +66,18 @@ const HAPPY_FIXTURE: SkillFixture = {
 };
 
 async function makeParentSkill(fixtures: SkillFixture[] = [RETRY_FIXTURE]): Promise<Skill> {
+  // v0.23.0: description and body length comply with the lint gate so mutator
+  // candidates (which inherit this frontmatter) pass through storage_dual.upsertSkill.
   return buildSkill(
     {
       name: "audit", version: "1.0.0", scope: "global",
-      description: "audit",
+      description: "Audit a source file for security issues and style problems",
       acceptance_criteria: { min_outcome_score: 0.5, min_pass_rate: 0.5 },
       fixtures,
     },
-    "# Audit\n\nDo the audit (no retry).",
+    "# Audit\n\nWhen invoked with input, perform the audit and return findings.\n" +
+    "Do not retry on failure unless the candidate body explicitly says otherwise.\n" +
+    "## Steps\n1. Validate input shape\n2. Run the audit\n3. Return findings\n",
   );
 }
 

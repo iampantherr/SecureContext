@@ -34,7 +34,7 @@ import type {
 // (when ZC_TELEMETRY_BACKEND=postgres|dual). Falls through to SQLite otherwise.
 import {
   upsertSkill, archiveSkill, getRecentSkillRuns, recordMutation, resolveMutation,
-  getActiveSkill, listActiveSkills,
+  getActiveSkill, listActiveSkills, getExemplarRuns,
 } from "./storage_dual.js";
 import {
   candidateToSkill, getMutator, type Mutator,
@@ -97,12 +97,16 @@ export async function runMutationCycle(
   }
   const baseline_score = parentBaselineAgg.avg_score;
 
+  // v0.23.0 Phase 1 F — fetch operator-tagged exemplars (PG-only, returns [] if PG unavailable).
+  const exemplars = await getExemplarRuns(parent.skill_id, 5);
+
   // Step 1: invoke mutator
   const ctx: MutationContext = {
     parent,
     recent_runs:    recentRuns,
     failure_traces: recentRuns.filter((r) => r.failure_trace).map((r) => r.failure_trace as string),
     fixtures:       parent.frontmatter.fixtures ?? [],
+    exemplars,
   };
 
   let mutResult;
@@ -207,7 +211,9 @@ export async function runMutationCycle(
     db.exec("BEGIN");
     try {
       await archiveSkill(db, parent.skill_id, `promoted candidate ${bestCandidateMutationId}`);
-      await upsertSkill(db, bestCandidate);
+      // v0.23.0 — mutator-source so the security-scan audit log attributes
+      // the row correctly. The candidate was already HMAC-verified above.
+      await upsertSkill(db, bestCandidate, "mutator");
       await resolveMutation(db, bestCandidateMutationId, {
         promoted: true,
         promoted_to_skill_id: bestCandidate.skill_id,

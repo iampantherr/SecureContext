@@ -22,6 +22,7 @@ import type { Skill, SkillRun, SkillMutation, SkillScope } from "./types.js";
 import * as sqlite from "./storage.js";
 import * as pg from "./storage_pg.js";
 import { createHash } from "node:crypto";
+import { withClient } from "../pg_pool.js";
 
 function getBackend(): "sqlite" | "postgres" | "dual" {
   const raw = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
@@ -36,7 +37,95 @@ export function projectHashOf(projectPath: string): string {
 
 // ─── Skills CRUD ─────────────────────────────────────────────────────────────
 
-export async function upsertSkill(db: DatabaseSync, skill: Skill): Promise<void> {
+/**
+ * Upsert source for the audit log. Marketplace pulls / mutator candidates /
+ * operator-authored / auto-import all log a different `source` so the
+ * dashboard can surface "where did this skill come from."
+ *
+ * `"test"` is reserved for unit-test round-trip fixtures: it BYPASSES the
+ * lint and security gates because the synthetic fixtures are intentionally
+ * tiny / placeholder. NEVER use "test" in production paths — the gates
+ * exist for a reason.
+ */
+export type SkillUpsertSource = "mutator" | "marketplace" | "operator" | "auto-import" | "unknown" | "test";
+
+/**
+ * Upsert a skill into both PG and local SQLite (per backend mode).
+ *
+ * v0.23.0 GATES (in order):
+ *   1. Lint (Phase 1 #4) — structural quality bar (description length,
+ *      body sections, secret patterns). Errors reject. Warnings logged.
+ *   2. Security scan (Phase 1 #1) — 8-point scan. Score >= 7 required;
+ *      score 8/8 auto-passes; 7/8 logs as "warn-pass" needing operator
+ *      review (still upserts but flagged); ≤6/8 rejects outright.
+ *   3. Audit log — every scan result (pass or fail) lands in
+ *      skill_security_scans_pg with the source attribution.
+ *
+ * Both gates run BEFORE any DB write. A failed scan never reaches the
+ * skills_pg INSERT. The audit row is written regardless of pass/fail so
+ * the operator can see attempted promotions and their rejection reasons.
+ */
+export async function upsertSkill(
+  db: DatabaseSync,
+  skill: Skill,
+  source: SkillUpsertSource = "unknown",
+): Promise<void> {
+  // v0.23.0: synthetic test fixtures bypass the lint / security gates.
+  // Round-trip / scoring tests use intentionally tiny fixtures that wouldn't
+  // pass the production bar. Real ingestion paths (operator, mutator,
+  // marketplace, auto-import, unknown) all run the gates.
+  if (source === "test") {
+    const backend = getBackend();
+    if (backend === "postgres" || backend === "dual") {
+      try { await pg.upsertSkillPg(skill); }
+      catch (e) { if (backend === "postgres") throw e; }
+    }
+    if (backend === "sqlite" || backend === "dual") {
+      await sqlite.upsertSkill(db, skill);
+    }
+    return;
+  }
+
+  // v0.23.0 Phase 1 #4 — lint gate
+  const { lintSkillBody } = await import("./lint.js");
+  const lintResult = lintSkillBody(skill.body, skill.frontmatter);
+  if (!lintResult.ok) {
+    throw new Error(`Cannot upsert skill ${skill.skill_id}: lint failed with ${lintResult.errors.length} error(s) — ${lintResult.errors.join("; ")}`);
+  }
+
+  // v0.23.0 Phase 1 #1 — security scan gate
+  const { scanSkillBody } = await import("./security_scan.js");
+  const scanResult = await scanSkillBody(skill);
+
+  // Always audit-log the scan, regardless of outcome
+  await logSecurityScan(skill, scanResult, source);
+
+  // v0.23.0 Phase 1 #1 — gate logic:
+  //   ANY check with severity='block' that failed → REJECT (regardless of score).
+  //     This catches: secret_scan, prompt_injection, tool_spawn, body_length,
+  //     frontmatter_integrity. These are categorical risks; one fail is one
+  //     too many. A skill with a leaked OpenAI key scores 7/8 but MUST be
+  //     rejected — it doesn't matter that 7 other checks passed.
+  //   Only severity='warn' failures contribute to the warn-pass path:
+  //     filesystem_escape, network_exfil, sleep_abuse. Those are fuzzy
+  //     heuristics where a score-based threshold makes sense.
+  const blockingFailures = scanResult.checks.filter((c) => !c.passed && c.severity === "block");
+  if (blockingFailures.length > 0) {
+    const names = blockingFailures.map((c) => `${c.name} (${c.detail ?? "no detail"})`);
+    throw new Error(
+      `Cannot upsert skill ${skill.skill_id}: security scan blocked — ${names.join("; ")}`,
+    );
+  }
+  // No block-severity failures. If score is still ≤6 (lots of warn-fails),
+  // require operator review explicitly.
+  if (scanResult.score <= 6) {
+    const warnNames = scanResult.checks.filter((c) => !c.passed).map((c) => c.name);
+    throw new Error(
+      `Cannot upsert skill ${skill.skill_id}: security scan score ${scanResult.score}/8 too low (failed: ${warnNames.join(", ")}); requires operator review`,
+    );
+  }
+  // score 7-8/8 with no block-severity failures: pass. Audit row already written.
+
   const backend = getBackend();
   if (backend === "postgres" || backend === "dual") {
     try { await pg.upsertSkillPg(skill); }
@@ -44,6 +133,42 @@ export async function upsertSkill(db: DatabaseSync, skill: Skill): Promise<void>
   }
   if (backend === "sqlite" || backend === "dual") {
     await sqlite.upsertSkill(db, skill);
+  }
+}
+
+/**
+ * Best-effort write of a security scan to skill_security_scans_pg.
+ * Never throws — if PG is unreachable or the table doesn't exist, we
+ * just log to stderr. The skill upsert proceeds based on the scan score.
+ */
+async function logSecurityScan(
+  skill: Skill,
+  scan: import("./security_scan.js").ScanResult,
+  source: SkillUpsertSource,
+): Promise<void> {
+  if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) return;
+  try {
+    const failureRows = scan.checks
+      .filter((c) => !c.passed)
+      .map((c) => ({ name: c.name, severity: c.severity, detail: c.detail ?? null }));
+    await withClient(async (c) => {
+      await c.query(
+        `INSERT INTO skill_security_scans_pg
+           (skill_id, candidate_hmac, body_hash, score, passed, failures, source)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+        [
+          skill.skill_id,
+          skill.body_hmac,
+          scan.body_hash,
+          scan.score,
+          scan.passed,
+          JSON.stringify(failureRows),
+          source,
+        ],
+      );
+    });
+  } catch (e) {
+    process.stderr.write(`[skill-security-scan] audit-log write failed: ${(e as Error).message}\n`);
   }
 }
 
@@ -193,6 +318,52 @@ export async function getRecentSkillRuns(db: DatabaseSync, skill_id: string, lim
     }
   }
   return sqlite.getRecentSkillRuns(db, skill_id, limit);
+}
+
+/**
+ * v0.23.0 Phase 1 F — fetch operator-tagged exemplar runs for a skill.
+ *
+ * Reads from skill_runs_pg WHERE is_exemplar = TRUE. PG-only (the SQLite
+ * mirror does not carry the is_exemplar column — this is a v0.23+ feature
+ * and requires the PG backend). Returns [] if PG is unavailable, so the
+ * mutation cycle remains usable in SQLite-only test environments.
+ */
+export async function getExemplarRuns(skill_id: string, limit = 5): Promise<Array<{
+  run_id:    string;
+  inputs?:   unknown;
+  evidence?: unknown;
+  note?:     string;
+  tagged_at?: string;
+}>> {
+  if (!(process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD)) {
+    return [];
+  }
+  try {
+    return await withClient(async (c) => {
+      // skill_runs_pg has no `evidence` column — the operator's note + the
+      // inputs payload is the evidence we surface to the proposer. The
+      // `evidence` field on the exemplar shape stays undefined and the
+      // mutator's prompt template handles that gracefully (renders as {}).
+      const r = await c.query(
+        `SELECT run_id, inputs, exemplar_note, exemplar_tagged_at
+           FROM skill_runs_pg
+           WHERE skill_id = $1 AND is_exemplar = TRUE
+           ORDER BY exemplar_tagged_at DESC NULLS LAST
+           LIMIT $2`,
+        [skill_id, limit],
+      );
+      return r.rows.map((row) => ({
+        run_id:    row.run_id,
+        inputs:    row.inputs ?? undefined,
+        note:      row.exemplar_note ?? undefined,
+        tagged_at: row.exemplar_tagged_at ?? undefined,
+      }));
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[storage_dual] getExemplarRuns failed (returning []):", (e as Error).message);
+    return [];
+  }
 }
 
 // ─── skill_mutations ─────────────────────────────────────────────────────────

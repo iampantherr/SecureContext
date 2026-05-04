@@ -86,7 +86,8 @@ When invoked with file_path, the agent should:
   it("loads a valid skill markdown file", async () => {
     const path = join(tmpDir, "audit_file.md");
     writeFileSync(path, SAMPLE_SKILL, "utf8");
-    const skill = await loadSkillFromPath(path);
+    // skipLint: synthetic SAMPLE_SKILL fixture is shorter than the v0.23.0 body-length minimum
+    const skill = await loadSkillFromPath(path, { skipLint: true });
     expect(skill).not.toBeNull();
     expect(skill!.frontmatter.name).toBe("audit_file");
     expect(skill!.frontmatter.version).toBe("0.1.0");
@@ -149,7 +150,7 @@ description: project-scoped
 body`;
     const path = join(tmpDir, "proj.md");
     writeFileSync(path, ok, "utf8");
-    const s = await loadSkillFromPath(path);
+    const s = await loadSkillFromPath(path, { skipLint: true });
     expect(s!.frontmatter.scope).toBe("project:aafb4b029db36884");
   });
 
@@ -176,12 +177,12 @@ body`;
       const p = join(tmpDir, "in.md");
       writeFileSync(p, SAMPLE_SKILL, "utf8");
       return p;
-    })());
+    })(), { skipLint: true });
     expect(original).not.toBeNull();
     const rendered = renderSkillMarkdown(original!);
     const outPath = join(tmpDir, "out.md");
     writeFileSync(outPath, rendered, "utf8");
-    const reloaded = await loadSkillFromPath(outPath);
+    const reloaded = await loadSkillFromPath(outPath, { skipLint: true });
     expect(reloaded!.frontmatter.name).toBe(original!.frontmatter.name);
     expect(reloaded!.frontmatter.version).toBe(original!.frontmatter.version);
     expect(reloaded!.body.trim()).toBe(original!.body.trim());

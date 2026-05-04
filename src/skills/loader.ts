@@ -252,8 +252,15 @@ function coerceFrontmatter(parsed: Record<string, unknown>): SkillFrontmatter {
  *
  * Returns null if the file is not a valid skill (missing frontmatter).
  * Throws on parse errors so callers can surface them to operators.
+ *
+ * `options.skipLint`: For tests only. Bypasses the v0.23.0 Phase 1 #4 lint
+ * gate so synthetic test fixtures with intentionally short bodies/descriptions
+ * can still round-trip. NEVER pass true in production paths.
  */
-export async function loadSkillFromPath(path: string): Promise<Skill | null> {
+export async function loadSkillFromPath(
+  path: string,
+  options: { skipLint?: boolean } = {},
+): Promise<Skill | null> {
   if (!existsSync(path)) return null;
   const text = readFileSync(path, "utf8");
   const split = splitFrontmatterAndBody(text);
@@ -267,6 +274,24 @@ export async function loadSkillFromPath(path: string): Promise<Skill | null> {
   const body = split.body;
   const body_hmac = await computeSkillBodyHmac(body);
   const skill_id = `${frontmatter.name}@${frontmatter.version}@${frontmatter.scope}`;
+
+  // v0.23.0 Phase 1 #4 — lint at load time. Errors throw (skill rejected);
+  // warnings are logged via stderr so the operator sees them in the API
+  // server logs without blocking the load. This is the same gate the
+  // marketplace pull (Phase 2) will use, ensuring no skill from any source
+  // bypasses the quality bar.
+  if (!options.skipLint) {
+    const { lintSkillBody, formatLintResult } = await import("./lint.js");
+    const lintResult = lintSkillBody(body, frontmatter);
+    if (!lintResult.ok) {
+      const formatted = formatLintResult(lintResult, skill_id);
+      throw new Error(`Skill ${skill_id} failed lint:\n${formatted}`);
+    }
+    if (lintResult.warnings.length > 0) {
+      process.stderr.write(`[skill-lint] warnings for ${skill_id}: ${lintResult.warnings.length}\n`);
+      for (const w of lintResult.warnings) process.stderr.write(`  - ${w}\n`);
+    }
+  }
 
   return {
     skill_id,

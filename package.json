@@ -1,6 +1,6 @@
 {
   "name": "zc-ctx",
-  "version": "0.22.10",
+  "version": "0.23.0",
   "description": "Secure memory & context optimization MCP plugin for Claude Code — drop-in replacement for context-mode with credential isolation, SSRF protection, MemGPT-style persistent memory, and A2A multi-agent broadcast channel",
   "keywords": [
     "claude-code",
@@ -69,7 +69,9 @@
     "test": "vitest run",
     "check:env": "node scripts/check-env-pinning.mjs",
     "check:env:test": "node scripts/check-env-pinning.test.mjs",
-    "lint:test": "node scripts/test-lint-catches-floating-promise.mjs"
+    "lint:test": "node scripts/test-lint-catches-floating-promise.mjs",
+    "lint:skills": "node scripts/lint-skills.mjs",
+    "lint:skills:strict": "node scripts/lint-skills.mjs --fail-on-error"
   },
   "engines": {
     "node": ">=22.0.0"

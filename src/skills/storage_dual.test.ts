@@ -86,7 +86,7 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — PG primary path", () => 
   it("postgres backend: upsert + getSkillById round-trips via PG", async () => {
     process.env.ZC_TELEMETRY_BACKEND = "postgres";
     const skill = await makeSkill();
-    await upsertSkill(db, skill);
+    await upsertSkill(db, skill, "test");
     const fetched = await getSkillById(db, skill.skill_id);
     expect(fetched?.skill_id).toBe(skill.skill_id);
     expect(fetched?.body).toBe(skill.body);
@@ -96,7 +96,7 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — PG primary path", () => 
   it("postgres: getActiveSkill returns active row", async () => {
     process.env.ZC_TELEMETRY_BACKEND = "postgres";
     const skill = await makeSkill();
-    await upsertSkill(db, skill);
+    await upsertSkill(db, skill, "test");
     const active = await getActiveSkill(db, "audit", "global");
     expect(active?.skill_id).toBe(skill.skill_id);
   });
@@ -111,8 +111,8 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — PG primary path", () => 
     // Recompute properly
     const { computeSkillBodyHmac } = await import("./loader.js");
     project.body_hmac = await computeSkillBodyHmac(project.body);
-    await upsertSkill(db, global);
-    await upsertSkill(db, project);
+    await upsertSkill(db, global, "test");
+    await upsertSkill(db, project, "test");
     const resolved = await resolveSkill(db, "audit", projectScope);
     expect(resolved?.body).toBe("project-specific body");
   });
@@ -120,7 +120,7 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — PG primary path", () => 
   it("postgres: archiveSkill removes from listActiveSkills", async () => {
     process.env.ZC_TELEMETRY_BACKEND = "postgres";
     const skill = await makeSkill();
-    await upsertSkill(db, skill);
+    await upsertSkill(db, skill, "test");
     let list = await listActiveSkills(db);
     expect(list.length).toBe(1);
     await archiveSkill(db, skill.skill_id, "test");
@@ -131,7 +131,7 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — PG primary path", () => 
   it("postgres: skill_runs round-trip with project_hash", async () => {
     process.env.ZC_TELEMETRY_BACKEND = "postgres";
     const skill = await makeSkill();
-    await upsertSkill(db, skill);
+    await upsertSkill(db, skill, "test");
     const run: SkillRun = {
       run_id: "r1", skill_id: skill.skill_id, session_id: "s",
       task_id: null, inputs: { x: 1 }, outcome_score: 0.85,
@@ -147,7 +147,7 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — PG primary path", () => 
   it("postgres: mutation row + resolution round-trip", async () => {
     process.env.ZC_TELEMETRY_BACKEND = "postgres";
     const skill = await makeSkill();
-    await upsertSkill(db, skill);
+    await upsertSkill(db, skill, "test");
     await recordMutation(db, {
       mutation_id: "m1", parent_skill_id: skill.skill_id,
       candidate_body: "new body", candidate_hmac: "abc",
@@ -165,7 +165,7 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — dual-write mode", () => 
   it("dual: writes to both backends; reads prefer PG", async () => {
     process.env.ZC_TELEMETRY_BACKEND = "dual";
     const skill = await makeSkill();
-    await upsertSkill(db, skill);
+    await upsertSkill(db, skill, "test");
     // Read via dual → returns PG row
     const fetched = await getSkillById(db, skill.skill_id);
     expect(fetched?.skill_id).toBe(skill.skill_id);
@@ -185,9 +185,9 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — findGlobalPromotionCandi
     const global = await makeSkill("score-test", "global");
     const projA = await makeSkill("score-test", projectScope);
     const projB = await makeSkill("score-test", project2Scope);
-    await upsertSkill(db, global);
-    await upsertSkill(db, projA);
-    await upsertSkill(db, projB);
+    await upsertSkill(db, global, "test");
+    await upsertSkill(db, projA, "test");
+    await upsertSkill(db, projB, "test");
 
     // Seed runs: global avg 0.5, both per-project avg 0.85 → both clear threshold
     for (let i = 0; i < 3; i++) {
@@ -221,8 +221,8 @@ describe.skipIf(!pgAvailable)("v0.18.0 storage_dual — findGlobalPromotionCandi
     const projectScope = `project:${projectHashOf(PROJECT_PATH)}` as `project:${string}`;
     const global = await makeSkill("no-win", "global");
     const proj = await makeSkill("no-win", projectScope);
-    await upsertSkill(db, global);
-    await upsertSkill(db, proj);
+    await upsertSkill(db, global, "test");
+    await upsertSkill(db, proj, "test");
     // Both score 0.7 — no beat
     for (let i = 0; i < 3; i++) {
       await recordSkillRun(db, {

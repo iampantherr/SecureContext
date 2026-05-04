@@ -202,6 +202,18 @@ export interface MutationContext {
   failure_traces:       string[];     // failure_trace[] from those runs
   fixtures:             SkillFixture[]; // for the proposer to consider
   budget?:              { max_cost_usd?: number; max_candidates?: number };
+  /**
+   * v0.23.0 Phase 1 F — operator-tagged exemplar runs (skill_runs.is_exemplar=TRUE).
+   * Used by the proposer prompt as positive training signal: "this is what
+   * good looks like." Capped to 5 most-recent in buildProposerPrompt.
+   */
+  exemplars?: Array<{
+    run_id:    string;
+    inputs?:   unknown;
+    evidence?: unknown;
+    note?:     string;
+    tagged_at?: string;
+  }>;
 }
 
 export interface MutationCandidate {

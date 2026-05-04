@@ -935,6 +935,132 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.23.0 Phase 1 F — Tag a skill_run as an operator-exemplar. The
+  // mutator uses these as positive training signal: when generating new
+  // candidates for a skill, exemplar runs are quoted in the proposer
+  // prompt as "this is what good looks like."
+  app.post("/dashboard/skill-runs/:run_id/tag-exemplar", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const runId = String(params.run_id ?? "").trim();
+    const body = request.body as Record<string, unknown> | null;
+    const operator = typeof body?.operator === "string" ? body.operator : "operator";
+    const note = typeof body?.note === "string" ? body.note.slice(0, 1024) : null;
+    const isExemplar = body?.is_exemplar !== false;  // default true unless explicitly false
+    if (!runId) {
+      reply.status(400).type("application/json").send({ ok: false, error: "missing run_id" });
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const updated = await withClient(async (c) => {
+        const r = await c.query(
+          `UPDATE skill_runs_pg
+              SET is_exemplar = $1,
+                  exemplar_tagged_by = CASE WHEN $1 THEN $2 ELSE NULL END,
+                  exemplar_tagged_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
+                  exemplar_note = CASE WHEN $1 THEN $3 ELSE NULL END
+            WHERE run_id = $4
+            RETURNING run_id, skill_id, is_exemplar, exemplar_tagged_by, exemplar_tagged_at`,
+          [isExemplar, operator, note, runId],
+        );
+        return r.rows[0] ?? null;
+      });
+      if (!updated) {
+        reply.status(404).type("application/json").send({ ok: false, error: `skill_run ${runId} not found` });
+        return;
+      }
+      reply.type("application/json").send({ ok: true, run: updated });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  // v0.23.0 Phase 1 #2 — Polish a skill's description.
+  // Operator-triggered via dashboard button. Returns the suggested polish
+  // (does NOT auto-apply); operator reviews and POSTs to /apply if approved.
+  app.post("/dashboard/skills/:id/polish", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const skillId = String(params.id ?? "").trim();
+    if (!skillId) {
+      reply.status(400).type("application/json").send({ ok: false, error: "missing skill_id" });
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const skill = await withClient(async (c) => {
+        const r = await c.query("SELECT skill_id, frontmatter, body, body_hmac FROM skills_pg WHERE skill_id = $1 AND archived_at IS NULL", [skillId]);
+        if (r.rows.length === 0) return null;
+        const row = r.rows[0];
+        return {
+          skill_id: row.skill_id,
+          frontmatter: typeof row.frontmatter === "string" ? JSON.parse(row.frontmatter) : row.frontmatter,
+          body: row.body,
+          body_hmac: row.body_hmac,
+          source_path: null,
+          promoted_from: null,
+          created_at: new Date().toISOString(),
+          archived_at: null,
+          archive_reason: null,
+        };
+      });
+      if (!skill) {
+        reply.status(404).type("application/json").send({ ok: false, error: `skill ${skillId} not found or archived` });
+        return;
+      }
+      const { polishSkillDescription } = await import("./skills/polisher.js");
+      const result = await polishSkillDescription(skill);
+      reply.type("application/json").send({ ok: true, result });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  // v0.23.0 Phase 1 #2 — Apply a polish suggestion. Operator decides to
+  // accept; this writes the new description to skills_pg.
+  app.post("/dashboard/skills/:id/apply-polish", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const skillId = String(params.id ?? "").trim();
+    const body = request.body as Record<string, unknown>;
+    const newDesc = typeof body?.description === "string" ? body.description : "";
+    if (!skillId || !newDesc) {
+      reply.status(400).type("application/json").send({ ok: false, error: "skill_id + description required" });
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      // Re-lint with the proposed new description before applying
+      const { lintSkillBody } = await import("./skills/lint.js");
+      const skill = await withClient(async (c) => {
+        const r = await c.query("SELECT frontmatter, body FROM skills_pg WHERE skill_id = $1 AND archived_at IS NULL", [skillId]);
+        if (r.rows.length === 0) return null;
+        return {
+          frontmatter: typeof r.rows[0].frontmatter === "string" ? JSON.parse(r.rows[0].frontmatter) : r.rows[0].frontmatter,
+          body: r.rows[0].body,
+        };
+      });
+      if (!skill) {
+        reply.status(404).type("application/json").send({ ok: false, error: `skill ${skillId} not found` });
+        return;
+      }
+      const newFm = { ...skill.frontmatter, description: newDesc };
+      const lintResult = lintSkillBody(skill.body, newFm);
+      if (!lintResult.ok) {
+        reply.status(400).type("application/json").send({ ok: false, error: `polished description fails lint`, lint: lintResult });
+        return;
+      }
+      // Update frontmatter in PG (body_hmac stays the same since body unchanged)
+      await withClient(async (c) => {
+        await c.query(
+          "UPDATE skills_pg SET frontmatter = $1::jsonb WHERE skill_id = $2 AND archived_at IS NULL",
+          [JSON.stringify(newFm), skillId],
+        );
+      });
+      reply.type("application/json").send({ ok: true, applied: true, lint: lintResult });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
   // v0.19.0 Sprint 2.10 — Skill candidates panel
   app.get("/dashboard/skill-candidates", async (_request, reply) => {
     try {

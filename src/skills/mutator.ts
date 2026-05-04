@@ -121,6 +121,23 @@ export function buildProposerPrompt(ctx: MutationContext): string {
     `  Fixture ${i + 1}: ${f.fixture_id} — input=${JSON.stringify(f.input)}, expected=${JSON.stringify(f.expected)}`
   ).join("\n");
 
+  // v0.23.0 Phase 1 F — operator exemplars: positive training signal.
+  // The MutationContext now carries an optional `exemplars` array — runs
+  // the operator marked ⭐ via the dashboard. We include them in the
+  // proposer prompt as "this is what good looks like" reference.
+  const exemplars = ctx.exemplars ?? [];
+  const exemplarSection = exemplars.length > 0
+    ? [
+        "",
+        "## Operator-tagged exemplars (textbook examples of this skill in action):",
+        ...exemplars.slice(0, 5).map((e, i) =>
+          `${i + 1}. ${e.note ? `Note: ${e.note}\n   ` : ""}Inputs: ${JSON.stringify(e.inputs ?? {}).slice(0, 300)}\n   Evidence: ${JSON.stringify(e.evidence ?? {}).slice(0, 400)}`
+        ),
+        "",
+        "Each candidate should preserve the patterns that made these exemplars work.",
+      ].join("\n")
+    : "";
+
   return [
     "You are improving a skill that has been showing recent failures.",
     "Propose 5 alternate skill bodies that would address the failure traces while still passing the fixtures.",
@@ -135,6 +152,7 @@ export function buildProposerPrompt(ctx: MutationContext): string {
     "",
     "## Fixtures the candidate must continue to pass:",
     fxSnippet || "(none)",
+    exemplarSection,
     "",
     "## Acceptance criteria:",
     JSON.stringify(ctx.parent.frontmatter.acceptance_criteria ?? {}, null, 2),
@@ -151,7 +169,8 @@ export function buildProposerPrompt(ctx: MutationContext): string {
     "- Do NOT include the frontmatter (--- ... ---) — only the body markdown.",
     "- Generate exactly 5 candidates.",
     "- Optimize for clarity, robustness against the failure-traces, and the acceptance criteria.",
-  ].join("\n");
+    exemplars.length > 0 ? "- Where applicable, codify the patterns shown in the operator exemplars." : "",
+  ].filter((s) => s !== "").join("\n");
 }
 
 /**
