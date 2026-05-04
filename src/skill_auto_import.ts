@@ -196,17 +196,41 @@ export async function autoImportSkills(opts: { dir?: string; verbose?: boolean }
     const bodyHmac = await computeSkillBodyHmac(parsed.body);
 
     try {
-      // Check existing — idempotent skip if body unchanged
+      // Check existing — idempotent skip if body unchanged.
+      //
+      // v0.23.1: also check ARCHIVED rows. Without this, a skill whose source
+      // file still says version: 1 but whose @1@global row was archived (e.g.
+      // because the mutator promoted to @1.1@global) hits a PK constraint
+      // violation on every container start when auto-import retries the INSERT.
+      // The archived row still exists, just with archived_at set, and the
+      // skill_id is the PK so duplicates fail.
       const upserted = await withClient(async (c) => {
-        const existing = await c.query<{ body_hmac: string }>(
-          `SELECT body_hmac FROM skills_pg WHERE skill_id=$1 AND archived_at IS NULL`,
+        // Step 1: any row at this skill_id (active OR archived)
+        const anyRow = await c.query<{ body_hmac: string; archived_at: string | null }>(
+          `SELECT body_hmac, archived_at FROM skills_pg WHERE skill_id=$1`,
           [skillId],
         );
-        if (existing.rows[0]?.body_hmac === bodyHmac) {
+        const row = anyRow.rows[0];
+
+        // No row at all → fresh INSERT
+        if (!row) {
+          await c.query(
+            `INSERT INTO skills_pg (
+                skill_id, name, version, scope, description,
+                frontmatter, body, body_hmac, source_path, created_at
+              ) VALUES ($1,$2,$3,$4,$5, $6::jsonb, $7, $8, $9, now())`,
+            [skillId, name, version, scope, description, JSON.stringify(fm), parsed.body, bodyHmac, f],
+          );
+          return "inserted";
+        }
+
+        // Active row, body matches → no-op
+        if (row.archived_at === null && row.body_hmac === bodyHmac) {
           return "skipped_same";
         }
-        if (existing.rows[0]) {
-          // Update body + frontmatter; preserve created_at
+
+        // Active row, body differs → UPDATE (legitimate edit)
+        if (row.archived_at === null) {
           await c.query(
             `UPDATE skills_pg
                 SET name=$2, version=$3, scope=$4, description=$5,
@@ -216,18 +240,47 @@ export async function autoImportSkills(opts: { dir?: string; verbose?: boolean }
           );
           return "updated";
         }
-        await c.query(
-          `INSERT INTO skills_pg (
-              skill_id, name, version, scope, description,
-              frontmatter, body, body_hmac, source_path, created_at
-            ) VALUES ($1,$2,$3,$4,$5, $6::jsonb, $7, $8, $9, now())`,
-          [skillId, name, version, scope, description, JSON.stringify(fm), parsed.body, bodyHmac, f],
-        );
-        return "inserted";
+
+        // Archived row exists. The skill at this version was promoted past
+        // and superseded. Two cases:
+        //   a) on-disk body matches the archived body → idempotent skip;
+        //      it's the same content that was archived. Resurrecting it
+        //      would conflict with the active newer version.
+        //   b) on-disk body differs → the operator edited the source file
+        //      but didn't bump the version. We can't import it as-is
+        //      (would clobber the audit record of what was actually
+        //      promoted) and we can't auto-bump (overlay with newer version
+        //      semantics is the operator's call). Log it clearly so the
+        //      operator knows to bump the version field on disk.
+        if (row.body_hmac === bodyHmac) {
+          return "skipped_archived_match";
+        }
+        return "skipped_archived_stale";
       });
       if      (upserted === "inserted")     result.inserted++;
       else if (upserted === "updated")      result.updated++;
       else if (upserted === "skipped_same") result.skipped_same++;
+      else if (upserted === "skipped_archived_match") {
+        result.skipped_same++;  // count toward "no work to do"
+        result.details.push({
+          file: parsed.filename, result: "skipped_archived_match",
+          skill_id: skillId,
+          reason: "skill at this version was archived; on-disk body matches archived body — no action",
+        });
+        continue;
+      }
+      else if (upserted === "skipped_archived_stale") {
+        result.validation_errors++;
+        result.details.push({
+          file: parsed.filename, result: "stale_version_on_disk",
+          skill_id: skillId,
+          reason: "this skill_id was archived (likely promoted past); on-disk body differs but version was not bumped — bump the version field in the source file or move/remove the file",
+        });
+        logger.warn("skills", "auto_import_stale_version", {
+          skill_id: skillId, file: parsed.filename,
+        });
+        continue;
+      }
       result.details.push({ file: parsed.filename, result: upserted, skill_id: skillId });
     } catch (e) {
       result.validation_errors++;
