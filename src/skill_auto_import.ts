@@ -21,6 +21,7 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { withClient } from "./pg_pool.js";
 import { logger } from "./logger.js";
 // v0.20.1 — use the project's HMAC-keyed body hash. Earlier v0.20.0 used
@@ -29,7 +30,14 @@ import { logger } from "./logger.js";
 // downstream code (mutator, dashboard) tries to load the skill. Caught in
 // live test on Test_Agent_Coordination after the mutator generated 5
 // candidates and the dashboard tried to render the parent skill body.
-import { computeSkillBodyHmac } from "./skills/loader.js";
+import { computeSkillBodyHmac, buildSkill } from "./skills/loader.js";
+// v0.23.3 — route the actual write through storage_dual.upsertSkill so the
+// Phase 1 lint + security_scan gates fire on every auto-imported skill, and
+// every attempt produces an audit row in skill_security_scans_pg. Until
+// v0.23.3 the auto-import did raw INSERT/UPDATE and bypassed both gates,
+// which is why pre-v0.23.0 skills had no scan history in the dashboard.
+import { upsertSkill as upsertSkillThroughGates } from "./skills/storage_dual.js";
+import type { Skill, SkillFrontmatter as CanonicalFm, SkillScope } from "./skills/types.js";
 
 // Resolve the skills/ dir relative to the running module. In the Docker
 // container this is /app/skills (copied during the build); in dev/native
@@ -196,67 +204,82 @@ export async function autoImportSkills(opts: { dir?: string; verbose?: boolean }
     const bodyHmac = await computeSkillBodyHmac(parsed.body);
 
     try {
-      // Check existing — idempotent skip if body unchanged.
+      // v0.23.3 — gate-enabled write path.
       //
-      // v0.23.1: also check ARCHIVED rows. Without this, a skill whose source
-      // file still says version: 1 but whose @1@global row was archived (e.g.
-      // because the mutator promoted to @1.1@global) hits a PK constraint
-      // violation on every container start when auto-import retries the INSERT.
-      // The archived row still exists, just with archived_at set, and the
-      // skill_id is the PK so duplicates fail.
-      const upserted = await withClient(async (c) => {
-        // Step 1: any row at this skill_id (active OR archived)
-        const anyRow = await c.query<{ body_hmac: string; archived_at: string | null }>(
+      // 1. Check existing rows for the skill_id (active OR archived) — same
+      //    branching as v0.23.1 to avoid PK violations on archived rows and
+      //    to keep imports idempotent.
+      // 2. For "actually need to write" branches (INSERT, UPDATE), build a
+      //    proper Skill object and call storage_dual.upsertSkill(_, skill,
+      //    "auto-import"). That routes through the lint + security_scan gates
+      //    AND writes a row to skill_security_scans_pg. Without this routing,
+      //    auto-imported skills bypass the gates entirely (the v0.23.0 design
+      //    flaw — caught in dashboard click-through where every pre-v0.23
+      //    skill showed "No security scans recorded").
+      // 3. For "no-op" branches (skipped_same, archived_match, archived_stale),
+      //    skip the upsert entirely so we don't double-scan unchanged content.
+
+      // Step 1: peek at existing rows
+      const existing = await withClient(async (c) => {
+        const r = await c.query<{ body_hmac: string; archived_at: string | null }>(
           `SELECT body_hmac, archived_at FROM skills_pg WHERE skill_id=$1`,
           [skillId],
         );
-        const row = anyRow.rows[0];
-
-        // No row at all → fresh INSERT
-        if (!row) {
-          await c.query(
-            `INSERT INTO skills_pg (
-                skill_id, name, version, scope, description,
-                frontmatter, body, body_hmac, source_path, created_at
-              ) VALUES ($1,$2,$3,$4,$5, $6::jsonb, $7, $8, $9, now())`,
-            [skillId, name, version, scope, description, JSON.stringify(fm), parsed.body, bodyHmac, f],
-          );
-          return "inserted";
-        }
-
-        // Active row, body matches → no-op
-        if (row.archived_at === null && row.body_hmac === bodyHmac) {
-          return "skipped_same";
-        }
-
-        // Active row, body differs → UPDATE (legitimate edit)
-        if (row.archived_at === null) {
-          await c.query(
-            `UPDATE skills_pg
-                SET name=$2, version=$3, scope=$4, description=$5,
-                    frontmatter=$6::jsonb, body=$7, body_hmac=$8, source_path=$9
-              WHERE skill_id=$1`,
-            [skillId, name, version, scope, description, JSON.stringify(fm), parsed.body, bodyHmac, f],
-          );
-          return "updated";
-        }
-
-        // Archived row exists. The skill at this version was promoted past
-        // and superseded. Two cases:
-        //   a) on-disk body matches the archived body → idempotent skip;
-        //      it's the same content that was archived. Resurrecting it
-        //      would conflict with the active newer version.
-        //   b) on-disk body differs → the operator edited the source file
-        //      but didn't bump the version. We can't import it as-is
-        //      (would clobber the audit record of what was actually
-        //      promoted) and we can't auto-bump (overlay with newer version
-        //      semantics is the operator's call). Log it clearly so the
-        //      operator knows to bump the version field on disk.
-        if (row.body_hmac === bodyHmac) {
-          return "skipped_archived_match";
-        }
-        return "skipped_archived_stale";
+        return r.rows[0] ?? null;
       });
+
+      // Step 2: branch
+      let upserted: "inserted" | "updated" | "skipped_same" | "skipped_archived_match" | "skipped_archived_stale";
+      if (!existing) {
+        // Fresh INSERT — gate
+        const skill: Skill = await buildSkill(
+          {
+            ...fm,
+            name,
+            version,
+            scope: scope as SkillScope,
+            description,
+          } as CanonicalFm,
+          parsed.body,
+          { source_path: f },
+        );
+        // Preserve the file's explicit `id:` if it sets a non-default skill_id
+        if (fm.id && typeof fm.id === "string") skill.skill_id = fm.id;
+        const memDb = new DatabaseSync(":memory:");
+        try {
+          await upsertSkillThroughGates(memDb, skill, "auto-import");
+          upserted = "inserted";
+        } finally {
+          memDb.close();
+        }
+      } else if (existing.archived_at === null && existing.body_hmac === bodyHmac) {
+        upserted = "skipped_same";
+      } else if (existing.archived_at === null) {
+        // Active row, body differs → re-gate and UPDATE
+        const skill: Skill = await buildSkill(
+          {
+            ...fm,
+            name,
+            version,
+            scope: scope as SkillScope,
+            description,
+          } as CanonicalFm,
+          parsed.body,
+          { source_path: f },
+        );
+        if (fm.id && typeof fm.id === "string") skill.skill_id = fm.id;
+        const memDb = new DatabaseSync(":memory:");
+        try {
+          await upsertSkillThroughGates(memDb, skill, "auto-import");
+          upserted = "updated";
+        } finally {
+          memDb.close();
+        }
+      } else if (existing.body_hmac === bodyHmac) {
+        upserted = "skipped_archived_match";
+      } else {
+        upserted = "skipped_archived_stale";
+      }
       if      (upserted === "inserted")     result.inserted++;
       else if (upserted === "updated")      result.updated++;
       else if (upserted === "skipped_same") result.skipped_same++;
@@ -299,5 +322,81 @@ export async function autoImportSkills(opts: { dir?: string; verbose?: boolean }
   if (opts.verbose) {
     for (const d of result.details) console.log(`  [${d.result}] ${d.file}${d.reason ? `: ${d.reason}` : ""}`);
   }
+  return result;
+}
+
+/**
+ * v0.23.3 — One-time backfill: scan every ACTIVE skill that has NO scan
+ * history yet. Idempotent (re-running won't double-scan since the WHERE
+ * clause filters skills with at least one prior scan).
+ *
+ * Why this exists: pre-v0.23.0 skills were inserted via the raw-SQL
+ * auto-import path that bypassed the security_scan gate. The dashboard's
+ * 🛡 Security button shows "No security scans recorded" for all of them.
+ * Spotted in user click-through after v0.23.2 shipped.
+ *
+ * Runs on container startup AFTER autoImportSkills, so freshly-inserted
+ * skills (which already produced a scan via storage_dual.upsertSkill) are
+ * skipped automatically.
+ */
+export async function backfillSecurityScans(): Promise<{ scanned: number; passed: number; failed: number }> {
+  const result = { scanned: 0, passed: 0, failed: 0 };
+  const { scanSkillBody } = await import("./skills/security_scan.js");
+  const rows = await withClient(async (c) => {
+    const r = await c.query<{ skill_id: string; frontmatter: unknown; body: string; body_hmac: string }>(
+      `SELECT s.skill_id, s.frontmatter, s.body, s.body_hmac
+         FROM skills_pg s
+    LEFT JOIN skill_security_scans_pg sc ON sc.skill_id = s.skill_id
+        WHERE s.archived_at IS NULL AND sc.skill_id IS NULL`,
+    );
+    return r.rows;
+  });
+  if (rows.length === 0) return result;
+
+  logger.info("skills", "scan_backfill_start", { count: rows.length });
+  for (const row of rows) {
+    result.scanned++;
+    const fm = typeof row.frontmatter === "string" ? JSON.parse(row.frontmatter) : row.frontmatter;
+    const skill: Skill = {
+      skill_id: row.skill_id,
+      frontmatter: fm as CanonicalFm,
+      body: row.body,
+      body_hmac: row.body_hmac,
+      source_path: null,
+      promoted_from: null,
+      created_at: new Date().toISOString(),
+      archived_at: null,
+      archive_reason: null,
+    };
+    try {
+      const scan = await scanSkillBody(skill);
+      const failureRows = scan.checks.filter((c) => !c.passed)
+        .map((c) => ({ name: c.name, severity: c.severity, detail: c.detail ?? null }));
+      await withClient(async (c) => {
+        await c.query(
+          `INSERT INTO skill_security_scans_pg
+             (skill_id, candidate_hmac, body_hash, score, passed, failures, source)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+          [
+            skill.skill_id,
+            skill.body_hmac,
+            scan.body_hash,
+            scan.score,
+            scan.passed,
+            JSON.stringify(failureRows),
+            "auto-import",
+          ],
+        );
+      });
+      if (scan.passed) result.passed++;
+      else result.failed++;
+    } catch (e) {
+      result.failed++;
+      // eslint-disable-next-line no-console
+      console.error(`[scan-backfill] ${skill.skill_id}: ${(e as Error).message}`);
+      logger.error("skills", "scan_backfill_failure", { skill_id: skill.skill_id, error: (e as Error).message });
+    }
+  }
+  logger.info("skills", "scan_backfill_complete", result);
   return result;
 }

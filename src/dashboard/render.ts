@@ -368,6 +368,14 @@ export function renderDashboardHtml(): string {
   .skill-edit-zone { margin-top: 8px; }
   /* v0.23.2 — polish preview / runs list / security scans */
   .polish-result { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
+  /* v0.23.3 — no-change state: clearly distinct from the diff state, no Apply button at all */
+  .polish-no-change { border-color: #1f3a3a; background: #061616; }
+  .polish-no-change-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .polish-no-change-icon { color: #4ade80; font-size: 1.1rem; }
+  .polish-no-change-body { font-size: 0.85rem; color: #94a3b8; margin-bottom: 8px; }
+  .polish-current { font-size: 0.85rem; color: #cbd5e1; padding: 6px 8px; background: #0a0d12; border-radius: 3px; }
+  .polish-col-new { border-color: #15803d; background: #052e16; }
+  .apply-polish-btn-blocked { background: #450a0a !important; color: #fecaca !important; border-color: #7f1d1d !important; }
   .polish-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
   .polish-meta { font-size: 0.8rem; color: #94a3b8; }
   .polish-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -923,9 +931,17 @@ export function renderSkillsListFragment(
         : `<span style="color:#6b7280; font-style:italic">no intended_roles</span>`;
       // v0.18.8 Loop B — skill efficiency column
       const eff = efficiencyMap.get(s.skill_id);
-      const effHtml = eff
-        ? `<span class="skill-eff" title="Average across ${eff.run_count} runs in last 30 days">avg cost: <strong>${Math.round(eff.avg_tokens).toLocaleString()}</strong> tokens/run · ${eff.run_count} runs</span>`
-        : `<span class="skill-eff skill-eff-none" title="Insufficient data (need ≥3 runs in last 30 days)">avg cost: <em>n/a</em></span>`;
+      // v0.23.3: when avg_tokens rounds to 0, the agent didn't report
+      // total_tokens on zc_record_skill_outcome (Claude Code agents don't
+      // have token introspection — they pass 0). Showing "0 tokens/run"
+      // looks like a bug; show "not reported" instead with a tooltip
+      // explaining the protocol gap. Real numbers display normally.
+      const avgTokensRounded = eff ? Math.round(eff.avg_tokens) : 0;
+      const effHtml = !eff
+        ? `<span class="skill-eff skill-eff-none" title="Insufficient data (need ≥3 runs in last 30 days)">avg cost: <em>n/a</em></span>`
+        : avgTokensRounded === 0
+          ? `<span class="skill-eff skill-eff-none" title="Agent passed total_tokens=0 on zc_record_skill_outcome. Claude Code agents don't have token introspection — this is a known protocol gap. ${eff.run_count} runs in last 30 days.">avg cost: <em>not reported</em> · ${eff.run_count} runs</span>`
+          : `<span class="skill-eff" title="Average across ${eff.run_count} runs in last 30 days">avg cost: <strong>${avgTokensRounded.toLocaleString()}</strong> tokens/run · ${eff.run_count} runs</span>`;
       return `
         <div class="skill-row" data-skill-id="${escapeHtml(s.skill_id)}">
           <div class="skill-header">
@@ -1437,6 +1453,32 @@ export interface PolishResultRow {
 
 export function renderPolishPreview(r: PolishResultRow): string {
   const sameText = r.original === r.polished;
+  // v0.23.3: when polished == original, we render a compact "no improvements
+  // needed" panel instead of the side-by-side diff with a disabled Apply
+  // button. Showing a green Apply button that does nothing — even when
+  // technically disabled — confused users (the disabled CSS opacity:0.5
+  // wasn't visually obvious enough).
+  if (sameText) {
+    const warnsLine = r.lint_warnings.length > 0
+      ? `<details class="lint-warns" style="margin-top:8px"><summary>${r.lint_warnings.length} lint warning(s) on this description</summary>${r.lint_warnings.map((w) => `<div class="lint-warn">${escapeHtml(w)}</div>`).join("")}</details>`
+      : "";
+    return `
+      <div class="polish-result polish-no-change">
+        <div class="polish-no-change-header">
+          <span class="polish-no-change-icon">✓</span>
+          <strong>No improvements suggested</strong>
+          <span class="polish-meta">backend: <code>${escapeHtml(r.backend)}</code> · ${r.duration_ms}ms</span>
+        </div>
+        <div class="polish-no-change-body">
+          The polisher returned the same description unchanged. The current
+          description already meets the lint bar; no rephrase needed.
+        </div>
+        <div class="polish-current">Current: <em>${escapeHtml(r.original)}</em></div>
+        ${warnsLine}
+      </div>
+    `;
+  }
+
   const lintBadge = r.lint_passed
     ? `<span class="badge ok">lint OK</span>`
     : `<span class="badge err">lint FAILED — apply blocked</span>`;
@@ -1446,10 +1488,7 @@ export function renderPolishPreview(r: PolishResultRow): string {
   const warns = r.lint_warnings.length > 0
     ? `<details class="lint-warns"><summary>${r.lint_warnings.length} warning(s)</summary>${r.lint_warnings.map((w) => `<div class="lint-warn">${escapeHtml(w)}</div>`).join("")}</details>`
     : "";
-  // Apply button: HTMX POSTs JSON to /apply-polish; on success the row reloads.
-  // Disabled when polished == original (no change) or lint failed.
-  const canApply = !sameText && r.lint_passed;
-  const applyBtn = canApply
+  const applyBtn = r.lint_passed
     ? `<button class="apply-polish-btn"
               hx-post="/dashboard/skills/${encodeURIComponent(r.skill_id)}/apply-polish"
               hx-vals='{"description":${JSON.stringify(r.polished)}}'
@@ -1460,8 +1499,8 @@ export function renderPolishPreview(r: PolishResultRow): string {
               hx-on:htmx:after-request="this.disabled=true; this.textContent='Applied — reload to refresh'">
         Apply polish
       </button>`
-    : `<button class="apply-polish-btn" disabled title="${sameText ? "polished == original (no change)" : "lint failed"}">
-        Apply polish
+    : `<button class="apply-polish-btn apply-polish-btn-blocked" disabled title="lint failed — fix lint errors first">
+        ✗ Apply blocked (lint failed)
       </button>`;
 
   return `
@@ -1475,8 +1514,8 @@ export function renderPolishPreview(r: PolishResultRow): string {
           <div class="polish-col-title">Original</div>
           <div class="polish-col-text">${escapeHtml(r.original)}</div>
         </div>
-        <div class="polish-col">
-          <div class="polish-col-title">Polished${sameText ? " <em>(no change)</em>" : ""}</div>
+        <div class="polish-col polish-col-new">
+          <div class="polish-col-title">Polished</div>
           <div class="polish-col-text">${escapeHtml(r.polished)}</div>
         </div>
       </div>

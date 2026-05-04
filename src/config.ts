@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.23.2",
+  VERSION: "0.23.3",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -196,7 +196,13 @@ export const Config = {
 
   // Per-file timeout. 30s comfortably fits a 7B coder model on CPU;
   // raise if using a 32B model or if you see frequent timeouts.
-  SUMMARY_TIMEOUT_MS:     parseInt(env["ZC_SUMMARY_TIMEOUT_MS"] ?? "30000", 10),
+  // v0.23.3: bumped 30s → 120s. The 14B coder model takes ~80s to cold-load
+  // from disk into VRAM (model file is 9GB). Any agent task that runs after
+  // Ollama has unloaded the model hits a cold load, blowing the old 30s
+  // budget and falling back to truncation. 120s comfortably absorbs cold
+  // load + normal inference. Override via ZC_SUMMARY_TIMEOUT_MS for slower
+  // hardware (CPU-only / older GPUs).
+  SUMMARY_TIMEOUT_MS:     parseInt(env["ZC_SUMMARY_TIMEOUT_MS"] ?? "120000", 10),
 
   // Max file chars sent to the model. Larger files are truncated for
   // summarization only (the full file remains in KB FTS). 8000 chars
@@ -212,7 +218,12 @@ export const Config = {
   // request. "30s" = model warms up on first index call, stays hot through
   // the batch (each request resets the timer), unloads shortly after the
   // batch finishes. Set "0" to unload immediately, "-1" to keep forever.
-  SUMMARY_KEEP_ALIVE:      env["ZC_SUMMARY_KEEP_ALIVE"] ?? "30s",
+  // v0.23.3: bumped 30s → 30m. Keep the coder model loaded in VRAM across
+  // agent sessions so back-to-back zc_file_summary calls don't each pay
+  // the 80s cold-load tax. Burn ~9GB VRAM continuously in exchange for
+  // sub-second hot-call latency. Override via ZC_SUMMARY_KEEP_ALIVE on
+  // VRAM-constrained hosts.
+  SUMMARY_KEEP_ALIVE:      env["ZC_SUMMARY_KEEP_ALIVE"] ?? "30m",
 
   // Optional allowlist. When set, ONLY these model names are acceptable —
   // blocks misconfigured ZC_SUMMARY_MODEL or a malicious override from

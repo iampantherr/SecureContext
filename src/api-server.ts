@@ -508,11 +508,20 @@ export async function createApiServer(storeOverride?: Store) {
               GROUP BY project_hash
            ),
            skill_show_counts AS (
+             -- v0.23.3: zc_skill_show window widened to 7 days. Window-boundary
+             -- artifact: a single agent session that loads a skill at hour 0
+             -- and records 5 outcomes over the next 30h would, with a 24h
+             -- window, show "0 skill_show, N outcomes" once the show drops
+             -- out of the 24h count. zc_skill_show is one-per-skill-load
+             -- (not one-per-task) so the load signal is multi-day. Outcomes
+             -- still measure recent (24h) activity.
              SELECT project_hash,
-                    COUNT(*) FILTER (WHERE tool_name = 'zc_skill_show') AS skill_show_calls_24h,
-                    COUNT(*) FILTER (WHERE tool_name = 'zc_record_skill_outcome') AS outcome_calls_24h
+                    COUNT(*) FILTER (WHERE tool_name = 'zc_skill_show'
+                                     AND ts > NOW() - INTERVAL '7 days') AS skill_show_calls_24h,
+                    COUNT(*) FILTER (WHERE tool_name = 'zc_record_skill_outcome'
+                                     AND ts > NOW() - INTERVAL '24 hours') AS outcome_calls_24h
                FROM tool_calls_pg
-              WHERE ts > NOW() - INTERVAL '24 hours'
+              WHERE ts > NOW() - INTERVAL '7 days'
                 AND tool_name IN ('zc_skill_show', 'zc_record_skill_outcome')
               GROUP BY project_hash
            )
@@ -2116,9 +2125,17 @@ if (process.argv[1]?.endsWith("api-server.js")) {
     // PG isn't configured (the import is best-effort startup work).
     if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
       try {
-        const { autoImportSkills } = await import("./skill_auto_import.js");
+        const { autoImportSkills, backfillSecurityScans } = await import("./skill_auto_import.js");
         const summary = await autoImportSkills();
         console.log(`Skill auto-import: scanned=${summary.scanned} +${summary.inserted} ~${summary.updated} =${summary.skipped_same} ✗${summary.parse_errors + summary.validation_errors}`);
+        // v0.23.3 — also backfill security scans for any active skills that
+        // have no scan history (pre-v0.23.0 skills imported via the raw-SQL
+        // path that bypassed the gate). Idempotent: only scans skills that
+        // have zero rows in skill_security_scans_pg.
+        const backfill = await backfillSecurityScans();
+        if (backfill.scanned > 0) {
+          console.log(`Skill scan backfill: scanned=${backfill.scanned} passed=${backfill.passed} failed=${backfill.failed}`);
+        }
       } catch (e) {
         console.error("Skill auto-import failed:", (e as Error).message);
       }
