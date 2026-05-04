@@ -4,6 +4,98 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.22.10] — 2026-05-03 — Hook fire-and-forget telemetry bug (silent since v0.22.5)
+
+After v0.22.9 declared the loop done, the operator pushed for one more
+round of verification: actual terminal-agent E2E on
+Test_Agent_Coordination, with real Claude windows opened, real ASSIGN
+broadcasts, real Read tool calls. That live test caught a bug that
+static analysis couldn't have caught.
+
+### The bug
+
+`hooks/preread-dedup.mjs` had been firing telemetry to
+`/api/v1/telemetry/read-redirect` (since v0.22.5) and
+`/api/v1/telemetry/pretool-event` (since v0.22.9) using the standard
+fire-and-forget pattern:
+
+```javascript
+fetch(`${apiUrl}/api/v1/telemetry/...`, {...}).catch(() => {});
+process.stdout.write(JSON.stringify(...));
+process.exit(0);
+```
+
+The intent was non-blocking observability. The reality: `process.exit(0)`
+terminates the Node process IMMEDIATELY, killing the pending HTTP
+request before it goes out. Both telemetry POSTs have been silently
+dropped on every Read since v0.22.5. The hook itself worked perfectly
+(redirects fired, agents got summaries) — only the dashboard view was
+blind.
+
+This explains the "read_redirects=0 forever" mystery from the v0.22.9
+audit. We had hypothesized it was "agents only read unindexed files."
+The actual cause was much simpler — the POST never went out.
+
+### The fix
+
+Convert all telemetry POSTs in `hooks/preread-dedup.mjs` to be
+`await`ed with a 1500ms timeout via `AbortSignal.timeout(1500)`:
+
+```javascript
+async function emitPretoolEvent(outcome, detail) {
+  // ...
+  await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
+    // ...
+    signal: AbortSignal.timeout(1500),
+  }).catch(() => { /* swallow but at least we waited */ });
+}
+```
+
+And every call site is now `await emitPretoolEvent(...)` before
+`process.exit(0)`. Same pattern applied to the v0.22.5 read-redirect
+POST in the same file.
+
+Tradeoff: every Read intercepted by the hook now adds up to 1500ms
+latency for the telemetry to flush. Localhost POST typically completes
+in <50ms; the 1500ms cap is just a safety net for unreachable API.
+
+### Verified live
+
+Real-spawn E2E on Test_Agent_Coordination caught the bug AND verified
+the fix in one cycle:
+
+- Cycle 2 (pre-fix): developer Reads `index.js` → hook redirects
+  correctly → ZERO rows in pretool_events_pg or read_redirects_pg
+- Cycle 3 (post-fix): developer Reads `package.json` → hook redirects
+  correctly → ONE row in EACH telemetry table
+
+```
+00:59:16 | pretool_events:  outcome=redirect, file=...package.json
+00:59:16 | read_redirects:  full=55, summary=232, saved=-177
+```
+
+(The negative `saved_tokens` for package.json is real signal: that
+file is so small the L0/L1 summary is bigger than the raw content.
+Future optimization: skip redirect for files <500 bytes.)
+
+### Live E2E report (Test_Agent_Coordination)
+
+7 phases, 4 ASSIGN→MERGE cycles, 3 different worker roles, 41
+tool_calls, 16 broadcasts, 4 skill_runs, all firing through PG mirror.
+
+| Phase | What | Result |
+|---|---|---|
+| 1. Real spawn (start-agents.ps1) | orchestrator + developer | ✓ both windows opened, prompts correct |
+| 2. Initial-spawn prompt audit | all 3 levers in developer, mandate-only in orchestrator | ✓ |
+| 3. Cycle 1: ASSIGN word-count | full skill_show → outcome → MERGE chain | ✓ score 0.92 |
+| 4. Cycle 2: force Read | discovers hook telemetry bug (no rows) | found bug |
+| 5. v0.22.10 fix landed | await fetch + 1500ms timeout | shipped |
+| 6. Cycle 3: re-test Read | telemetry rows land! | ✓ 1 pretool + 1 read_redirect |
+| 7. LAUNCH_ROLE → researcher | dispatcher dynamic-spawn pathway | ✓ all env vars + prompt correct |
+| 8. Cycle 4: zc_file_summary | summarizer telemetry pipeline | ✓ skipped event for non-existent file |
+
+The E2E test now reflects the fully-verified system end-to-end.
+
 ## [0.22.9] — 2026-05-03 — Loop verification + 4 audit-driven bug fixes
 
 After v0.22.8 declared the loop "done," operator pushed back: *"do not

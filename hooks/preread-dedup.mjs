@@ -87,13 +87,22 @@ const projectPath = projectPath0;
  * could mean all reads are of unindexed files). With this, the operator
  * can see the FULL outcome distribution.
  */
-function emitPretoolEvent(outcome, detail) {
+/**
+ * v0.22.10 BUG FIX: emit was fire-and-forget but the hook calls process.exit(0)
+ * immediately after, killing the pending POST before it goes out. Result:
+ * pretool_events_pg (and read_redirects_pg, same pattern) were silently empty
+ * across all agent activity since v0.22.5. The hook WAS firing — just no
+ * telemetry was reaching PG. Fix: await the POST with a short timeout so
+ * Claude Code's hook protocol still completes promptly, but the telemetry
+ * actually flushes.
+ */
+async function emitPretoolEvent(outcome, detail) {
   try {
     const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
     if (!apiUrl) return;
     const apiKey = process.env.ZC_API_KEY ?? "";
     const agentId = process.env.ZC_AGENT_ID || "default";
-    fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
+    await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -106,7 +115,10 @@ function emitPretoolEvent(outcome, detail) {
         outcome,
         detail: detail ? String(detail).slice(0, 1024) : null,
       }),
-    }).catch(() => { /* fire-and-forget */ });
+      // Cap latency: if the API is unreachable, hook still exits quickly.
+      // 1500ms is plenty for a localhost POST; far exceeds typical latency.
+      signal: AbortSignal.timeout(1500),
+    }).catch(() => { /* swallow but at least we waited */ });
   } catch { /* never break the hook on telemetry failure */ }
 }
 
@@ -117,7 +129,7 @@ try {
 
   // ─── Bypass: force_full_read ────────────────────────────────────────────
   if (forceFullRead) {
-    emitPretoolEvent("bypass_force_read", "agent passed force_full_read=true");
+    await emitPretoolEvent("bypass_force_read", "agent passed force_full_read=true");
     if (dedupEnabled) {
       try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
     }
@@ -126,7 +138,7 @@ try {
 
   // ─── Bypass: partial read (offset/limit) ────────────────────────────────
   if (partialRead) {
-    emitPretoolEvent("bypass_partial_read", `offset=${toolArgs.offset} limit=${toolArgs.limit}`);
+    await emitPretoolEvent("bypass_partial_read", `offset=${toolArgs.offset} limit=${toolArgs.limit}`);
     if (dedupEnabled) {
       try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
     }
@@ -144,7 +156,7 @@ try {
       `  - Read with offset/limit to read a specific range (bypasses dedup)\n\n` +
       `If you genuinely need to re-Read (e.g. the file was externally modified), ` +
       `add "force_full_read": true to the Read arguments or set ZC_READ_DEDUP_ENABLED=0.`;
-    emitPretoolEvent("block_dedup", "duplicate read in same session");
+    await emitPretoolEvent("block_dedup", "duplicate read in same session");
     process.stdout.write(JSON.stringify({
       continue: false,
       decision: "block",
@@ -190,6 +202,9 @@ try {
         `(This redirect saves ~95% of Read tokens. Set ZC_SUMMARY_REDIRECT=0 to disable globally.)`;
 
       // v0.22.5 — fire read_redirects telemetry (the existing per-success path)
+      // v0.22.10 BUG FIX: was fire-and-forget but process.exit(0) immediately
+      // killed the pending POST. Now awaited with a tight timeout. Same bug
+      // class as the pretool-event POST — silent since v0.22.5.
       try {
         const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
         const apiKey = process.env.ZC_API_KEY ?? "";
@@ -203,7 +218,7 @@ try {
           const fullFileTokens = Math.ceil(fileSize / 4);
           const summaryTokens  = Math.ceil(summaryText.length / 4);
           const agentId = process.env.ZC_AGENT_ID || "default";
-          fetch(`${apiUrl}/api/v1/telemetry/read-redirect`, {
+          await fetch(`${apiUrl}/api/v1/telemetry/read-redirect`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -212,12 +227,13 @@ try {
             body: JSON.stringify({
               projectPath, agentId, filePath: rawPath, fullFileTokens, summaryTokens,
             }),
-          }).catch(() => { /* fire-and-forget */ });
+            signal: AbortSignal.timeout(1500),
+          }).catch(() => { /* swallow but at least we waited */ });
         }
       } catch { /* never break the redirect */ }
 
       // v0.22.9 — also fire the generic pretool-event telemetry
-      emitPretoolEvent("redirect", `summary served, l0=${summary.l0?.length ?? 0}b l1=${summary.l1?.length ?? 0}b`);
+      await emitPretoolEvent("redirect", `summary served, l0=${summary.l0?.length ?? 0}b l1=${summary.l1?.length ?? 0}b`);
 
       process.stdout.write(JSON.stringify({
         continue: false,
@@ -246,7 +262,7 @@ try {
         `WHY: every Read of an un-summarized file is a missed savings opportunity. By forcing\n` +
         `summaries to be created on-demand, the index builds as you work. Set\n` +
         `ZC_SUMMARY_REDIRECT=0 to disable globally.`;
-      emitPretoolEvent("block_unindexed", "no L0/L1 summary in source_meta");
+      await emitPretoolEvent("block_unindexed", "no L0/L1 summary in source_meta");
       process.stdout.write(JSON.stringify({
         continue: false,
         decision: "block",
@@ -260,10 +276,10 @@ try {
   if (dedupEnabled) {
     try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
   }
-  emitPretoolEvent("pass_through", `redirect_enabled=${summaryRedirectEnabled} dedup_enabled=${dedupEnabled}`);
+  await emitPretoolEvent("pass_through", `redirect_enabled=${summaryRedirectEnabled} dedup_enabled=${dedupEnabled}`);
   process.exit(0);
 } catch (e) {
   // Never break the agent on hook failure — let the Read through.
-  emitPretoolEvent("error", String(e && e.message ? e.message : e).slice(0, 512));
+  await emitPretoolEvent("error", String(e && e.message ? e.message : e).slice(0, 512));
   process.exit(0);
 }
