@@ -1290,6 +1290,77 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.25.3 — per-project skills-used rollup. Operator clicks 📋 Skills used
+  // on a project row in Skill-activity health → expandable HTML table
+  // showing exactly which skills the agents on this project loaded /
+  // recorded outcomes for in the last 24h, with avg + latest score.
+  app.get("/dashboard/projects/:hash/skills-used", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const projectHash = String(params.hash ?? "").trim();
+    if (!projectHash) {
+      reply.status(400).type("text/html").send(`<div class="error">missing project_hash</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const { renderProjectSkillsUsed } = await import("./dashboard/render.js");
+      // Combine tool_calls (zc_skill_show / zc_record_skill_outcome counts +
+      // agents) with skill_runs (avg + latest score) per skill_id.
+      const rows = await withClient(async (c) => {
+        const r = await c.query<Record<string, unknown>>(
+          `WITH tc AS (
+             SELECT skill_id,
+                    COUNT(*) FILTER (WHERE tool_name = 'zc_skill_show') AS shows,
+                    COUNT(*) FILTER (WHERE tool_name = 'zc_record_skill_outcome') AS outcomes,
+                    STRING_AGG(DISTINCT agent_id, ', ' ORDER BY agent_id) AS agents,
+                    MAX(ts) AS last_used
+               FROM tool_calls_pg
+              WHERE project_hash = $1
+                AND tool_name IN ('zc_skill_show', 'zc_record_skill_outcome')
+                AND skill_id IS NOT NULL
+                AND ts > NOW() - INTERVAL '24 hours'
+              GROUP BY skill_id
+           ),
+           sr AS (
+             SELECT skill_id,
+                    COUNT(*) AS runs_24h,
+                    AVG(outcome_score)::numeric(6,3) AS avg_score,
+                    (ARRAY_AGG(outcome_score ORDER BY ts DESC))[1] AS latest_score
+               FROM skill_runs_pg
+              WHERE project_hash = $1
+                AND ts > NOW() - INTERVAL '24 hours'
+                AND outcome_score IS NOT NULL
+              GROUP BY skill_id
+           )
+           SELECT COALESCE(tc.skill_id, sr.skill_id) AS skill_id,
+                  COALESCE(tc.shows, 0)::text AS shows,
+                  COALESCE(tc.outcomes, 0)::text AS outcomes,
+                  COALESCE(sr.runs_24h, 0)::text AS runs_24h,
+                  sr.avg_score::text AS avg_score,
+                  sr.latest_score::text AS latest_score,
+                  COALESCE(tc.agents, '') AS agents,
+                  COALESCE(tc.last_used::text, '') AS last_used
+             FROM tc FULL OUTER JOIN sr ON tc.skill_id = sr.skill_id
+            ORDER BY tc.last_used DESC NULLS LAST`,
+          [projectHash],
+        );
+        return r.rows;
+      });
+      reply.type("text/html").send(renderProjectSkillsUsed(projectHash, rows.map((r) => ({
+        skill_id:     String(r.skill_id),
+        shows:        Number(r.shows),
+        outcomes:     Number(r.outcomes),
+        runs_24h:     Number(r.runs_24h),
+        avg_score:    r.avg_score === null ? null : Number(r.avg_score),
+        latest_score: r.latest_score === null ? null : Number(r.latest_score),
+        agents:       String(r.agents ?? ""),
+        last_used:    String(r.last_used ?? ""),
+      }))));
+    } catch (e) {
+      reply.status(500).type("text/html").send(`<div class="error">Failed to load skills-used: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   // v0.24.0 Phase 2 — marketplace pull endpoints
   //
   // POST /dashboard/marketplace/pull — runs a pull, returns HTML summary

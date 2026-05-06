@@ -632,6 +632,26 @@ export function renderDashboardHtml(): string {
     background: #0e2438; color: #bfdbfe; border-left-color: #3b82f6;
   }
   .skill-health-info .skill-health-icon { color: #60a5fa; }
+  /* v0.25.3 — per-project skills-used rollup */
+  .proj-skills-btn {
+    background: #1f2937; color: #c084fc; border: 1px solid #2a2f37;
+    padding: 2px 10px; border-radius: 3px; cursor: pointer; font-size: 0.78rem;
+    margin-left: 10px;
+  }
+  .proj-skills-btn:hover { background: #2a2f37; color: #d8b4fe; }
+  .proj-skills-zone { padding: 0 14px; }
+  .proj-skills-table {
+    background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px;
+    padding: 10px; margin: 6px 0 12px;
+  }
+  .proj-skills-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; font-size: 0.85rem;
+  }
+  .proj-skills-meta { color: #94a3b8; font-size: 0.78rem; }
+  .proj-skills-empty {
+    color: #94a3b8; font-style: italic; padding: 8px 14px; font-size: 0.85rem;
+  }
   .skill-health-banner code {
     background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px;
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
@@ -1455,11 +1475,25 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
         : severity === "info"
           ? `${r.broadcasts_24h} broadcasts · ${r.skill_show_calls_24h} skill_show — task in progress, MERGE pending (outcome will land at MERGE)`
           : `${r.skill_runs_24h} skill_runs · ${r.skill_show_calls_24h} skill_show · ${r.unique_agents} agent(s)`;
+    // v0.25.3: per-project "which skills did agents use today" rollup
+    // (operator-asked feature — was only available by drilling into each
+    // skill's Recent runs button). Inline expand reveals a table showing
+    // skill_id × calls × outcomes × agents × latest score for the project.
+    const showSkillsBtn = (severity === "info" || severity === "ok")
+      ? `<button class="proj-skills-btn"
+                title="Show which skills agents on this project used in the last 24h"
+                hx-get="/dashboard/projects/${encodeURIComponent(r.project_hash)}/skills-used"
+                hx-target="next .proj-skills-zone" hx-swap="innerHTML">
+          📋 Skills used
+        </button>`
+      : "";
     return `<div class="skill-health-row skill-health-${severity}">
       <span class="skill-health-icon">${icon}</span>
       <span class="skill-health-name" title="project_hash=${r.project_hash}">${escapeHtml(name)}</span>
       <span class="skill-health-detail">${escapeHtml(detail)}</span>
-    </div>`;
+      ${showSkillsBtn}
+    </div>
+    <div class="proj-skills-zone"></div>`;
   };
 
   const lines: string[] = [];
@@ -1887,6 +1921,66 @@ export function renderNewSkillForm(roles: string[]): string {
         <button type="button" class="edit-btn" onclick="document.getElementById('new-skill-zone').innerHTML=''">Cancel</button>
       </div>
     </form>
+  `;
+}
+
+// v0.25.3 — per-project skills usage rollup
+//
+// "Which skills did the agents on this project actually use today?" — a
+// question the dashboard couldn't answer at the project level until now.
+// (Recent runs button per-skill answered it per-skill; this gives the
+// project-wide view operator wanted.)
+
+export interface ProjectSkillUsageRow {
+  skill_id:    string;
+  shows:       number;
+  outcomes:    number;
+  runs_24h:    number;
+  avg_score:   number | null;
+  latest_score: number | null;
+  agents:      string;     // comma-separated agent_ids
+  last_used:   string;     // ISO ts
+}
+
+export function renderProjectSkillsUsed(projectHash: string, rows: ProjectSkillUsageRow[]): string {
+  if (rows.length === 0) {
+    return `<div class="proj-skills-empty">No skills called on this project in the last 24h.</div>`;
+  }
+  const trs = rows.map((r) => {
+    const when = r.last_used.slice(0, 19).replace("T", " ");
+    const score = r.latest_score === null
+      ? `<span class="dim">—</span>`
+      : `<span class="score score-${r.latest_score >= 0.8 ? "high" : r.latest_score >= 0.5 ? "mid" : "low"}">${r.latest_score.toFixed(2)}</span>`;
+    const avg = r.avg_score === null
+      ? `<span class="dim">—</span>`
+      : `<span class="score score-${r.avg_score >= 0.8 ? "high" : r.avg_score >= 0.5 ? "mid" : "low"}">${r.avg_score.toFixed(2)}</span>`;
+    return `
+      <tr>
+        <td class="mono small"><code>${escapeHtml(r.skill_id)}</code></td>
+        <td>${r.shows}</td>
+        <td>${r.outcomes}</td>
+        <td>${score}</td>
+        <td>${avg}</td>
+        <td class="mono small">${escapeHtml(r.agents)}</td>
+        <td class="mono small">${escapeHtml(when)}</td>
+      </tr>
+    `;
+  }).join("");
+  const totalShows = rows.reduce((s, r) => s + r.shows, 0);
+  const totalOutcomes = rows.reduce((s, r) => s + r.outcomes, 0);
+  return `
+    <div class="proj-skills-table">
+      <div class="proj-skills-header">
+        <strong>Skills used in last 24h</strong>
+        <span class="proj-skills-meta">${rows.length} distinct skill${rows.length === 1 ? "" : "s"} · ${totalShows} loads · ${totalOutcomes} outcomes</span>
+      </div>
+      <table class="runs-table">
+        <thead><tr>
+          <th>Skill</th><th>Loads</th><th>Outcomes</th><th>Latest score</th><th>Avg score</th><th>Used by</th><th>Last call</th>
+        </tr></thead>
+        <tbody>${trs}</tbody>
+      </table>
+    </div>
   `;
 }
 
