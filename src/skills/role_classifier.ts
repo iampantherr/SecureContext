@@ -25,12 +25,14 @@
  */
 
 import type { Skill } from "./types.js";
-import { ROLE_NAMES } from "./roles_catalog.js";
+import { ROLE_NAMES, ROLES_CATALOG } from "./roles_catalog.js";
+import { Config } from "../config.js";
+import { selectSummaryModel } from "../summarizer.js";
 
 export interface RoleClassifyResult {
   intended_roles: string[];
   confidence:     "high" | "medium" | "low";
-  backend:        "keyword" | "realtime-sonnet";
+  backend:        "keyword" | "ollama" | "realtime-sonnet";
   reason:         string;
   duration_ms:    number;
 }
@@ -276,14 +278,175 @@ export function classifyRolesKeyword(skill: Skill): RoleClassifyResult {
   };
 }
 
+// ─── v0.24.3: Ollama (qwen2.5-coder:14b) backend ───────────────────────────
+//
+// Reuse the same Ollama instance + coder model that summarizer.ts uses for
+// L0/L1 file summaries. Already running in the docker-compose stack
+// (sc-ollama), already kept warm by the v0.23.3 30m keep_alive bump, no
+// API costs. Higher fidelity than keyword matching for ambiguous skills
+// (e.g. "build" no longer fires both code AND design domains by accident
+// — the model reasons about INTENT instead of substring presence).
+
+function getOllamaBaseForClassifier(): string {
+  return Config.OLLAMA_URL.replace(/\/api\/[^/]*\/?$/, "");
+}
+
+function buildClassifierPrompt(skill: Skill, roleHints: string): string {
+  const name        = skill.frontmatter.name ?? "(unknown)";
+  const description = skill.frontmatter.description ?? "(no description)";
+  return `You are classifying a skill (a procedural agent capability) by which job roles
+should have access to it. Return a JSON array of role names — only roles
+that would genuinely benefit. Pick from the role list below, exact spelling.
+
+Skill name: ${name}
+Skill description: ${description}
+
+Available roles (name — short description):
+${roleHints}
+
+Rules:
+- Return 2-7 roles. Don't over-assign — if only developers benefit, return ["developer"].
+- Roles that only TANGENTIALLY relate (e.g. "anyone who reads PDFs") DON'T qualify;
+  the skill must be a legitimate part of that role's working procedure.
+- Use exact role names from the list. Don't invent new ones.
+- Output JSON only, no prose, no markdown fences:
+
+["role-1", "role-2", ...]`;
+}
+
 /**
- * Public entry point. Picks backend by env or arg. Default: keyword.
+ * Build a compact role-list hint for the prompt. Cap at ~80 roles
+ * to fit comfortably in the model's context.
  */
-export async function classifyRoles(skill: Skill, opts: { backend?: "keyword" | "realtime-sonnet" } = {}): Promise<RoleClassifyResult> {
-  const backend = opts.backend ?? (process.env.ZC_ROLE_CLASSIFIER ?? "keyword") as "keyword" | "realtime-sonnet";
+function buildRoleHints(): string {
+  return ROLES_CATALOG
+    .slice(0, 80)
+    .map((r) => `- ${r.name} — ${r.desc.slice(0, 110)}`)
+    .join("\n");
+}
+
+/**
+ * Parse the model's JSON output. Tolerant: strips markdown fences if
+ * the model adds them despite the prompt instructions.
+ */
+function parseOllamaResponse(text: string): string[] | null {
+  let s = text.trim();
+  // Strip ```json ... ``` fences if present
+  if (s.startsWith("```")) {
+    const end = s.lastIndexOf("```");
+    s = s.slice(s.indexOf("\n") + 1, end).trim();
+  }
+  // Find the first [ ... ] in the response
+  const start = s.indexOf("[");
+  const close = s.lastIndexOf("]");
+  if (start === -1 || close === -1 || close <= start) return null;
+  s = s.slice(start, close + 1);
+  try {
+    const parsed = JSON.parse(s);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((x) => typeof x === "string");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ollama-based classifier. Uses qwen2.5-coder:14b (or whatever
+ * selectSummaryModel returns). Falls back to keyword on any failure
+ * — never throws back to the caller.
+ */
+export async function classifyRolesOllama(skill: Skill): Promise<RoleClassifyResult> {
+  const start = Date.now();
+
+  // Pick a model the same way summarizer does
+  const model = await selectSummaryModel();
+  if (!model) {
+    const fallback = classifyRolesKeyword(skill);
+    return { ...fallback, reason: `${fallback.reason} (ollama: no model available; fell back to keyword)` };
+  }
+
+  const prompt = buildClassifierPrompt(skill, buildRoleHints());
+
+  try {
+    const ctrl  = new AbortController();
+    // Reuse the summarizer's timeout — covers cold load + inference.
+    const timer = setTimeout(() => ctrl.abort(), Config.SUMMARY_TIMEOUT_MS);
+    const res   = await fetch(`${getOllamaBaseForClassifier()}/api/generate`, {
+      method:  "POST",
+      headers: { "content-type": "application/json" },
+      body:    JSON.stringify({
+        model,
+        prompt,
+        stream:     false,
+        keep_alive: Config.SUMMARY_KEEP_ALIVE,
+        options: {
+          temperature: 0.1,   // near-deterministic
+          num_predict: 200,   // role lists are short — JSON arr of names
+        },
+      }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`ollama HTTP ${res.status}`);
+
+    const j = await res.json() as { response?: string };
+    const raw = (j.response ?? "").trim();
+
+    const candidates = parseOllamaResponse(raw);
+    if (!candidates || candidates.length === 0) {
+      // Couldn't parse → fall back
+      const fb = classifyRolesKeyword(skill);
+      return { ...fb, reason: `${fb.reason} (ollama parse failed: ${raw.slice(0, 80).replace(/\s+/g, " ")}; fell back to keyword)` };
+    }
+
+    // Filter against canonical role set — drop hallucinated names
+    const valid = candidates.filter((r) => ROLE_NAMES.has(r));
+    const dropped = candidates.length - valid.length;
+
+    if (valid.length === 0) {
+      const fb = classifyRolesKeyword(skill);
+      return { ...fb, reason: `${fb.reason} (ollama returned ${candidates.length} roles, all unknown — fell back)` };
+    }
+
+    return {
+      intended_roles: valid.sort(),
+      confidence:     valid.length >= 3 ? "high" : "medium",
+      backend:        "ollama",
+      reason:         `model=${model}; returned ${candidates.length} roles${dropped > 0 ? ` (${dropped} dropped as unknown to dispatcher)` : ""}`,
+      duration_ms:    Date.now() - start,
+    };
+  } catch (e) {
+    // Timeout / network / parse error → graceful fallback
+    const fb = classifyRolesKeyword(skill);
+    return { ...fb, reason: `${fb.reason} (ollama error: ${(e as Error).message}; fell back to keyword)` };
+  }
+}
+
+/**
+ * Public entry point. Default backend: ollama (via env override or arg).
+ *
+ * Backend selection priority:
+ *   1. opts.backend (explicit)
+ *   2. ZC_ROLE_CLASSIFIER env var
+ *   3. "ollama" (default — local, no API cost, qwen2.5-coder:14b)
+ *
+ * Ollama backend gracefully falls back to keyword on any failure
+ * (model unavailable, timeout, malformed JSON, network), so callers
+ * don't need to handle classifier errors.
+ */
+export async function classifyRoles(
+  skill: Skill,
+  opts: { backend?: "keyword" | "ollama" | "realtime-sonnet" } = {},
+): Promise<RoleClassifyResult> {
+  const backend = opts.backend
+    ?? (process.env.ZC_ROLE_CLASSIFIER as "keyword" | "ollama" | "realtime-sonnet" | undefined)
+    ?? "ollama";
+
+  if (backend === "ollama") {
+    return classifyRolesOllama(skill);
+  }
   if (backend === "realtime-sonnet") {
     // TODO v0.25: hook up Sonnet via the polisher's existing API plumbing.
-    // For now, fall through to keyword and tag the result.
     const r = classifyRolesKeyword(skill);
     return { ...r, reason: `${r.reason} (sonnet backend stubbed; using keyword)` };
   }
