@@ -50,9 +50,18 @@ export interface RoleClassifyResult {
 // domain ships with a CORE set of 2-4 highly-relevant roles. Operator
 // refines via the dashboard's Edit frontmatter button — better to under-
 // assign and have operator add than over-assign and have them remove.
+//
+// v0.25.1: orchestrator added to writing / comms / ops / code domains.
+// The orchestrator is a meta role that decomposes tasks, coordinates
+// specialists, and reviews MERGE deliverables. Skills that help with
+// writing (project plans, status updates), communication (broadcasts,
+// internal-comms), operations (project management), and code review
+// (debugging methodology, doc-coauthoring) are all relevant. Without
+// this v0.24.0-v0.25.0 marketplace skills had 0 orchestrator-tagged
+// entries — operator caught it before launching real-project use.
 const DOMAIN_TO_ROLES: Record<string, string[]> = {
   code: [
-    "developer", "architect",
+    "developer", "architect", "orchestrator",  // orchestrator reviews code-skill deliverables
   ],
   design: [
     "designer", "ui-designer", "interaction-designer",
@@ -61,7 +70,7 @@ const DOMAIN_TO_ROLES: Record<string, string[]> = {
     "brand-designer", "brand-strategist", "creative-director",
   ],
   writing: [
-    "writer", "technical-writer", "documentation-writer", "editor",
+    "writer", "technical-writer", "documentation-writer", "editor", "orchestrator",
   ],
   marketing: [
     "marketer", "content-marketer", "growth-marketer",
@@ -73,7 +82,7 @@ const DOMAIN_TO_ROLES: Record<string, string[]> = {
     "accountant", "controller", "finance-manager", "financial-analyst",
   ],
   ops: [
-    "ops-manager", "project-manager",
+    "ops-manager", "project-manager", "orchestrator",  // orchestrator is the operator-facing coordinator
   ],
   legal: [
     "legal-counsel", "compliance-officer",
@@ -82,10 +91,10 @@ const DOMAIN_TO_ROLES: Record<string, string[]> = {
     "researcher", "research-scientist", "user-researcher",
   ],
   qa: [
-    "developer",  // QA isn't a separate role in this catalog
+    "developer", "orchestrator",  // orchestrator reviews MERGEs (code review mode)
   ],
   comms: [
-    "writer", "content-marketer", "social-media-manager",
+    "writer", "content-marketer", "social-media-manager", "orchestrator",  // status updates to operator
   ],
 };
 
