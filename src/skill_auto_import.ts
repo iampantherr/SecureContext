@@ -400,3 +400,76 @@ export async function backfillSecurityScans(): Promise<{ scanned: number; passed
   logger.info("skills", "scan_backfill_complete", result);
   return result;
 }
+
+/**
+ * v0.24.2 — One-time backfill: classify intended_roles for any active
+ * skill that has empty/undefined intended_roles. Idempotent — only touches
+ * skills with no roles assigned.
+ *
+ * Why this exists: v0.24.0 marketplace pull set intended_roles=undefined,
+ * orphaning all 17 anthropic-* skills. Operator caught this in
+ * dashboard click-through. Without this backfill, those skills exist in
+ * skills_pg but never get auto-injected at agent session start.
+ *
+ * Runs on container startup. Future marketplace pulls call the classifier
+ * inline (see marketplace_pull.ts) so this backfill should converge to
+ * a no-op once any historic gap is closed.
+ */
+export async function backfillIntendedRoles(): Promise<{ scanned: number; updated: number; skipped: number }> {
+  const result = { scanned: 0, updated: 0, skipped: 0 };
+  const rows = await withClient(async (c) => {
+    const r = await c.query<{ skill_id: string; frontmatter: unknown; body: string; body_hmac: string }>(
+      `SELECT skill_id, frontmatter, body, body_hmac
+         FROM skills_pg
+        WHERE archived_at IS NULL
+          AND (frontmatter->'intended_roles' IS NULL
+               OR frontmatter->'intended_roles' = 'null'::jsonb
+               OR (jsonb_typeof(frontmatter->'intended_roles') = 'array'
+                   AND jsonb_array_length(frontmatter->'intended_roles') = 0))`,
+    );
+    return r.rows;
+  });
+  if (rows.length === 0) return result;
+
+  const { classifyRoles } = await import("./skills/role_classifier.js");
+  logger.info("skills", "role_backfill_start", { count: rows.length });
+  for (const row of rows) {
+    result.scanned++;
+    const fm = typeof row.frontmatter === "string" ? JSON.parse(row.frontmatter) : row.frontmatter;
+    const skill: Skill = {
+      skill_id: row.skill_id,
+      frontmatter: fm as CanonicalFm,
+      body: row.body,
+      body_hmac: row.body_hmac,
+      source_path: null,
+      promoted_from: null,
+      created_at: new Date().toISOString(),
+      archived_at: null,
+      archive_reason: null,
+    };
+    try {
+      const r = await classifyRoles(skill);
+      if (r.intended_roles.length === 0) {
+        result.skipped++;
+        continue;
+      }
+      // Update skills_pg.frontmatter.intended_roles in place. We use
+      // jsonb_set to avoid round-tripping the full frontmatter — also
+      // means no body_hmac change (HMAC covers body, not frontmatter).
+      await withClient(async (c) => {
+        await c.query(
+          `UPDATE skills_pg
+              SET frontmatter = jsonb_set(frontmatter, '{intended_roles}', $1::jsonb)
+            WHERE skill_id = $2 AND archived_at IS NULL`,
+          [JSON.stringify(r.intended_roles), row.skill_id],
+        );
+      });
+      result.updated++;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`[role-backfill] ${skill.skill_id}: ${(e as Error).message}`);
+    }
+  }
+  logger.info("skills", "role_backfill_complete", result);
+  return result;
+}

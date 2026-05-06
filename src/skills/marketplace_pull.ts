@@ -304,6 +304,17 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
       let skill: Skill;
       try {
         skill = await buildSkill(fm, parsed.body, { source_path: `marketplace://${source}/${path}` });
+        // v0.24.2: classify roles from the built skill (name + description +
+        // body). Without this, marketplace skills land in skills_pg with
+        // intended_roles=undefined and never get auto-injected at session
+        // start. The keyword classifier is local + fast (no API cost);
+        // operator can override via the dashboard's Edit frontmatter button
+        // if the heuristic gets it wrong.
+        const { classifyRoles } = await import("./role_classifier.js");
+        const roleResult = await classifyRoles(skill);
+        if (roleResult.intended_roles.length > 0) {
+          skill.frontmatter.intended_roles = roleResult.intended_roles;
+        }
       } catch (e) {
         summary.errors++;
         await recordPullAttempt({

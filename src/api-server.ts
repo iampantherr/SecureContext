@@ -2314,7 +2314,7 @@ if (process.argv[1]?.endsWith("api-server.js")) {
     // PG isn't configured (the import is best-effort startup work).
     if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
       try {
-        const { autoImportSkills, backfillSecurityScans } = await import("./skill_auto_import.js");
+        const { autoImportSkills, backfillSecurityScans, backfillIntendedRoles } = await import("./skill_auto_import.js");
         const summary = await autoImportSkills();
         console.log(`Skill auto-import: scanned=${summary.scanned} +${summary.inserted} ~${summary.updated} =${summary.skipped_same} ✗${summary.parse_errors + summary.validation_errors}`);
         // v0.23.3 — also backfill security scans for any active skills that
@@ -2324,6 +2324,13 @@ if (process.argv[1]?.endsWith("api-server.js")) {
         const backfill = await backfillSecurityScans();
         if (backfill.scanned > 0) {
           console.log(`Skill scan backfill: scanned=${backfill.scanned} passed=${backfill.passed} failed=${backfill.failed}`);
+        }
+        // v0.24.2 — classify intended_roles for any skill missing them
+        // (the v0.24.0 marketplace skills, mostly). Idempotent: only
+        // touches skills with frontmatter.intended_roles missing or empty.
+        const roleBack = await backfillIntendedRoles();
+        if (roleBack.scanned > 0) {
+          console.log(`Skill role backfill: scanned=${roleBack.scanned} updated=${roleBack.updated} skipped=${roleBack.skipped}`);
         }
       } catch (e) {
         console.error("Skill auto-import failed:", (e as Error).message);

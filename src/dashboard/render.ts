@@ -354,6 +354,11 @@ export function renderDashboardHtml(): string {
   .skill-name { font-weight: 600; font-family: ui-monospace, monospace; font-size: 0.95rem; color: #e6e8eb; }
   .skill-meta { color: #94a3b8; font-size: 0.85rem; margin-top: 4px; }
   .skill-meta .role-tag { background: #1e3a8a; color: #dbeafe; padding: 1px 6px; border-radius: 3px; font-size: 0.78rem; margin-right: 4px; }
+  /* v0.24.2 — source badges (marketplace / role-extracted / custom) */
+  .src-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 500; margin-left: 8px; vertical-align: middle; cursor: help; }
+  .src-marketplace { background: #1e3a8a; color: #93c5fd; border: 1px solid #1e40af; }
+  .src-role-extracted { background: #422006; color: #fbbf24; border: 1px solid #ca8a04; }
+  .src-custom { background: #1f2937; color: #9ca3af; border: 1px solid #374151; }
   .skill-meta .guidance-preview { color: #cbd5e1; font-style: italic; }
   .edit-btn, .polish-btn, .runs-btn, .security-btn {
     background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37;
@@ -998,10 +1003,21 @@ export function renderSkillsListFragment(
     const skillRows = skills.map((s) => {
       const fm = typeof s.frontmatter === "string" ? JSON.parse(s.frontmatter) : (s.frontmatter as Record<string, unknown>);
       const intended = (fm?.intended_roles as string[] | undefined) ?? [];
+      const tags = (fm?.tags as string[] | undefined) ?? [];
       const guidance = String((fm?.mutation_guidance as string | undefined) ?? "");
       const intendedHtml = intended.length > 0
         ? intended.map((r) => `<code class="role-tag">${escapeHtml(r)}</code>`).join(" ")
         : `<span style="color:#6b7280; font-style:italic">no intended_roles</span>`;
+      // v0.24.2 — source badge so operator can tell at a glance whether
+      // a skill came from marketplace, role-extraction, or custom-authored.
+      // Order matters: marketplace > role-extracted > custom (most-specific first).
+      const isMarketplace = tags.includes("marketplace");
+      const isRoleExtracted = tags.includes("role-extracted");
+      const sourceBadge = isMarketplace
+        ? `<span class="src-badge src-marketplace" title="Imported from anthropics/skills marketplace">🛒 marketplace</span>`
+        : isRoleExtracted
+          ? `<span class="src-badge src-role-extracted" title="Auto-extracted from a role's deepPrompt during system bootstrap">🤖 role-extracted</span>`
+          : `<span class="src-badge src-custom" title="Custom-authored skill (operator or mutator-promoted)">👤 custom</span>`;
       // v0.18.8 Loop B — skill efficiency column
       const eff = efficiencyMap.get(s.skill_id);
       // v0.23.3: when avg_tokens rounds to 0, the agent didn't report
@@ -1018,7 +1034,7 @@ export function renderSkillsListFragment(
       return `
         <div class="skill-row" data-skill-id="${escapeHtml(s.skill_id)}">
           <div class="skill-header">
-            <span class="skill-name">${escapeHtml(s.name)} <span style="color:#94a3b8">v${escapeHtml(s.version)}</span></span>
+            <span class="skill-name">${escapeHtml(s.name)} <span style="color:#94a3b8">v${escapeHtml(s.version)}</span> ${sourceBadge}</span>
             <span class="skill-actions">
               <button class="edit-btn"
                       hx-get="/dashboard/skills/edit?skill_id=${encodeURIComponent(s.skill_id)}"
