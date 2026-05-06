@@ -359,6 +359,53 @@ export function renderDashboardHtml(): string {
   .src-marketplace { background: #1e3a8a; color: #93c5fd; border: 1px solid #1e40af; }
   .src-role-extracted { background: #422006; color: #fbbf24; border: 1px solid #ca8a04; }
   .src-custom { background: #1f2937; color: #9ca3af; border: 1px solid #374151; }
+  /* v0.25.0 — score-trend sparkline */
+  .skill-trend { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
+  .sparkline { vertical-align: middle; color: #6b7280; }
+  .sparkline.trend-up { color: #4ade80; }
+  .sparkline.trend-down { color: #f87171; }
+  .sparkline.trend-flat { color: #94a3b8; }
+  .sparkline-label { font-size: 0.78rem; font-family: ui-monospace, monospace; }
+  .sparkline-label small { font-size: 0.72rem; margin-left: 3px; }
+  .sparkline-label.trend-up small { color: #4ade80; }
+  .sparkline-label.trend-down small { color: #f87171; }
+  .sparkline-label.trend-flat small { color: #94a3b8; }
+  .sparkline-empty { color: #6b7280; font-size: 0.78rem; }
+  /* v0.25.0 — operator create-skill form */
+  .skill-create-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .new-skill-btn { background: #166534; color: #dcfce7; border: 1px solid #15803d; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 0.88rem; font-weight: 500; }
+  .new-skill-btn:hover { background: #15803d; }
+  .new-skill-meta { font-size: 0.82rem; color: #94a3b8; }
+  .new-skill-form { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 16px; margin-bottom: 16px; }
+  .new-skill-form .form-banner { background: #1f2937; border-left: 3px solid #4ade80; padding: 8px 12px; margin-bottom: 16px; font-size: 0.85rem; color: #cbd5e1; border-radius: 0 4px 4px 0; }
+  .new-skill-form label { display: block; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; }
+  .new-skill-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .new-skill-form input[type=text], .new-skill-form select, .new-skill-form textarea {
+    width: 100%; padding: 6px 10px; background: #0e1116; color: #e6e8eb;
+    border: 1px solid #2a2f37; border-radius: 4px; font-family: inherit; font-size: 0.9rem; margin-top: 4px;
+  }
+  .new-skill-form textarea { font-family: ui-monospace, monospace; font-size: 0.82rem; resize: vertical; }
+  .new-skill-form .form-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .role-picker summary { cursor: pointer; padding: 6px 10px; background: #0e1116; border: 1px solid #2a2f37; border-radius: 4px; font-size: 0.85rem; color: #cbd5e1; }
+  .role-picker summary:hover { background: #1f2937; }
+  .role-checkbox-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 12px; background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; margin-top: 4px; max-height: 240px; overflow-y: auto; }
+  .role-checkbox { display: flex; align-items: center; gap: 4px; font-size: 0.78rem; color: #cbd5e1; cursor: pointer; }
+  .role-checkbox input { margin: 0; }
+  /* v0.25.0 — completed mutations + live broadcasts */
+  .mutations-table, .broadcasts-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .mutations-table th, .broadcasts-table th { background: #1f2937; color: #94a3b8; padding: 6px 8px; text-align: left; font-weight: 500; }
+  .mutations-table td, .broadcasts-table td { padding: 6px 8px; border-top: 1px solid #1f2937; color: #e6e8eb; }
+  .mutations-table .reason-cell, .broadcasts-table .state-cell { max-width: 320px; word-wrap: break-word; }
+  .bcast-type { padding: 2px 8px; border-radius: 3px; font-size: 0.72rem; font-family: ui-monospace, monospace; font-weight: 500; }
+  .bcast-assign { background: #1e3a8a; color: #93c5fd; }
+  .bcast-status { background: #422006; color: #fbbf24; }
+  .bcast-merge { background: #052e16; color: #4ade80; }
+  .bcast-reject { background: #7f1d1d; color: #fecaca; }
+  .bcast-revise { background: #422006; color: #fbbf24; }
+  .bcast-proposed { background: #1e3a8a; color: #93c5fd; }
+  .bcast-launch_role { background: #1e1b4b; color: #c4b5fd; }
+  .bcast-retire_role { background: #1f2937; color: #9ca3af; }
+  .bcast-dependency { background: #422006; color: #fbbf24; }
   .skill-meta .guidance-preview { color: #cbd5e1; font-style: italic; }
   .edit-btn, .polish-btn, .runs-btn, .security-btn {
     background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37;
@@ -726,8 +773,42 @@ export function renderDashboardHtml(): string {
   </div>
 </div>
 
+<!-- v0.25.0 — Live agent activity (last 20 broadcasts, refreshes every 5s) -->
+<div class="panel">
+  <h2>Live agent activity <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(last 20 broadcasts across all projects, auto-refresh 5s)</span></h2>
+  <div id="live-broadcasts"
+       hx-get="/dashboard/broadcasts"
+       hx-trigger="load, every 5s"
+       hx-target="this" hx-swap="innerHTML">
+    Loading…
+  </div>
+</div>
+
+<!-- v0.25.0 — Completed mutations (promotion history with score delta) -->
+<div class="panel">
+  <h2>Completed mutations <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(L1 mutation cycle outcomes — was the skill actually improved?)</span></h2>
+  <div id="completed-mutations"
+       hx-get="/dashboard/mutations/completed"
+       hx-trigger="load, every 30s"
+       hx-target="this" hx-swap="innerHTML">
+    Loading…
+  </div>
+</div>
+
 <div class="panel">
   <h2>Active skills <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(edit frontmatter — body is mutator-managed)</span></h2>
+  <!-- v0.25.0: + New skill button — opens an inline form, posts to
+       /dashboard/skills/new which routes through storage_dual.upsertSkill
+       (lint + 8-point scan gates run; rejection = inline error). -->
+  <div class="skill-create-actions">
+    <button class="new-skill-btn"
+            hx-get="/dashboard/skills/new-form"
+            hx-target="#new-skill-zone" hx-swap="innerHTML">
+      + New skill
+    </button>
+    <span class="new-skill-meta">Operator-authored skill — lint + security gates apply just like any other source.</span>
+  </div>
+  <div id="new-skill-zone"></div>
   <div id="skills"
        hx-get="/dashboard/skills"
        hx-trigger="load, every 30s[!document.querySelector('#skills input:focus, #skills textarea:focus, #skills select:focus, #skills details[open], #skills .skill-edit-zone:not(:empty)')]"
@@ -967,6 +1048,8 @@ export function renderSkillsListFragment(
   rows: Array<Record<string, unknown>>,
   projectNameMap: Map<string, string> = new Map(),
   efficiencyMap: Map<string, { avg_tokens: number; run_count: number }> = new Map(),
+  // v0.25.0 — last-N scored runs per skill, used to render a sparkline trend
+  scoreTrendMap: Map<string, Array<{ ts: string; score: number | null }>> = new Map(),
 ): string {
   if (rows.length === 0) {
     return `<p class="empty">No active skills found. Use <code>zc_skill_import</code> to add one.</p>`;
@@ -1031,6 +1114,11 @@ export function renderSkillsListFragment(
         : avgTokensRounded === 0
           ? `<span class="skill-eff skill-eff-none" title="Agent passed total_tokens=0 on zc_record_skill_outcome. Claude Code agents don't have token introspection — this is a known protocol gap. ${eff.run_count} runs in last 30 days.">avg cost: <em>not reported</em> · ${eff.run_count} runs</span>`
           : `<span class="skill-eff" title="Average across ${eff.run_count} runs in last 30 days">avg cost: <strong>${avgTokensRounded.toLocaleString()}</strong> tokens/run · ${eff.run_count} runs</span>`;
+      // v0.25.0 — score-trend sparkline. Inline SVG showing last N scored runs.
+      const trend = scoreTrendMap.get(s.skill_id) ?? [];
+      const sparklineHtml = trend.length >= 2
+        ? `<span class="skill-trend">trend: ${renderSparkline(trend)}</span>`
+        : "";
       return `
         <div class="skill-row" data-skill-id="${escapeHtml(s.skill_id)}">
           <div class="skill-header">
@@ -1072,7 +1160,7 @@ export function renderSkillsListFragment(
           <div class="skill-meta">
             ${escapeHtml(s.description || "(no description)")}<br>
             roles: ${intendedHtml}<br>
-            ${effHtml}
+            ${effHtml}${sparklineHtml ? ` &middot; ${sparklineHtml}` : ""}
             ${guidance ? `<br>guidance: <span class="guidance-preview">${escapeHtml(guidance.slice(0, 120))}${guidance.length > 120 ? "…" : ""}</span>` : ""}
           </div>
           <div class="skill-edit-zone"></div>
@@ -1705,6 +1793,174 @@ export interface SecurityScanRow {
   passed:       boolean;
   source:       string;
   failures:     Array<{ name: string; severity: string; detail: string | null }>;
+}
+
+// v0.25.0 — Operator-create-skill form (rendered inline, posts to /dashboard/skills/new)
+export function renderNewSkillForm(roles: string[]): string {
+  const roleOptions = roles.slice(0, 80).map((r) =>
+    `<label class="role-checkbox"><input type="checkbox" name="intended_roles" value="${escapeHtml(r)}"> ${escapeHtml(r)}</label>`
+  ).join("");
+  return `
+    <form class="new-skill-form" hx-post="/dashboard/skills/new" hx-target="#new-skill-zone" hx-swap="innerHTML">
+      <div class="form-banner">
+        Create a new operator-authored skill. Body must be ≥100 chars. Lint
+        gates apply: needs <code>## Goal</code> + <code>## Steps</code>
+        sections to avoid warnings (recommended) and proper frontmatter.
+        Skill lands as <strong>👤 custom</strong>.
+      </div>
+      <label>
+        <strong>name</strong> <small>(kebab-case, no spaces)</small>
+        <input type="text" name="name" required pattern="[a-z][a-z0-9-]+" placeholder="my-custom-skill" maxlength="64">
+      </label>
+      <div class="form-row">
+        <label>
+          <strong>version</strong>
+          <input type="text" name="version" value="1.0.0" pattern="\\d+(\\.\\d+){0,2}" required>
+        </label>
+        <label>
+          <strong>scope</strong>
+          <select name="scope">
+            <option value="global" selected>global</option>
+          </select>
+        </label>
+      </div>
+      <label>
+        <strong>description</strong> <small>(≥30 chars; agents match skills by description)</small>
+        <input type="text" name="description" required minlength="30" maxlength="500" placeholder="A clear one-line description of what this skill does and when to use it.">
+      </label>
+      <label>
+        <strong>intended_roles</strong> <small>(pick the roles that should auto-load this skill at session start)</small>
+        <details class="role-picker">
+          <summary>Select roles…</summary>
+          <div class="role-checkbox-grid">${roleOptions}</div>
+        </details>
+      </label>
+      <label>
+        <strong>body</strong> <small>(markdown — the procedural instructions the agent will follow)</small>
+        <textarea name="body" required minlength="100" rows="14" placeholder="## Goal&#10;What this skill achieves.&#10;&#10;## Steps&#10;1. First step&#10;2. Second step&#10;&#10;## Examples&#10;- example 1&#10;&#10;## Guidelines&#10;- be careful with X"></textarea>
+      </label>
+      <div class="form-actions">
+        <button type="submit" class="apply-polish-btn">Create skill</button>
+        <button type="button" class="edit-btn" onclick="document.getElementById('new-skill-zone').innerHTML=''">Cancel</button>
+      </div>
+    </form>
+  `;
+}
+
+// v0.25.0 — score-trend sparkline. Tiny SVG, last N runs.
+export function renderSparkline(scores: Array<{ ts: string; score: number | null }>, width: number = 100, height: number = 22): string {
+  const valid = scores.filter((s) => s.score !== null && Number.isFinite(s.score)) as Array<{ ts: string; score: number }>;
+  if (valid.length < 2) {
+    return `<span class="sparkline-empty" title="Need ≥2 scored runs for trend">—</span>`;
+  }
+  const xs = valid.map((_, i) => (i / (valid.length - 1)) * (width - 2) + 1);
+  // Y: flip so 1.0 is at top, 0 at bottom
+  const ys = valid.map((s) => (1 - s.score) * (height - 2) + 1);
+  const points = xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(" ");
+  const lastScore = valid[valid.length - 1].score;
+  const firstScore = valid[0].score;
+  const delta = lastScore - firstScore;
+  const deltaCls = delta > 0.05 ? "trend-up" : delta < -0.05 ? "trend-down" : "trend-flat";
+  const deltaTxt = delta > 0 ? `+${delta.toFixed(2)}` : delta.toFixed(2);
+  return `
+    <svg class="sparkline ${deltaCls}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" title="Score trend across last ${valid.length} runs (Δ${deltaTxt})">
+      <polyline points="${points}" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <circle cx="${xs[xs.length - 1].toFixed(1)}" cy="${ys[ys.length - 1].toFixed(1)}" r="2" fill="currentColor"/>
+    </svg>
+    <span class="sparkline-label ${deltaCls}">${lastScore.toFixed(2)}<small>${deltaTxt}</small></span>
+  `;
+}
+
+// v0.25.0 — completed mutations panel (promotions history)
+export interface CompletedMutationRow {
+  mutation_id:        string;
+  parent_skill_id:    string;
+  promoted_to:        string | null;
+  judge_score:        number | null;
+  replay_score:       number | null;
+  judge_rationale:    string | null;
+  promoted:           boolean;
+  resolved_at:        string;
+  proposed_by:        string;
+}
+
+export function renderCompletedMutations(rows: CompletedMutationRow[]): string {
+  if (rows.length === 0) {
+    return `<p class="empty">No completed mutations yet. Once the L1 mutation cycle promotes a candidate (or rejects one), it will appear here with the score delta and rationale.</p>`;
+  }
+  const trs = rows.map((r) => {
+    const when = r.resolved_at.slice(0, 19).replace("T", " ");
+    const verdict = r.promoted
+      ? `<span class="badge ok">PROMOTED</span>`
+      : `<span class="badge dim-badge">rejected</span>`;
+    const score = r.judge_score !== null
+      ? `<span class="score score-${r.judge_score >= 0.8 ? "high" : r.judge_score >= 0.5 ? "mid" : "low"}">${r.judge_score.toFixed(2)}</span>`
+      : `<span class="dim">—</span>`;
+    const replay = r.replay_score !== null
+      ? `<span class="score score-${r.replay_score >= 0.8 ? "high" : r.replay_score >= 0.5 ? "mid" : "low"}">${r.replay_score.toFixed(2)}</span>`
+      : `<span class="dim">—</span>`;
+    return `
+      <tr>
+        <td class="mono small">${escapeHtml(when)}</td>
+        <td>${verdict}</td>
+        <td class="mono small">${escapeHtml(r.parent_skill_id)}${r.promoted_to ? ` <span style="color:#4ade80">→</span> <code>${escapeHtml(r.promoted_to)}</code>` : ""}</td>
+        <td>${score}</td>
+        <td>${replay}</td>
+        <td class="reason-cell">${escapeHtml(r.judge_rationale ?? "(no rationale)")}</td>
+        <td class="mono small">${escapeHtml(r.proposed_by)}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <table class="mutations-table">
+      <thead><tr>
+        <th>When</th><th>Verdict</th><th>Skill</th><th>Judge</th><th>Replay</th><th>Rationale</th><th>Proposer</th>
+      </tr></thead>
+      <tbody>${trs}</tbody>
+    </table>
+  `;
+}
+
+// v0.25.0 — live broadcasts feed
+export interface BroadcastRow {
+  id:           number;
+  agent_id:     string;
+  type:         string;
+  task:         string;
+  state:        string;
+  created_at:   string;
+  project_hash: string;
+  project_name: string | null;
+}
+
+export function renderLiveBroadcasts(rows: BroadcastRow[]): string {
+  if (rows.length === 0) {
+    return `<p class="empty">No recent broadcasts. Once you launch agents (start-agents.ps1) and send the orchestrator a task, you'll see ASSIGN / STATUS / MERGE traffic here in real time.</p>`;
+  }
+  const trs = rows.map((r) => {
+    const when = r.created_at.slice(0, 19).replace("T", " ");
+    const typeBadge = `<span class="bcast-type bcast-${escapeHtml(r.type.toLowerCase())}">${escapeHtml(r.type)}</span>`;
+    const project = r.project_name ?? r.project_hash.slice(0, 8) + "…";
+    const stateText = r.state ? r.state.slice(0, 100) : "";
+    return `
+      <tr>
+        <td class="mono small">${escapeHtml(when)}</td>
+        <td>${typeBadge}</td>
+        <td class="mono small">${escapeHtml(r.agent_id)}</td>
+        <td class="mono small">${escapeHtml(r.task ?? "—")}</td>
+        <td class="state-cell">${escapeHtml(stateText)}</td>
+        <td class="mono small">${escapeHtml(project)}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <table class="broadcasts-table">
+      <thead><tr>
+        <th>When</th><th>Type</th><th>Agent</th><th>Task</th><th>State</th><th>Project</th>
+      </tr></thead>
+      <tbody>${trs}</tbody>
+    </table>
+  `;
 }
 
 // v0.24.1 — View body for active + marketplace-rejected skills

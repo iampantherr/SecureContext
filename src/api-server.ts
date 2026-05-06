@@ -154,9 +154,21 @@ export async function createApiServer(storeOverride?: Store) {
   app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" },
     (_req, body, done) => {
       try {
+        // v0.25.0: handle duplicate keys (e.g. multiple checkbox<input> with
+        // the same name="intended_roles" — HTMX submits each checked value
+        // as a separate key-value pair). Without this fix the iteration
+        // overwrites: only the LAST value survives. Caught when operator
+        // checked developer + qa but only qa landed in skills_pg.
         const params = new URLSearchParams(body as string);
-        const obj: Record<string, string> = {};
-        for (const [k, v] of params.entries()) obj[k] = v;
+        const obj: Record<string, string | string[]> = {};
+        for (const [k, v] of params.entries()) {
+          if (k in obj) {
+            const prev = obj[k];
+            obj[k] = Array.isArray(prev) ? [...prev, v] : [prev as string, v];
+          } else {
+            obj[k] = v;
+          }
+        }
         done(null, obj);
       } catch (e) { done(e as Error, undefined); }
     },
@@ -675,7 +687,32 @@ export async function createApiServer(storeOverride?: Store) {
       const nameMap = await loadProjectNameMap();
       // v0.18.8 Loop B — pull per-skill avg cost (cross-project; we filter by skill_id, not project)
       const effMap = await fetchSkillEfficiency("");
-      reply.type("text/html").send(renderSkillsListFragment(rows, nameMap, effMap));
+      // v0.25.0 — last 20 scored runs per skill, used for the inline
+      // sparkline trend. Single query, grouped client-side.
+      const trendMap = await withClient(async (c) => {
+        const r = await c.query<{ skill_id: string; ts: string; outcome_score: string | null }>(
+          `SELECT skill_id, ts::text AS ts, outcome_score::text AS outcome_score
+             FROM (
+               SELECT skill_id, ts, outcome_score,
+                      ROW_NUMBER() OVER (PARTITION BY skill_id ORDER BY ts DESC) AS rn
+                 FROM skill_runs_pg
+                WHERE outcome_score IS NOT NULL
+             ) ranked
+            WHERE rn <= 20
+            ORDER BY skill_id, ts`,
+        );
+        const m = new Map<string, Array<{ ts: string; score: number | null }>>();
+        for (const row of r.rows) {
+          const sid = String(row.skill_id);
+          if (!m.has(sid)) m.set(sid, []);
+          m.get(sid)!.push({
+            ts: String(row.ts),
+            score: row.outcome_score === null ? null : Number(row.outcome_score),
+          });
+        }
+        return m;
+      });
+      reply.type("text/html").send(renderSkillsListFragment(rows, nameMap, effMap, trendMap));
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to load skills: ${escapeHtml((e as Error).message)}</div>`);
     }
@@ -1440,6 +1477,134 @@ export async function createApiServer(storeOverride?: Store) {
       reply.type("application/json").send({ ok: true, applied: true, lint: lintResult });
     } catch (e) {
       reply.status(500).type("application/json").send({ ok: false, error: (e as Error).message });
+    }
+  });
+
+  // ─── v0.25.0 — operator create-skill flow ─────────────────────────────
+  // GET /dashboard/skills/new-form  → renders the form
+  // POST /dashboard/skills/new       → creates skill (gates run via storage_dual)
+  app.get("/dashboard/skills/new-form", async (_request, reply) => {
+    const { renderNewSkillForm } = await import("./dashboard/render.js");
+    const { ROLES_CATALOG } = await import("./skills/roles_catalog.js");
+    reply.type("text/html").send(renderNewSkillForm(ROLES_CATALOG.map((r) => r.name)));
+  });
+
+  app.post("/dashboard/skills/new", async (request, reply) => {
+    // HTMX submits form-encoded body. Fastify parses as Record<string, unknown>.
+    const body = request.body as Record<string, unknown>;
+    const name = String(body.name ?? "").trim();
+    const version = String(body.version ?? "1.0.0").trim();
+    const scope = String(body.scope ?? "global").trim();
+    const description = String(body.description ?? "").trim();
+    const skillBody = String(body.body ?? "").trim();
+    // intended_roles can be a string (single value), an array, or undefined.
+    let intendedRoles: string[] = [];
+    const rolesField = body.intended_roles;
+    if (Array.isArray(rolesField)) intendedRoles = rolesField.map((s) => String(s));
+    else if (typeof rolesField === "string" && rolesField.length > 0) intendedRoles = [rolesField];
+
+    if (!name || !version || !description || !skillBody) {
+      reply.type("text/html").send(
+        `<div class="error">Missing required fields. Need name, version, description, body.</div>`,
+      );
+      return;
+    }
+    try {
+      const { buildSkill } = await import("./skills/loader.js");
+      const { upsertSkill } = await import("./skills/storage_dual.js");
+      const { DatabaseSync } = await import("node:sqlite");
+      const skill = await buildSkill(
+        {
+          name,
+          version,
+          scope: scope as "global",
+          description,
+          intended_roles: intendedRoles.length > 0 ? intendedRoles : undefined,
+          tags: [],  // empty tags → 👤 custom badge
+        },
+        skillBody,
+        { source_path: "operator-created" },
+      );
+      const memDb = new DatabaseSync(":memory:");
+      try {
+        await upsertSkill(memDb, skill, "operator");
+      } finally {
+        memDb.close();
+      }
+      reply.type("text/html").send(
+        `<div class="ok">✓ Skill <code>${escapeHtml(skill.skill_id)}</code> created. Reload to see it in the Active skills list.</div>`,
+      );
+    } catch (e) {
+      // Lint or scan rejection — surface the message
+      reply.type("text/html").send(
+        `<div class="error">❌ Could not create skill: ${escapeHtml((e as Error).message)}</div>`,
+      );
+    }
+  });
+
+  // ─── v0.25.0 — Live broadcasts feed (auto-refresh 5s) ─────────────────
+  app.get("/dashboard/broadcasts", async (_request, reply) => {
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const { loadProjectNameMap, renderLiveBroadcasts } = await import("./dashboard/render.js");
+      const rows = await withClient(async (c) => {
+        const r = await c.query<{
+          id: number; agent_id: string; type: string; task: string;
+          state: string; created_at: string; project_hash: string;
+        }>(
+          `SELECT id, agent_id, type, task, state, created_at::text AS created_at, project_hash
+             FROM broadcasts
+            ORDER BY id DESC
+            LIMIT 20`,
+        );
+        return r.rows;
+      });
+      const nameMap = await loadProjectNameMap();
+      reply.type("text/html").send(renderLiveBroadcasts(rows.map((r) => ({
+        id:           Number(r.id),
+        agent_id:     String(r.agent_id),
+        type:         String(r.type),
+        task:         String(r.task ?? ""),
+        state:        String(r.state ?? ""),
+        created_at:   String(r.created_at),
+        project_hash: String(r.project_hash),
+        project_name: nameMap.get(String(r.project_hash)) ?? null,
+      }))));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load broadcasts: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // ─── v0.25.0 — Completed mutations panel ──────────────────────────────
+  app.get("/dashboard/mutations/completed", async (_request, reply) => {
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const { renderCompletedMutations } = await import("./dashboard/render.js");
+      const rows = await withClient(async (c) => {
+        const r = await c.query<Record<string, unknown>>(
+          `SELECT mutation_id, parent_skill_id, promoted_to_skill_id,
+                  judge_score::text AS judge_score, replay_score::text AS replay_score,
+                  judge_rationale, promoted, resolved_at::text AS resolved_at, proposed_by
+             FROM skill_mutations_pg
+            WHERE resolved_at IS NOT NULL
+            ORDER BY resolved_at DESC
+            LIMIT 30`,
+        );
+        return r.rows;
+      });
+      reply.type("text/html").send(renderCompletedMutations(rows.map((r) => ({
+        mutation_id:     String(r.mutation_id),
+        parent_skill_id: String(r.parent_skill_id),
+        promoted_to:     r.promoted_to_skill_id === null ? null : String(r.promoted_to_skill_id),
+        judge_score:     r.judge_score === null ? null : Number(r.judge_score),
+        replay_score:    r.replay_score === null ? null : Number(r.replay_score),
+        judge_rationale: r.judge_rationale === null ? null : String(r.judge_rationale),
+        promoted:        Boolean(r.promoted),
+        resolved_at:     String(r.resolved_at),
+        proposed_by:     String(r.proposed_by ?? ""),
+      }))));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load completed mutations: ${escapeHtml((e as Error).message)}</div>`);
     }
   });
 
