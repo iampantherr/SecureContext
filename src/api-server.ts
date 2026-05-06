@@ -504,6 +504,14 @@ export async function createApiServer(storeOverride?: Store) {
       const rows = await withClient(async (c) => {
         const res = await c.query<Row>(
           `WITH broadcast_activity AS (
+             -- v0.25.2: dropped HAVING COUNT(*) >= 3 filter. The threshold
+             -- hid genuinely-active projects in their first hour: real-life
+             -- A2A_communication had 2 broadcasts (1 LAUNCH_ROLE + 1 ASSIGN)
+             -- in the first 2 minutes of a session, was filtered out, and
+             -- the operator saw "All 1 active project is healthy" instead
+             -- of seeing their newly-started project. Now any project with
+             -- ≥1 broadcast in the last 24h shows up — a much truer
+             -- definition of "active project right now."
              SELECT project_hash,
                     COUNT(*) AS broadcasts_24h,
                     COUNT(DISTINCT agent_id) AS unique_agents,
@@ -511,7 +519,6 @@ export async function createApiServer(storeOverride?: Store) {
                FROM broadcasts
               WHERE created_at::timestamptz > NOW() - INTERVAL '24 hours'
               GROUP BY project_hash
-             HAVING COUNT(*) >= 3
            ),
            skill_run_counts AS (
              SELECT project_hash, COUNT(*) AS skill_runs_24h

@@ -627,6 +627,11 @@ export function renderDashboardHtml(): string {
   .skill-health-banner-ok {
     background: #0e2f1f; color: #d1fae5; border-left-color: #10b981;
   }
+  /* v0.25.2 — task-in-progress (skill_show > 0 but no MERGE yet) */
+  .skill-health-banner-info {
+    background: #0e2438; color: #bfdbfe; border-left-color: #3b82f6;
+  }
+  .skill-health-info .skill-health-icon { color: #60a5fa; }
   .skill-health-banner code {
     background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px;
     font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
@@ -896,6 +901,19 @@ export function renderDashboardHtml(): string {
           if (prevValue) {
             const opt = Array.from(sel.options).find(o => o.value === prevValue);
             if (opt) sel.value = prevValue;
+          } else {
+            // v0.25.2 — auto-pick the most-active project on first load.
+            // Operator was confused that "Token savings" appeared empty even
+            // though A2A_communication had 1.1M tokens saved — the panel
+            // default was 'pick a project above' until the operator clicked
+            // the dropdown. Now: first non-empty option auto-selects so the
+            // panel renders real data immediately.
+            const firstOpt = Array.from(sel.options).find(o => o.value);
+            if (firstOpt) {
+              sel.value = firstOpt.value;
+              // Trigger change so the trend + breakdown load
+              sel.dispatchEvent(new Event('change'));
+            }
           }
         }
       } catch (e) { /* swallow */ }
@@ -1413,18 +1431,30 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
     </div>`;
   }
 
-  const unhealthy = rows.filter((r) => r.skill_runs_24h === 0);
-  const partial   = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h === 0);
-  const healthy   = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h > 0);
+  // v0.25.2: 4-state classification (was 3). Distinguishing "in-progress"
+  // from "broken" matters: a freshly-started session may have skill_show
+  // calls (agents loaded skills) but no outcomes yet (MERGE hasn't fired).
+  // Calling that "BROKEN" panicked the operator during real-project use.
+  //
+  //   broken    — broadcasts but no skill_show: agents not loading skills
+  //   partial   — outcomes but no skill_show in 7d: scoring without loading
+  //   inProgress— skill_show but no outcomes in 24h: agents loaded, working
+  //   healthy   — skill_runs + skill_show both > 0
+  const broken     = rows.filter((r) => r.skill_show_calls_24h === 0 && r.skill_runs_24h === 0);
+  const partial    = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h === 0);
+  const inProgress = rows.filter((r) => r.skill_runs_24h === 0 && r.skill_show_calls_24h > 0);
+  const healthy    = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h > 0);
 
-  const renderProjectRow = (r: SkillHealthRow, severity: "bad" | "warn" | "ok"): string => {
+  const renderProjectRow = (r: SkillHealthRow, severity: "bad" | "warn" | "info" | "ok"): string => {
     const name = r.project_name ?? r.project_hash.slice(0, 12);
-    const icon = severity === "bad" ? "✗" : severity === "warn" ? "⚠" : "✓";
+    const icon = severity === "bad" ? "✗" : severity === "warn" ? "⚠" : severity === "info" ? "⏳" : "✓";
     const detail = severity === "bad"
-      ? `${r.broadcasts_24h} broadcasts but 0 skill outcomes — closed-loop improvement is BROKEN here`
+      ? `${r.broadcasts_24h} broadcasts, 0 zc_skill_show calls — agents aren't loading skills (skill enforcement lever may not be in their system prompts)`
       : severity === "warn"
-        ? `${r.skill_runs_24h} outcomes recorded but 0 zc_skill_show calls — agents are scoring skills they didn't load`
-        : `${r.skill_runs_24h} skill_runs · ${r.skill_show_calls_24h} skill_show · ${r.unique_agents} agent(s)`;
+        ? `${r.skill_runs_24h} outcomes recorded but 0 zc_skill_show calls in last 7d — scoring without loading`
+        : severity === "info"
+          ? `${r.broadcasts_24h} broadcasts · ${r.skill_show_calls_24h} skill_show — task in progress, MERGE pending (outcome will land at MERGE)`
+          : `${r.skill_runs_24h} skill_runs · ${r.skill_show_calls_24h} skill_show · ${r.unique_agents} agent(s)`;
     return `<div class="skill-health-row skill-health-${severity}">
       <span class="skill-health-icon">${icon}</span>
       <span class="skill-health-name" title="project_hash=${r.project_hash}">${escapeHtml(name)}</span>
@@ -1434,13 +1464,13 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
 
   const lines: string[] = [];
 
-  // Banner header summarizing overall state
-  if (unhealthy.length > 0) {
+  // Banner header — pick the most-severe applicable state.
+  if (broken.length > 0) {
     lines.push(`<div class="skill-health-banner skill-health-banner-bad">
-      <strong>${unhealthy.length} project${unhealthy.length === 1 ? "" : "s"} active without skill outcomes</strong>
-      — the self-improvement loop is dormant for these projects. Likely fix:
-      respawn agents to pick up the latest spawn-agent.ps1 (skill enforcement
-      levers must be in their system prompts). See SecureContext v0.22.5+.
+      <strong>${broken.length} project${broken.length === 1 ? "" : "s"} broadcasting without loading skills</strong>
+      — agents aren't calling <code>zc_skill_show</code>. Likely fix: respawn
+      agents so they pick up the latest spawn-agent.ps1 with the skill
+      enforcement levers in their system prompts. See SecureContext v0.22.5+.
     </div>`);
   } else if (partial.length > 0) {
     lines.push(`<div class="skill-health-banner skill-health-banner-warn">
@@ -1448,17 +1478,30 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
       — agents are scoring skills they never read. The pre-task
       <code>zc_skill_show</code> mandate may not be firing.
     </div>`);
-  } else {
+  } else if (inProgress.length > 0 && healthy.length === 0) {
+    lines.push(`<div class="skill-health-banner skill-health-banner-info">
+      <strong>${inProgress.length} project${inProgress.length === 1 ? "" : "s"} with task in progress</strong>
+      — agents have loaded skills, MERGE pending. Outcomes will land when the
+      developer broadcasts MERGE.
+    </div>`);
+  } else if (healthy.length > 0 && inProgress.length === 0) {
     lines.push(`<div class="skill-health-banner skill-health-banner-ok">
       <strong>All ${healthy.length} active project${healthy.length === 1 ? " is" : "s are"} healthy.</strong>
       Each is loading skills before work and recording outcomes at MERGE.
     </div>`);
+  } else if (healthy.length > 0 || inProgress.length > 0) {
+    const total = healthy.length + inProgress.length;
+    lines.push(`<div class="skill-health-banner skill-health-banner-ok">
+      <strong>All ${total} active project${total === 1 ? " is" : "s are"} healthy.</strong>
+      ${healthy.length} have completed task cycles; ${inProgress.length} have a task in progress.
+    </div>`);
   }
 
-  // Per-project detail rows
-  for (const r of unhealthy) lines.push(renderProjectRow(r, "bad"));
-  for (const r of partial)   lines.push(renderProjectRow(r, "warn"));
-  for (const r of healthy)   lines.push(renderProjectRow(r, "ok"));
+  // Per-project detail rows — most severe first.
+  for (const r of broken)     lines.push(renderProjectRow(r, "bad"));
+  for (const r of partial)    lines.push(renderProjectRow(r, "warn"));
+  for (const r of inProgress) lines.push(renderProjectRow(r, "info"));
+  for (const r of healthy)    lines.push(renderProjectRow(r, "ok"));
 
   return lines.join("\n");
 }
