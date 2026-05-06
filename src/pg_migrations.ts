@@ -716,6 +716,15 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 23,
+    description: "v0.24.1: skill_marketplace_pulls_pg.candidate_body + candidate_frontmatter — store the actual content that was attempted (rejected ones especially). Without this, operator can't see what was inside a rejected skill — they'd have to re-fetch from GitHub. With it: 'View body' button on rejected pulls, operator can decide whether to manually trim + retry.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE skill_marketplace_pulls_pg ADD COLUMN IF NOT EXISTS candidate_body TEXT`);
+      await client.query(`ALTER TABLE skill_marketplace_pulls_pg ADD COLUMN IF NOT EXISTS candidate_frontmatter JSONB`);
+    },
+  },
+
 ];
 
 /**

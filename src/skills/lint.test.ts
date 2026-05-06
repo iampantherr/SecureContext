@@ -126,18 +126,29 @@ describe("lintSkillBody", () => {
       expect(r.errors.some((e) => e.includes("too short"))).toBe(true);
     });
 
-    it("rejects bodies over 16000 chars", () => {
-      const huge = `# Skill\n${" ".repeat(20000)}\n## Examples\n- e\n## Guidelines\n- g\n`;
+    it("rejects bodies over 100000 chars (truly unmanageable)", () => {
+      // v0.24.1: hard ceiling raised from 16000 → 100000 after operator
+      // caught Anthropic's own skills (30k+ chars) being rejected by a
+      // limit that wasn't grounded in their published guidance.
+      const huge = `# Skill\n${" ".repeat(120000)}\n## Examples\n- e\n## Guidelines\n- g\n`;
       const r = lintSkillBody(huge, VALID_FRONTMATTER);
       expect(r.ok).toBe(false);
       expect(r.errors.some((e) => e.includes("too long"))).toBe(true);
     });
 
-    it("warns on bodies in 8001-16000 range", () => {
-      const big = `# Skill\n${" ".repeat(9000)}\n## Examples\n- e\n## Guidelines\n- g\n`;
+    it("accepts bodies in 19k-32k range (real Anthropic skills) with a warning", () => {
+      // claude-api in anthropics/skills is 31893 chars; should pass with warn.
+      const big = `# Skill\n${" ".repeat(30000)}\n## Examples\n- e\n## Guidelines\n- g\n`;
       const r = lintSkillBody(big, VALID_FRONTMATTER);
       expect(r.ok).toBe(true);
-      expect(r.warnings.some((w) => w.includes("body is long"))).toBe(true);
+      expect(r.warnings.some((w) => w.includes("progressive disclosure"))).toBe(true);
+    });
+
+    it("does not warn on normal-length bodies (<25000)", () => {
+      const normal = `# Skill\n${" ".repeat(5000)}\n## Examples\n- e\n## Guidelines\n- g\n`;
+      const r = lintSkillBody(normal, VALID_FRONTMATTER);
+      expect(r.ok).toBe(true);
+      expect(r.warnings.some((w) => w.includes("progressive disclosure"))).toBe(false);
     });
   });
 

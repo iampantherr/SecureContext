@@ -364,6 +364,12 @@ export function renderDashboardHtml(): string {
   .polish-btn:hover { background: #2a2f37; color: #c4b5fd; }
   .runs-btn:hover { background: #2a2f37; color: #fbbf24; }
   .security-btn:hover { background: #2a2f37; color: #34d399; }
+  .body-btn:hover { background: #2a2f37; color: #c084fc; }
+  .skill-body-view { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
+  .skill-body-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .skill-body-meta { font-size: 0.8rem; color: #94a3b8; }
+  .skill-body-text { background: #0e1116; border: 1px solid #1f2937; border-radius: 3px; padding: 10px; font-family: ui-monospace, monospace; font-size: 0.82rem; color: #e6e8eb; white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto; line-height: 1.5; }
+  .skill-body-warning { background: #422006; border-left: 3px solid #fbbf24; padding: 8px 12px; margin-top: 8px; font-size: 0.82rem; color: #fde68a; border-radius: 0 4px 4px 0; }
   .skill-actions { display: flex; gap: 4px; }
   .skill-edit-zone { margin-top: 8px; }
   /* v0.23.2 — polish preview / runs list / security scans */
@@ -415,6 +421,11 @@ export function renderDashboardHtml(): string {
   .pull-details-table .reason-cell { max-width: 360px; word-wrap: break-word; }
   .pull-details-btn { background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 0.78rem; }
   .pull-details-btn:hover { background: #2a2f37; color: #38bdf8; }
+  .pull-body-btn { background: #1f2937; color: #c084fc; border: 1px solid #2a2f37; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 0.78rem; }
+  .pull-body-btn:hover { background: #2a2f37; color: #d8b4fe; }
+  .pull-body-row { background: transparent; }
+  .pull-body-row td { border-top: none !important; padding: 0 !important; }
+  .pull-body-zone { margin: 4px 8px; }
   .badge.dim-badge { background: #374151; color: #9ca3af; }
   .polish-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
   .polish-meta { font-size: 0.8rem; color: #94a3b8; }
@@ -1033,6 +1044,12 @@ export function renderSkillsListFragment(
                       hx-get="/dashboard/skills/${encodeURIComponent(s.skill_id)}/security"
                       hx-target="next .skill-edit-zone" hx-swap="innerHTML">
                 🛡 Security
+              </button>
+              <button class="body-btn"
+                      title="v0.24.1 — view the actual procedural body of this skill (what the agent sees)"
+                      hx-get="/dashboard/skills/${encodeURIComponent(s.skill_id)}/body"
+                      hx-target="next .skill-edit-zone" hx-swap="innerHTML">
+                📄 View body
               </button>
             </span>
           </div>
@@ -1674,6 +1691,38 @@ export interface SecurityScanRow {
   failures:     Array<{ name: string; severity: string; detail: string | null }>;
 }
 
+// v0.24.1 — View body for active + marketplace-rejected skills
+export interface SkillBodyView {
+  skill_id:    string;
+  body:        string;
+  body_len:    number;
+  body_lines:  number;
+  source:      "active" | "rejected_marketplace";
+  /** For rejected marketplace skills: the decision_reason so operator knows why */
+  reason?:     string;
+}
+
+export function renderSkillBody(v: SkillBodyView): string {
+  const tooLong = v.body_len > 25000;
+  const longWarning = tooLong
+    ? `<div class="skill-body-warning">⚠ Body is ${fmt(v.body_len)} chars (~${v.body_lines} lines). Anthropic's guidance is "under 500 lines" — consider progressive disclosure (split into SKILL.md + reference.md + examples.md) before applying.</div>`
+    : "";
+  const rejectedNote = v.source === "rejected_marketplace" && v.reason
+    ? `<div class="skill-body-warning" style="background:#450a0a; border-color:#ef4444; color:#fecaca">✗ Rejected by marketplace pull: ${escapeHtml(v.reason)}</div>`
+    : "";
+  return `
+    <div class="skill-body-view">
+      <div class="skill-body-header">
+        <strong>📄 Skill body</strong>
+        <span class="skill-body-meta"><code>${escapeHtml(v.skill_id)}</code> · ${fmt(v.body_len)} chars · ${v.body_lines} lines · source: <code>${v.source}</code></span>
+      </div>
+      ${rejectedNote}
+      <div class="skill-body-text">${escapeHtml(v.body)}</div>
+      ${longWarning}
+    </div>
+  `;
+}
+
 // v0.24.0 Phase 2 — marketplace pull rendering
 export interface MarketplacePullSummaryRow {
   pull_id:        string;
@@ -1793,6 +1842,8 @@ export interface MarketplacePullDetailRow {
   scan_passed:       boolean | null;
   scan_block_failures: Array<{ name: string; severity: string; detail: string | null }> | null;
   pulled_at:         string;
+  /** v0.24.1: pull row's id (BIGSERIAL) so we can fetch the body via the new endpoint */
+  pull_row_id:       number;
 }
 
 export function renderMarketplacePullDetails(pullId: string, rows: MarketplacePullDetailRow[]): string {
@@ -1820,6 +1871,15 @@ export function renderMarketplacePullDetails(pullId: string, rows: MarketplacePu
     const blockList = (r.scan_block_failures && r.scan_block_failures.length > 0)
       ? `<details class="scan-block"><summary>scan block failures (${r.scan_block_failures.length})</summary>${r.scan_block_failures.map((f) => `<div class="scan-fail scan-sev-${escapeHtml(f.severity)}"><strong>${escapeHtml(f.name)}</strong> — ${escapeHtml(f.detail ?? "")}</div>`).join("")}</details>`
       : "";
+    // v0.24.1: View body link — works for ALL decisions (added/rejected/error)
+    // because we now persist candidate_body on every audit row. Endpoint
+    // fetches the body and renders it scrollable below the table.
+    const viewBodyLink = `<button class="pull-body-btn"
+      title="View the actual SKILL.md body that was attempted"
+      hx-get="/dashboard/marketplace/pulls/row/${r.pull_row_id}/body"
+      hx-target="next .pull-body-zone" hx-swap="innerHTML">
+      📄 View body
+    </button>`;
     return `
       <tr class="${decisionClass}">
         <td class="mono small">${escapeHtml(r.skill_name)}</td>
@@ -1827,8 +1887,9 @@ export function renderMarketplacePullDetails(pullId: string, rows: MarketplacePu
         <td>${lintCol}</td>
         <td>${scanCol}</td>
         <td class="reason-cell">${escapeHtml(r.decision_reason)}${errorList}${blockList}</td>
-        <td class="mono small"><code>${escapeHtml(r.source_path)}</code></td>
+        <td class="mono small">${viewBodyLink}<br><code style="display:block; margin-top:4px">${escapeHtml(r.source_path)}</code></td>
       </tr>
+      <tr class="pull-body-row"><td colspan="6"><div class="pull-body-zone"></div></td></tr>
     `;
   }).join("");
   const summary = {

@@ -85,14 +85,33 @@ export function lintSkillBody(
     warnings.push("body missing `## Guidelines` (or `## Constraints` / `## Rules`) section — constraints help the agent know what NOT to do");
   }
 
-  // ── Rule 6: body length sanity (too short = uninformative; too long = bloat)
+  // ── Rule 6: body length sanity ──
+  //
+  // v0.24.1: limits relaxed after operator caught the v0.24.0 16000-char
+  // hard cap rejecting LEGITIMATE Anthropic-maintained skills. Reality
+  // check: anthropics/skills repo ships skills 19k-32k chars long
+  // (claude-api 31893, skill-creator 32624). My 16000 was a guess, not
+  // grounded in Anthropic's published guidance.
+  //
+  // Anthropic's actual recommendation (https://code.claude.com/docs/en/skills.md):
+  //   - "Keep SKILL.md under 500 lines. Move detailed reference material to
+  //      separate files." — soft ceiling, not hard limit
+  //   - Progressive disclosure pattern: SKILL.md + reference.md + examples.md
+  //   - Cost-based reasoning (skill body stays in context across turns) —
+  //     drives intent, not enforcement
+  //
+  // Aligned thresholds:
+  //   < 100 chars        → ERROR (too thin to encode useful procedure)
+  //   > 100000 chars     → ERROR (~25k tokens; truly unmanageable in context)
+  //   > 25000 chars      → WARN  (rough 500-line equivalent; suggest splitting
+  //                                into companion files via progressive disclosure)
   const bodyLen = body.trim().length;
   if (bodyLen < 100) {
     errors.push(`body too short (${bodyLen} chars; minimum 100) — a skill body that thin can't encode a useful procedure`);
-  } else if (bodyLen > 16000) {
-    errors.push(`body too long (${bodyLen} chars; maximum 16000) — beyond this the skill is hard for the operator to review and the LLM hard to follow`);
-  } else if (bodyLen > 8000) {
-    warnings.push(`body is long (${bodyLen} chars) — consider extracting sub-skills or moving examples to fixtures`);
+  } else if (bodyLen > 100000) {
+    errors.push(`body too long (${bodyLen} chars; maximum 100000) — at ~25k tokens this is unmanageable in any agent context. Refactor via progressive disclosure (split into SKILL.md + reference.md + examples.md per Anthropic's published guidance).`);
+  } else if (bodyLen > 25000) {
+    warnings.push(`body is long (${bodyLen} chars) — consider Anthropic's "under 500 lines" guidance: split into SKILL.md + reference.md + examples.md (progressive disclosure)`);
   }
 
   // ── Rule 7: body should not contain raw secrets (defensive — full scan in #1) ──

@@ -1168,6 +1168,84 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.24.1 — view active skill body (📄 View body button on each skill row)
+  app.get("/dashboard/skills/:id/body", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const skillId = String(params.id ?? "").trim();
+    if (!skillId) {
+      reply.status(400).type("text/html").send(`<div class="error">missing skill_id</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const row = await withClient(async (c) => {
+        const r = await c.query<{ body: string }>(
+          `SELECT body FROM skills_pg WHERE skill_id = $1 AND archived_at IS NULL`,
+          [skillId],
+        );
+        return r.rows[0] ?? null;
+      });
+      if (!row) {
+        reply.status(404).type("text/html").send(`<div class="error">skill ${escapeHtml(skillId)} not found or archived</div>`);
+        return;
+      }
+      const body = row.body ?? "";
+      const { renderSkillBody } = await import("./dashboard/render.js");
+      reply.type("text/html").send(renderSkillBody({
+        skill_id: skillId,
+        body,
+        body_len: body.length,
+        body_lines: body.split("\n").length,
+        source: "active",
+      }));
+    } catch (e) {
+      reply.status(500).type("text/html").send(`<div class="error">view body error: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.24.1 — view body of a marketplace pull attempt (rejected or accepted)
+  // by audit row id. Lets operator inspect the actual SKILL.md content of any
+  // historic pull so they can decide whether to manually trim and retry.
+  app.get("/dashboard/marketplace/pulls/row/:row_id/body", async (request, reply) => {
+    const params = request.params as Record<string, string>;
+    const rowId = parseInt(String(params.row_id ?? ""), 10);
+    if (!Number.isFinite(rowId)) {
+      reply.status(400).type("text/html").send(`<div class="error">invalid row_id</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const row = await withClient(async (c) => {
+        const r = await c.query<{ skill_name: string; candidate_body: string | null; decision: string; decision_reason: string }>(
+          `SELECT skill_name, candidate_body, decision, decision_reason
+             FROM skill_marketplace_pulls_pg WHERE id = $1`,
+          [rowId],
+        );
+        return r.rows[0] ?? null;
+      });
+      if (!row) {
+        reply.status(404).type("text/html").send(`<div class="error">pull row ${rowId} not found</div>`);
+        return;
+      }
+      if (!row.candidate_body) {
+        reply.type("text/html").send(`<div class="skill-body-warning">No body stored for this pull attempt. (Pre-v0.24.1 audit rows didn't capture the body — only newer pulls have it.)</div>`);
+        return;
+      }
+      const body = row.candidate_body;
+      const { renderSkillBody } = await import("./dashboard/render.js");
+      reply.type("text/html").send(renderSkillBody({
+        skill_id: row.skill_name,
+        body,
+        body_len: body.length,
+        body_lines: body.split("\n").length,
+        source: row.decision === "added" ? "active" : "rejected_marketplace",
+        reason: row.decision !== "added" ? `${row.decision} — ${row.decision_reason}` : undefined,
+      }));
+    } catch (e) {
+      reply.status(500).type("text/html").send(`<div class="error">view pull-body error: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   // v0.24.0 Phase 2 — marketplace pull endpoints
   //
   // POST /dashboard/marketplace/pull — runs a pull, returns HTML summary
@@ -1242,7 +1320,7 @@ export async function createApiServer(storeOverride?: Store) {
       const { withClient } = await import("./pg_pool.js");
       const rows = await withClient(async (c) => {
         const r = await c.query(
-          `SELECT skill_name, skill_version, skill_scope, candidate_skill_id,
+          `SELECT id, skill_name, skill_version, skill_scope, candidate_skill_id,
                   source_path, decision, decision_reason,
                   lint_passed, lint_errors, lint_warnings,
                   scan_score, scan_passed, scan_block_failures,
@@ -1256,6 +1334,7 @@ export async function createApiServer(storeOverride?: Store) {
       });
       const { renderMarketplacePullDetails } = await import("./dashboard/render.js");
       reply.type("text/html").send(renderMarketplacePullDetails(pullId, rows.map((r: Record<string, unknown>) => ({
+        pull_row_id:       Number(r.id),
         skill_name:        String(r.skill_name),
         skill_version:     String(r.skill_version ?? ""),
         skill_scope:       String(r.skill_scope ?? ""),

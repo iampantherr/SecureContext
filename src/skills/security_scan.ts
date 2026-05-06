@@ -232,13 +232,19 @@ function checkSleepAbuse(body: string): SecurityCheck {
 }
 
 function checkBodyLength(body: string): SecurityCheck {
+  // v0.24.1: aligned with the relaxed lint rule (which I had originally set
+  // at 16k as a guess, not Anthropic spec). Hard cap at 100k chars; below
+  // that, the lint rule's 25k WARN catches the "consider progressive
+  // disclosure" case. The security check is for "is this body of a size
+  // that's even tractable to review at all" — anything past 100k is
+  // unmanageable in any context window we'd ship to.
   const len = body.length;
-  if (len > 16_000) {
+  if (len > 100_000) {
     return {
       name: "body_length",
       passed: false,
       severity: "block",
-      detail: `body is ${len} chars; max 16000 — too long for operator review`,
+      detail: `body is ${len} chars; max 100000 — at ~25k tokens this is unmanageable in any agent context`,
     };
   }
   return { name: "body_length", passed: true, severity: "block" };

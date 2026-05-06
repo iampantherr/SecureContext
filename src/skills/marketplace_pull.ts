@@ -163,6 +163,10 @@ async function recordPullAttempt(args: {
   skill_scope:       string;
   candidate_skill_id: string;
   candidate_body_hash: string | null;
+  /** v0.24.1: actual body so operator can see what was attempted (especially for rejected). */
+  candidate_body:    string | null;
+  /** v0.24.1: parsed frontmatter so operator sees declared metadata. */
+  candidate_frontmatter: Record<string, unknown> | null;
   lint_passed:       boolean | null;
   lint_errors:       string[] | null;
   lint_warnings:     string[] | null;
@@ -179,17 +183,21 @@ async function recordPullAttempt(args: {
         `INSERT INTO skill_marketplace_pulls_pg (
            pull_id, source, source_commit, source_path,
            skill_name, skill_version, skill_scope, candidate_skill_id, candidate_body_hash,
+           candidate_body, candidate_frontmatter,
            lint_passed, lint_errors, lint_warnings,
            scan_score, scan_passed, scan_block_failures,
            decision, decision_reason, pulled_by
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                   $10, $11::jsonb, $12::jsonb,
-                   $13, $14, $15::jsonb,
-                   $16, $17, $18)`,
+                   $10, $11::jsonb,
+                   $12, $13::jsonb, $14::jsonb,
+                   $15, $16, $17::jsonb,
+                   $18, $19, $20)`,
         [
           args.pull_id, args.source, args.source_commit, args.source_path,
           args.skill_name, args.skill_version, args.skill_scope,
           args.candidate_skill_id, args.candidate_body_hash,
+          args.candidate_body,
+          args.candidate_frontmatter === null ? null : JSON.stringify(args.candidate_frontmatter),
           args.lint_passed,
           args.lint_errors === null ? null : JSON.stringify(args.lint_errors),
           args.lint_warnings === null ? null : JSON.stringify(args.lint_warnings),
@@ -229,6 +237,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
       pull_id, source, source_commit: "", source_path: "",
       skill_name: "(repo)", skill_version: "", skill_scope: "global",
       candidate_skill_id: "", candidate_body_hash: null,
+      candidate_body: null, candidate_frontmatter: null,
       lint_passed: null, lint_errors: null, lint_warnings: null,
       scan_score: null, scan_passed: null, scan_block_failures: null,
       decision: "error",
@@ -266,6 +275,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: path, skill_version: "", skill_scope: "global",
           candidate_skill_id: "", candidate_body_hash: null,
+          candidate_body: null, candidate_frontmatter: null,
           lint_passed: null, lint_errors: null, lint_warnings: null,
           scan_score: null, scan_passed: null, scan_block_failures: null,
           decision: "error", decision_reason: `fetch failed: ${(e as Error).message}`,
@@ -280,6 +290,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: path, skill_version: "", skill_scope: "global",
           candidate_skill_id: "", candidate_body_hash: null,
+          candidate_body: raw, candidate_frontmatter: null,
           lint_passed: null, lint_errors: null, lint_warnings: null,
           scan_score: null, scan_passed: null, scan_block_failures: null,
           decision: "error", decision_reason: "frontmatter parse failed",
@@ -299,6 +310,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: fm.name, skill_version: fm.version, skill_scope: fm.scope,
           candidate_skill_id: "", candidate_body_hash: candidateBodyHash,
+          candidate_body: parsed.body, candidate_frontmatter: parsed.fm as Record<string, unknown>,
           lint_passed: null, lint_errors: null, lint_warnings: null,
           scan_score: null, scan_passed: null, scan_block_failures: null,
           decision: "error", decision_reason: `buildSkill failed: ${(e as Error).message}`,
@@ -323,6 +335,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: fm.name, skill_version: fm.version, skill_scope: fm.scope,
           candidate_skill_id: skill.skill_id, candidate_body_hash: candidateBodyHash,
+          candidate_body: skill.body, candidate_frontmatter: skill.frontmatter as unknown as Record<string, unknown>,
           lint_passed: null, lint_errors: null, lint_warnings: null,
           scan_score: null, scan_passed: null, scan_block_failures: null,
           decision: "already_exists",
@@ -340,6 +353,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: fm.name, skill_version: fm.version, skill_scope: fm.scope,
           candidate_skill_id: skill.skill_id, candidate_body_hash: candidateBodyHash,
+          candidate_body: skill.body, candidate_frontmatter: skill.frontmatter as unknown as Record<string, unknown>,
           lint_passed: null, lint_errors: null, lint_warnings: null,
           scan_score: null, scan_passed: null, scan_block_failures: null,
           decision: "stale_version",
@@ -369,6 +383,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: fm.name, skill_version: fm.version, skill_scope: fm.scope,
           candidate_skill_id: skill.skill_id, candidate_body_hash: candidateBodyHash,
+          candidate_body: skill.body, candidate_frontmatter: skill.frontmatter as unknown as Record<string, unknown>,
           lint_passed: false, lint_errors: lint.errors, lint_warnings: lint.warnings,
           scan_score: scan.score, scan_passed: scan.passed, scan_block_failures: blockFailures,
           decision: "rejected_lint",
@@ -384,6 +399,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: fm.name, skill_version: fm.version, skill_scope: fm.scope,
           candidate_skill_id: skill.skill_id, candidate_body_hash: candidateBodyHash,
+          candidate_body: skill.body, candidate_frontmatter: skill.frontmatter as unknown as Record<string, unknown>,
           lint_passed: true, lint_errors: [], lint_warnings: lint.warnings,
           scan_score: scan.score, scan_passed: scan.passed, scan_block_failures: blockFailures,
           decision: "rejected_scan",
@@ -404,6 +420,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: fm.name, skill_version: fm.version, skill_scope: fm.scope,
           candidate_skill_id: skill.skill_id, candidate_body_hash: candidateBodyHash,
+          candidate_body: skill.body, candidate_frontmatter: skill.frontmatter as unknown as Record<string, unknown>,
           lint_passed: true, lint_errors: [], lint_warnings: lint.warnings,
           scan_score: scan.score, scan_passed: scan.passed, scan_block_failures: [],
           decision: "added",
@@ -419,6 +436,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           pull_id, source, source_commit: listing.commit, source_path: path,
           skill_name: fm.name, skill_version: fm.version, skill_scope: fm.scope,
           candidate_skill_id: skill.skill_id, candidate_body_hash: candidateBodyHash,
+          candidate_body: skill.body, candidate_frontmatter: skill.frontmatter as unknown as Record<string, unknown>,
           lint_passed: true, lint_errors: [], lint_warnings: lint.warnings,
           scan_score: scan.score, scan_passed: scan.passed, scan_block_failures: blockFailures,
           decision: "error",
