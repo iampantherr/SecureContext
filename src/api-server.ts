@@ -106,7 +106,23 @@ function validateProjectPath(projectPath: unknown): string {
   // This ensures C:/foo and C:\foo hash to the same project DB.
   // Windows clients may send forward-slash paths (e.g. from URL encoding), but
   // register.mjs and claude sessions use native backslash — they must collide.
-  return projectPath.replace(/\//g, "\\");
+  //
+  // v0.28.0 fix: ONLY apply this normalization to Windows-style paths
+  // (drive letter prefix like "C:/" or "C:\"). POSIX paths start with "/"
+  // and MUST keep their forward slashes — replacing `/` → `\` mangles
+  // "/tmp/foo" into "\tmp\foo" which:
+  //   (a) is not a valid Linux path,
+  //   (b) hashes to a different DB than the client computed it under,
+  //   (c) caused every session-token-bearing telemetry request on Linux/CI
+  //       to 401 since `requireSessionToken` would look up the token under
+  //       the mangled hash and find nothing. Local Windows always passed
+  //       because the normalization round-trips on Windows paths; CI Linux
+  //       always failed because POSIX paths got butchered.
+  // The regex matches drive letter + separator only at string start.
+  if (/^[a-zA-Z]:[\/\\]/.test(projectPath)) {
+    return projectPath.replace(/\//g, "\\");
+  }
+  return projectPath;
 }
 
 function checkIpRate(ip: string): void {
