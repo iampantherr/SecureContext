@@ -777,6 +777,80 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 26,
+    description: "v0.28.0-α: skill-spotter dry-run tables (signal mining, no LLM yet)",
+    up: async (client) => {
+      // Tracks each spotter run — when it ran, what window it scanned, how
+      // many signals it emitted. Operator-paced via the dashboard "Run
+      // spotter" button OR a future cron. v0.28.0-α is dry-run only: signals
+      // are surfaced, no candidates are filed and no LLM is invoked. The β
+      // step adds the Sonnet-4.6-high-thinking agent that turns signals into
+      // skill_candidates_pg rows.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_spotter_runs_pg (
+          run_id           UUID PRIMARY KEY,
+          started_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          finished_at      TIMESTAMPTZ,
+          window_days      INTEGER NOT NULL,
+          window_start     TIMESTAMPTZ NOT NULL,
+          window_end       TIMESTAMPTZ NOT NULL,
+          mode             TEXT NOT NULL DEFAULT 'dry-run',
+            -- one of: dry-run, llm-proposed (β), llm-approved (γ)
+          signals_emitted  INTEGER NOT NULL DEFAULT 0,
+          candidates_filed INTEGER NOT NULL DEFAULT 0,
+          duration_ms      INTEGER,
+          notes            TEXT,
+          CONSTRAINT chk_sspr_mode CHECK (mode IN ('dry-run', 'llm-proposed', 'llm-approved'))
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_spotter_runs_pg_started ON skill_spotter_runs_pg (started_at DESC)`);
+
+      // Each signal a detector emitted on that run. JSONB evidence holds
+      // the session_ids / tool_call_ids the detector grouped together so
+      // operator can drill in.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_spotter_signals_pg (
+          signal_id           BIGSERIAL PRIMARY KEY,
+          run_id              UUID NOT NULL REFERENCES skill_spotter_runs_pg(run_id) ON DELETE CASCADE,
+          signal_type         TEXT NOT NULL,
+            -- repeated_tool_sequence | external_script_invocation | (more in γ)
+          occurrences         INTEGER NOT NULL,
+          confidence          NUMERIC(3,2) NOT NULL DEFAULT 0.5,
+          evidence            JSONB NOT NULL,
+          proposed_trigger    TEXT,
+          proposed_steps      JSONB,
+          proposed_name_hint  TEXT,
+          effort_estimate     TEXT,
+          outcome             TEXT NOT NULL DEFAULT 'observed',
+            -- observed (α) | filed_candidate (β+) | rejected_low_signal | rejected_duplicate | rejected_not_procedural
+          outcome_reason      TEXT,
+          candidate_id        UUID,  -- FK to skill_candidates_pg, populated by β step
+          CONSTRAINT chk_ssp_signal_type CHECK (signal_type IN (
+            'repeated_tool_sequence',
+            'external_script_invocation',
+            'repeated_prompt_fragment',
+            'uncredited_high_cost_task',
+            'rejected_mutation_cluster',
+            'repeated_doc_read'
+          )),
+          CONSTRAINT chk_ssp_outcome CHECK (outcome IN (
+            'observed',
+            'filed_candidate',
+            'rejected_low_signal',
+            'rejected_duplicate',
+            'rejected_not_procedural',
+            'rejected_fits_in_prompt',
+            'rejected_variable_instances'
+          ))
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_spotter_signals_pg_run ON skill_spotter_signals_pg (run_id)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_spotter_signals_pg_type ON skill_spotter_signals_pg (signal_type)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_spotter_signals_pg_outcome ON skill_spotter_signals_pg (outcome)`);
+    },
+  },
+
 ];
 
 /**

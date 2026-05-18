@@ -1234,6 +1234,148 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.28.0-α — Skill-spotter dry-run: detector library mines tool_calls_pg +
+  // pretool_events_pg for repeated patterns and writes them as observed
+  // signals to skill_spotter_signals_pg. No LLM, no candidate filing —
+  // operator inspects via the dashboard and decides whether the signal
+  // quality is strong enough to enable the β step's spotter agent.
+  app.post("/api/v1/skills/spotter/dry-run", async (request, reply) => {
+    try {
+      const { days, ngram, min_occurrences } = request.query as Record<string, unknown>;
+      const opts = {
+        windowDays:     days ? Math.max(1, Math.min(90, parseInt(String(days), 10) || 7)) : 7,
+        ngram:          ngram ? Math.max(2, Math.min(5, parseInt(String(ngram), 10) || 3)) : 3,
+        minOccurrences: min_occurrences ? Math.max(2, Math.min(20, parseInt(String(min_occurrences), 10) || 3)) : 3,
+      };
+      const { runSpotterDryRun } = await import("./skills/spotter/run.js");
+      const summary = await runSpotterDryRun(opts);
+      reply.type("application/json").send(summary);
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.28.0-α — List recent spotter runs (read-only).
+  app.get("/api/v1/skills/spotter/runs", async (request, reply) => {
+    try {
+      const { limit } = request.query as Record<string, unknown>;
+      const lim = limit ? Math.max(1, Math.min(200, parseInt(String(limit), 10) || 20)) : 20;
+      const { listSpotterRuns } = await import("./skills/spotter/run.js");
+      const runs = await listSpotterRuns(lim);
+      reply.type("application/json").send({ runs });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.28.0-α — Signals from one run.
+  app.get("/api/v1/skills/spotter/runs/:run_id", async (request, reply) => {
+    try {
+      const { run_id } = request.params as { run_id: string };
+      const { listSpotterSignals } = await import("./skills/spotter/run.js");
+      const signals = await listSpotterSignals(run_id);
+      reply.type("application/json").send({ run_id, signals });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.28.0-α — Dashboard HTML fragments for the spotter panel.
+  app.get("/dashboard/spotter/runs", async (_request, reply) => {
+    try {
+      const { listSpotterRuns } = await import("./skills/spotter/run.js");
+      const runs = await listSpotterRuns(15);
+      if (runs.length === 0) {
+        reply.type("text/html").send(`<p class="empty">No spotter runs yet. Click "Run dry-run" to mine 7 days of activity for repeated patterns.</p>`);
+        return;
+      }
+      const html = `
+        <table class="spotter-runs-table">
+          <thead><tr><th>When</th><th>Mode</th><th>Window</th><th>Signals</th><th>Candidates filed</th><th>Duration</th><th></th></tr></thead>
+          <tbody>
+            ${runs.map((r) => `
+              <tr>
+                <td style="color:#94a3b8; font-size:0.84rem">${escapeHtml(r.started_at.slice(0, 19))}</td>
+                <td><span class="evt-badge evt-info">${escapeHtml(r.mode)}</span></td>
+                <td>${r.window_days}d</td>
+                <td><strong>${r.signals_emitted}</strong></td>
+                <td>${r.candidates_filed}</td>
+                <td style="color:#94a3b8">${r.duration_ms ?? "?"} ms</td>
+                <td><button class="link-btn"
+                            hx-get="/dashboard/spotter/runs/${encodeURIComponent(r.run_id)}"
+                            hx-target="#spotter-run-detail"
+                            hx-swap="innerHTML">view signals →</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        <div id="spotter-run-detail" style="margin-top:12px"></div>
+      `;
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load spotter runs: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  app.get("/dashboard/spotter/runs/:run_id", async (request, reply) => {
+    try {
+      const { run_id } = request.params as { run_id: string };
+      const { listSpotterSignals } = await import("./skills/spotter/run.js");
+      const signals = await listSpotterSignals(run_id, 50);
+      if (signals.length === 0) {
+        reply.type("text/html").send(`<p class="empty">This run found zero signals. Try widening the window with <code>days=30</code> or lowering <code>min_occurrences</code>.</p>`);
+        return;
+      }
+      const html = `
+        <div class="spotter-signals">
+          <h4 style="color:#94a3b8; margin-top:0">${signals.length} signal${signals.length === 1 ? "" : "s"} from run ${escapeHtml(run_id.slice(0, 8))}…</h4>
+          ${signals.map((s) => {
+            const ev = s.evidence as Record<string, unknown> | null;
+            const seq = (ev?.tool_sequence as string[] | undefined)?.join(" → ") ?? "";
+            const files = (ev?.file_paths as string[] | undefined)?.join(", ") ?? "";
+            const ssn = (ev?.session_ids as string[] | undefined) ?? [];
+            return `
+              <div class="signal-row">
+                <div class="signal-header">
+                  <span class="evt-badge evt-info">${escapeHtml(s.signal_type)}</span>
+                  <span style="margin-left:8px">×${s.occurrences} sessions</span>
+                  <span style="margin-left:8px; color:#94a3b8">confidence ${s.confidence}</span>
+                  <span style="margin-left:8px; color:#94a3b8">effort: ${escapeHtml(s.effort_estimate ?? "?")}</span>
+                </div>
+                ${s.proposed_name_hint ? `<div class="signal-name">name hint: <code>${escapeHtml(s.proposed_name_hint)}</code></div>` : ""}
+                ${s.proposed_trigger ? `<div class="signal-trigger"><em>${escapeHtml(s.proposed_trigger)}</em></div>` : ""}
+                ${seq ? `<div class="signal-evidence">sequence: <code>${escapeHtml(seq)}</code></div>` : ""}
+                ${files ? `<div class="signal-evidence">file(s): <code>${escapeHtml(files)}</code></div>` : ""}
+                ${ssn.length > 0 ? `<div class="signal-evidence" style="color:#94a3b8; font-size:0.78rem">sessions: ${escapeHtml(ssn.slice(0, 3).join(", "))}${ssn.length > 3 ? ` (+${ssn.length - 3} more)` : ""}</div>` : ""}
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `;
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load signals: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.28.0-α — POST handler: triggers dry-run + returns the signals fragment.
+  app.post("/dashboard/spotter/dry-run", async (request, reply) => {
+    try {
+      const { days } = request.query as Record<string, unknown>;
+      const windowDays = days ? Math.max(1, Math.min(90, parseInt(String(days), 10) || 7)) : 7;
+      const { runSpotterDryRun } = await import("./skills/spotter/run.js");
+      const summary = await runSpotterDryRun({ windowDays });
+      reply.type("text/html").send(`
+        <div class="spotter-result">
+          <p><strong>Run ${escapeHtml(summary.run_id.slice(0, 8))}…</strong> · ${summary.signals_emitted} signal${summary.signals_emitted === 1 ? "" : "s"} in ${summary.duration_ms} ms · window ${summary.window_days}d</p>
+          ${Object.entries(summary.signals_by_type).map(([t, n]) => `<span class="evt-badge evt-info" style="margin-right:6px">${escapeHtml(t)} ×${n}</span>`).join("")}
+        </div>
+      `);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Dry-run failed: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   // v0.26.0 Step 6 — Return recent admission log rows for dashboard display.
   app.get("/api/v1/skills/admission-log", async (request, reply) => {
     try {

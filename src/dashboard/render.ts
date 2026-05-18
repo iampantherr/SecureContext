@@ -378,6 +378,18 @@ export function renderDashboardHtml(): string {
   .evt-ok { background: #064e3b; color: #a7f3d0; }
   .evt-quar { background: #7f1d1d; color: #fecaca; }
   .evt-info { background: #1f2937; color: #93c5fd; }
+  /* v0.28.0-α — skill-spotter panel */
+  .spotter-controls { display: flex; gap: 8px; align-items: center; margin: 8px 0 12px; }
+  .spotter-runs-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+  .spotter-runs-table th { text-align: left; padding: 6px 8px; background: #1e293b; color: #94a3b8; }
+  .spotter-runs-table td { padding: 6px 8px; border-bottom: 1px solid #1f2937; }
+  .link-btn { background: transparent; border: 0; color: #93c5fd; cursor: pointer; padding: 0; font-size: 0.85rem; }
+  .link-btn:hover { color: #dbeafe; text-decoration: underline; }
+  .signal-row { padding: 10px 12px; background: #0f172a; border-radius: 6px; margin-bottom: 8px; }
+  .signal-header { font-size: 0.92rem; margin-bottom: 6px; }
+  .signal-name, .signal-trigger, .signal-evidence { font-size: 0.85rem; color: #cbd5e1; margin-top: 4px; }
+  .signal-evidence code { font-size: 0.78rem; color: #93c5fd; }
+  .spotter-result { padding: 10px 12px; background: #064e3b; border-radius: 6px; margin-top: 8px; color: #d1fae5; }
   /* v0.25.0 — score-trend sparkline */
   .skill-trend { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
   .sparkline { vertical-align: middle; color: #6b7280; }
@@ -872,6 +884,41 @@ export function renderDashboardHtml(): string {
       Loading admission log…
     </div>
   </details>
+</div>
+
+<!-- v0.28.0-α — Skill spotter dry-run panel. Mines tool_calls_pg +
+     pretool_events_pg for repeated patterns and surfaces them as
+     signals the operator can review. No LLM yet; β adds the
+     Sonnet-4.6-high-effort agent that turns signals into candidates. -->
+<div class="panel" id="skill-spotter-panel">
+  <h2>Skill spotter <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(v0.28.0-α — dry-run mode, mines activity for repeated procedural patterns)</span></h2>
+
+  <div class="spotter-controls">
+    <button class="pull-marketplace-btn"
+            hx-post="/dashboard/spotter/dry-run?days=7"
+            hx-target="#spotter-dry-run-result" hx-swap="innerHTML"
+            hx-on:htmx:before-request="this.disabled=true; this.textContent='Mining…'"
+            hx-on:htmx:after-request="this.disabled=false; this.textContent='🔎 Run dry-run (7d)'; htmx.trigger('#spotter-runs-list', 'refresh')">
+      🔎 Run dry-run (7d)
+    </button>
+    <button class="pull-marketplace-btn"
+            hx-post="/dashboard/spotter/dry-run?days=30"
+            hx-target="#spotter-dry-run-result" hx-swap="innerHTML"
+            hx-on:htmx:before-request="this.disabled=true; this.textContent='Mining…'"
+            hx-on:htmx:after-request="this.disabled=false; this.textContent='🔎 Run dry-run (30d)'; htmx.trigger('#spotter-runs-list', 'refresh')">
+      🔎 Run dry-run (30d)
+    </button>
+    <span class="market-meta">Mines repeated tool sequences + repeated doc reads across sessions. Surfaces patterns the operator can review before β enables the LLM-driven candidate filer.</span>
+  </div>
+  <div id="spotter-dry-run-result"></div>
+
+  <div id="spotter-runs-list"
+       hx-get="/dashboard/spotter/runs"
+       hx-trigger="load, refresh from:body"
+       hx-target="this" hx-swap="innerHTML"
+       style="margin-top:12px">
+    Loading spotter runs…
+  </div>
 </div>
 
 <div class="panel">

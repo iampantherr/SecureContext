@@ -1,8 +1,15 @@
-# SecureContext — Architecture Reference (v0.22.5)
+# SecureContext — Architecture Reference (v0.28.0)
 
 ## Overview
 
-SecureContext is a Claude Code MCP (Model Context Protocol) plugin that extends the AI's effective context window through persistent memory and searchable knowledge, while maintaining strict security boundaries around credentials, network access, and external content.
+SecureContext is a Claude Code MCP (Model Context Protocol) plugin with four layered concerns:
+
+1. **Persistent memory** — working-memory facts, session summaries, semantic file summaries that survive Claude Code restarts.
+2. **Cryptographic audit trail** — HMAC-chained `tool_calls_pg`, `outcomes_pg`, and (v0.26.0) `skill_admission_log_pg` keyed with a per-machine `machine_secret` (mode 0600, never leaves disk).
+3. **Anthropic-style filesystem skill admission gate** (v0.26.0+) — AST-based script scanning, HMAC verify-before-execute via a `PreToolUse` hook, chained audit log, marketplace bundled-script support with operator opt-ins.
+4. **Multi-agent coordination primitives** — atomic work-stealing queue, typed broadcast channel, per-agent identity tokens. These are the building blocks a dispatcher/orchestrator script needs; SecureContext does not ship the dispatcher itself.
+
+This document is the deep dive. For the value-prop summary see [README.md](README.md). For release-by-release detail see [CHANGELOG.md](CHANGELOG.md). For the SafeSkill PR #2 refutation see [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md).
 
 ---
 
