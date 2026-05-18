@@ -359,6 +359,25 @@ export function renderDashboardHtml(): string {
   .src-marketplace { background: #1e3a8a; color: #93c5fd; border: 1px solid #1e40af; }
   .src-role-extracted { background: #422006; color: #fbbf24; border: 1px solid #ca8a04; }
   .src-custom { background: #1f2937; color: #9ca3af; border: 1px solid #374151; }
+  /* v0.26.0 Step 7 — filesystem-skill badge (Anthropic ~/.claude/skills/) */
+  .src-filesystem { background: #064e3b; color: #a7f3d0; border: 1px solid #047857; }
+  .src-filesystem small { color: #6ee7b7; font-size: 0.66rem; margin-left: 4px; }
+  /* v0.26.0 Step 7 — chain-integrity banner + quarantine + admission log */
+  .chain-banner { padding: 10px 14px; border-radius: 6px; margin: 8px 0 12px; font-size: 0.92rem; display: flex; align-items: center; gap: 12px; }
+  .chain-banner.chain-ok { background: #064e3b; border: 1px solid #047857; color: #d1fae5; }
+  .chain-banner.chain-broken { background: #7f1d1d; border: 1px solid #b91c1c; color: #fecaca; }
+  .chain-banner.chain-error { background: #422006; border: 1px solid #ca8a04; color: #fbbf24; }
+  .chain-banner .chain-status { font-weight: 700; }
+  .chain-banner .chain-detail { color: inherit; opacity: 0.92; }
+  .fs-quarantine-details, .fs-admission-details { margin-top: 12px; padding: 8px 12px; background: #0f172a; border-radius: 6px; }
+  .fs-quarantine-details summary, .fs-admission-details summary { cursor: pointer; padding: 4px 0; }
+  .fs-quarantine-table, .fs-admission-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.86rem; }
+  .fs-quarantine-table th, .fs-admission-table th { text-align: left; padding: 6px 8px; background: #1e293b; color: #94a3b8; font-weight: 600; }
+  .fs-quarantine-table td, .fs-admission-table td { padding: 6px 8px; border-bottom: 1px solid #1f2937; vertical-align: top; }
+  .evt-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 500; }
+  .evt-ok { background: #064e3b; color: #a7f3d0; }
+  .evt-quar { background: #7f1d1d; color: #fecaca; }
+  .evt-info { background: #1f2937; color: #93c5fd; }
   /* v0.25.0 — score-trend sparkline */
   .skill-trend { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
   .sparkline { vertical-align: middle; color: #6b7280; }
@@ -820,6 +839,41 @@ export function renderDashboardHtml(): string {
   </div>
 </div>
 
+<!-- v0.26.0 Step 7 — Filesystem skills security panel.
+     Surfaces: chain integrity status, admission log tail, quarantined skills.
+     Chain banner refreshes every 30s; quarantine list + admission tail refresh
+     on a load trigger so operators see new events without a manual reload. -->
+<div class="panel" id="fs-skills-panel">
+  <h2>Filesystem skills security <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(v0.26.0 — admission gate, HMAC chain, quarantine)</span></h2>
+
+  <div id="fs-chain-banner"
+       hx-get="/dashboard/fs-skills/chain-banner"
+       hx-trigger="load, every 30s"
+       hx-target="this" hx-swap="innerHTML">
+    Loading chain integrity…
+  </div>
+
+  <details class="fs-quarantine-details" open>
+    <summary><strong>Quarantined skills</strong> <small>(scripts that failed AST scan or frontmatter validation)</small></summary>
+    <div id="fs-quarantine-list"
+         hx-get="/dashboard/fs-skills/quarantine"
+         hx-trigger="load, every 60s"
+         hx-target="this" hx-swap="innerHTML">
+      Loading quarantine…
+    </div>
+  </details>
+
+  <details class="fs-admission-details">
+    <summary><strong>Recent admission events</strong> <small>(HMAC-chained, tamper-evident)</small></summary>
+    <div id="fs-admission-log"
+         hx-get="/dashboard/fs-skills/admission-log"
+         hx-trigger="load, every 60s"
+         hx-target="this" hx-swap="innerHTML">
+      Loading admission log…
+    </div>
+  </details>
+</div>
+
 <div class="panel">
   <h2>Active skills <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(edit frontmatter — body is mutator-managed)</span></h2>
   <!-- v0.25.0: + New skill button — opens an inline form, posts to
@@ -1080,6 +1134,11 @@ interface SkillRow {
   description: string;
   frontmatter: unknown;
   body?:       string;
+  // v0.26.0 Step 7 — present only on filesystem-sourced rows (Anthropic-style
+  // ~/.claude/skills/<name>/ directories); used to render the 📁 filesystem
+  // badge + script count.
+  skill_dir?:    string | null;
+  script_hmacs?: Record<string, string> | null;
 }
 
 export function renderSkillsListFragment(
@@ -1102,6 +1161,11 @@ export function renderSkillsListFragment(
       scope:       String(r.scope),
       description: String(r.description ?? ""),
       frontmatter: r.frontmatter,
+      // v0.26.0 Step 7 — propagate FS-source fields for the 📁 badge
+      skill_dir:    typeof r.skill_dir === "string" ? r.skill_dir : null,
+      script_hmacs: (r.script_hmacs && typeof r.script_hmacs === "object")
+        ? r.script_hmacs as Record<string, string>
+        : null,
     };
     const arr = byScope.get(skill.scope) ?? [];
     arr.push(skill);
@@ -1131,14 +1195,24 @@ export function renderSkillsListFragment(
         : `<span style="color:#6b7280; font-style:italic">no intended_roles</span>`;
       // v0.24.2 — source badge so operator can tell at a glance whether
       // a skill came from marketplace, role-extraction, or custom-authored.
-      // Order matters: marketplace > role-extracted > custom (most-specific first).
+      // Order matters: filesystem (v0.26.0) > marketplace > role-extracted > custom (most-specific first).
       const isMarketplace = tags.includes("marketplace");
       const isRoleExtracted = tags.includes("role-extracted");
-      const sourceBadge = isMarketplace
-        ? `<span class="src-badge src-marketplace" title="Imported from anthropics/skills marketplace">🛒 marketplace</span>`
-        : isRoleExtracted
-          ? `<span class="src-badge src-role-extracted" title="Auto-extracted from a role's deepPrompt during system bootstrap">🤖 role-extracted</span>`
-          : `<span class="src-badge src-custom" title="Custom-authored skill (operator or mutator-promoted)">👤 custom</span>`;
+      // v0.26.0 Step 7 — distinct badge for filesystem-sourced skills
+      // (Anthropic-style ~/.claude/skills/<name>/ directory). Detect by
+      // presence of skill_dir column (only set by filesystem_skill_import.ts).
+      const isFilesystem = typeof s.skill_dir === "string" && s.skill_dir.length > 0;
+      const scriptHmacs = s.script_hmacs;
+      const scriptCount = scriptHmacs && typeof scriptHmacs === "object" && !Array.isArray(scriptHmacs)
+        ? Object.keys(scriptHmacs).filter((k) => k.startsWith("scripts/")).length
+        : 0;
+      const sourceBadge = isFilesystem
+        ? `<span class="src-badge src-filesystem" title="Anthropic-style filesystem skill at ${escapeHtml(String(s.skill_dir ?? ""))}; ${scriptCount} bundled script(s) HMAC-verified at admission">📁 filesystem${scriptCount > 0 ? ` <small>· ${scriptCount} script${scriptCount === 1 ? "" : "s"}</small>` : ""}</span>`
+        : isMarketplace
+          ? `<span class="src-badge src-marketplace" title="Imported from anthropics/skills marketplace">🛒 marketplace</span>`
+          : isRoleExtracted
+            ? `<span class="src-badge src-role-extracted" title="Auto-extracted from a role's deepPrompt during system bootstrap">🤖 role-extracted</span>`
+            : `<span class="src-badge src-custom" title="Custom-authored skill (operator or mutator-promoted)">👤 custom</span>`;
       // v0.18.8 Loop B — skill efficiency column
       const eff = efficiencyMap.get(s.skill_id);
       // v0.23.3: when avg_tokens rounds to 0, the agent didn't report

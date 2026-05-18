@@ -464,3 +464,319 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
   logger.info("skills", "marketplace_pull_complete", { ...summary });
   return summary;
 }
+
+// ─── v0.27.0 — Marketplace pull WITH bundled scripts ─────────────────────────
+//
+// The original pullFromMarketplace() above only fetches SKILL.md text. For
+// skills like anthropic-docx, anthropic-pptx, anthropic-xlsx,
+// anthropic-webapp-testing — which ship with bundled scripts in scripts/ —
+// the agent's SKILL.md instructs "run python scripts/foo.py" but the actual
+// scripts never reach disk. The skill is half-installed.
+//
+// pullMarketplaceToFilesystem() closes that gap:
+//   1. Walks the repo tree to find ALL files under each skills/<name>/, not
+//      just SKILL.md
+//   2. Materializes the whole directory to ~/.claude/skills/anthropic-<name>/
+//      so Claude Code's native loader sees the bundled scripts
+//   3. Delegates to importFilesystemSkills() — which runs the AST scanner,
+//      computes per-script HMACs, writes the admission_log entries, and
+//      quarantines anything that fails admission
+//
+// Idempotency: re-running this materializes the same files; the filesystem
+// importer detects unchanged body_hmac + script_hmacs and skips.
+//
+// SECURITY NOTE: this writes operator-controlled bytes to the operator's home
+// dir. We rewrite the SKILL.md frontmatter to add `name: anthropic-<orig>` so
+// admission can't be confused by collisions with custom skills.
+
+import { writeFileSync as fsWriteFileSync, mkdirSync as fsMkdirSync } from "node:fs";
+import { join as pathJoin, dirname as pathDirname } from "node:path";
+import { homedir as osHomedir } from "node:os";
+
+export interface PullToFilesystemSummary {
+  pull_id:           string;
+  source:            string;
+  source_commit:     string;
+  /** Total skill directories discovered in the repo */
+  discovered:        number;
+  /** Skill directories successfully materialized to ~/.claude/skills/anthropic-<name>/ */
+  materialized:      number;
+  /** Errors fetching/writing */
+  fetch_errors:      number;
+  /** Total bundled files materialized (scripts/, references/, etc.) — excludes SKILL.md */
+  bundled_files:     number;
+  /** Outcome from the filesystem importer that ran AFTER materialization */
+  admission_results: {
+    scanned:      number;
+    inserted:     number;
+    updated:      number;
+    skipped_same: number;
+    errors:       number;
+  };
+  duration_ms:       number;
+}
+
+/**
+ * Fetch the full repo tree (recursive). Returns every blob path — caller
+ * filters. Same source_commit semantics as listSkillPaths.
+ */
+async function listAllRepoPaths(source: string, branch: string): Promise<{
+  paths: string[];
+  commit: string;
+}> {
+  const url = `https://api.github.com/repos/${source}/git/trees/${branch}?recursive=1`;
+  const res = await fetch(url, {
+    headers: { "Accept": "application/vnd.github+json", "User-Agent": "zc-ctx-marketplace-pull" },
+    signal:  AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) {
+    throw new Error(`GitHub tree API ${res.status}: ${await res.text().then((t) => t.slice(0, 200))}`);
+  }
+  const j = await res.json() as {
+    sha: string;
+    truncated?: boolean;
+    tree: Array<{ path: string; type: string }>;
+  };
+  if (j.truncated) {
+    logger.warn("skills", "marketplace_tree_truncated", { source, branch });
+  }
+  const paths = j.tree
+    .filter((t) => t.type === "blob")
+    .map((t) => t.path);
+  return { paths, commit: j.sha };
+}
+
+/**
+ * Group repo file paths by skill directory. Input paths are like
+ * "skills/docx/SKILL.md", "skills/docx/scripts/extract.py", etc.
+ * Output: map from "skills/docx" → ["SKILL.md", "scripts/extract.py", ...]
+ * (paths relative to the skill dir).
+ */
+function groupBySkillDir(repoPaths: string[]): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const p of repoPaths) {
+    if (!p.startsWith("skills/")) continue;
+    // Skip anything not in a proper skill subdirectory (must have at least 3 segments)
+    const segments = p.split("/");
+    if (segments.length < 3) continue;
+    const skillDir = `${segments[0]}/${segments[1]}`; // "skills/docx"
+    const relPath  = segments.slice(2).join("/");     // "SKILL.md" or "scripts/extract.py"
+    if (!groups.has(skillDir)) groups.set(skillDir, []);
+    groups.get(skillDir)!.push(relPath);
+  }
+  // Only keep groups that contain a SKILL.md at the root
+  for (const [dir, files] of groups.entries()) {
+    if (!files.includes("SKILL.md")) groups.delete(dir);
+  }
+  return groups;
+}
+
+/**
+ * Rewrite the SKILL.md frontmatter to set name: anthropic-<original>.
+ * The original SKILL.md from anthropics/skills typically has name: docx;
+ * once on disk we want the filesystem importer to use name: anthropic-docx
+ * so it doesn't collide with operator skills, and so the admission_log row
+ * uses the prefixed name.
+ */
+function rewriteSkillMdFrontmatter(raw: string, anthropicName: string, opts: { shellExecOk?: boolean; unsupportedScriptsOk?: boolean } = {}): string {
+  // Find the frontmatter block
+  if (!raw.startsWith("---")) {
+    // No frontmatter — prepend one
+    const extras = [
+      opts.shellExecOk ? "shell_exec_ok: true" : null,
+      opts.unsupportedScriptsOk ? "unsupported_scripts_ok: true" : null,
+    ].filter(Boolean).join("\n");
+    const extraBlock = extras ? "\n" + extras : "";
+    return `---\nname: ${anthropicName}\ndescription: (no description from upstream)${extraBlock}\n---\n${raw}`;
+  }
+  const newlineAfterFirst = raw.indexOf("\n", 3);
+  if (newlineAfterFirst === -1) return raw;
+  const endMatch = raw.indexOf("\n---", newlineAfterFirst + 1);
+  if (endMatch === -1) return raw;
+  const fmText = raw.slice(newlineAfterFirst + 1, endMatch);
+  const rest   = raw.slice(endMatch);
+  // Replace or insert the name: line
+  const lines = fmText.split("\n");
+  let foundName = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^name\s*:/.test(lines[i])) {
+      lines[i] = `name: ${anthropicName}`;
+      foundName = true;
+      break;
+    }
+  }
+  if (!foundName) {
+    lines.unshift(`name: ${anthropicName}`);
+  }
+  // v0.27.0 — operator-pre-approved shell_exec opt-in (e.g. for the
+  // dev-server orchestration in anthropic-webapp-testing). Only add if
+  // not already declared upstream.
+  if (opts.shellExecOk && !lines.some((l) => /^shell_exec_ok\s*:/.test(l))) {
+    lines.push("shell_exec_ok: true");
+  }
+  // v0.27.0 — operator-pre-approved opt-in for skills bundling .sh / .rb
+  // scripts the AST scanner doesn't yet handle (e.g. anthropic-web-artifacts-builder).
+  if (opts.unsupportedScriptsOk && !lines.some((l) => /^unsupported_scripts_ok\s*:/.test(l))) {
+    lines.push("unsupported_scripts_ok: true");
+  }
+  return `---\n${lines.join("\n")}${rest}`;
+}
+
+/**
+ * Materialize one marketplace skill directory to disk. Fetches every file
+ * under skills/<name>/ at the pinned commit and writes them under
+ * ~/.claude/skills/anthropic-<name>/, with SKILL.md frontmatter rewritten
+ * so the filesystem importer admits it under the prefixed name.
+ *
+ * Returns the number of bundled files written (excluding SKILL.md).
+ */
+async function materializeSkillDir(
+  source:        string,
+  commit:        string,
+  repoSkillDir:  string,       // "skills/docx"
+  relFiles:      string[],     // ["SKILL.md", "scripts/extract.py", ...]
+  localRoot:     string,       // "~/.claude/skills"
+  opts:          { shellExecOk?: boolean; unsupportedScriptsOk?: boolean } = {},
+): Promise<{ bundled_count: number; anthropic_name: string }> {
+  const origName     = repoSkillDir.split("/")[1];
+  const anthropicName = `anthropic-${origName}`;
+  const targetDir    = pathJoin(localRoot, anthropicName);
+  fsMkdirSync(targetDir, { recursive: true });
+
+  let bundledCount = 0;
+  for (const rel of relFiles) {
+    const repoPath = `${repoSkillDir}/${rel}`;
+    let body: string;
+    try {
+      body = await fetchRaw(source, commit, repoPath);
+    } catch (e) {
+      logger.warn("skills", "marketplace_fs_fetch_failed", {
+        skill: anthropicName, path: repoPath, error: (e as Error).message,
+      });
+      continue;
+    }
+    const targetPath = pathJoin(targetDir, rel);
+    fsMkdirSync(pathDirname(targetPath), { recursive: true });
+    let toWrite = body;
+    if (rel === "SKILL.md") {
+      toWrite = rewriteSkillMdFrontmatter(body, anthropicName, {
+        shellExecOk: opts.shellExecOk,
+        unsupportedScriptsOk: opts.unsupportedScriptsOk,
+      });
+    } else {
+      bundledCount++;
+    }
+    fsWriteFileSync(targetPath, toWrite, "utf8");
+  }
+  return { bundled_count: bundledCount, anthropic_name: anthropicName };
+}
+
+/**
+ * v0.27.0 entry point: marketplace pull → filesystem materialization → admission gate.
+ *
+ * opts.skillFilter: if set, only materialize skills whose original repo name
+ *   matches (substring). Useful for "pull only docx + pptx for E2E test."
+ */
+export async function pullMarketplaceToFilesystem(opts: PullOptions & {
+  skillFilter?: (originalName: string) => boolean;
+  /**
+   * List of ORIGINAL repo names (without "anthropic-" prefix) the operator
+   * has manually pre-approved for subprocess shell=True / os.system use.
+   * The materialized SKILL.md will be rewritten to include
+   * shell_exec_ok: true so the admission gate downgrades shell_exec
+   * findings from block → warn. Only set this AFTER reading the skill's
+   * scripts and confirming the shell use is intentional and safe.
+   */
+  shellExecOkSkills?: string[];
+  /**
+   * List of ORIGINAL repo names the operator has pre-approved to ship
+   * bundled scripts in unscanned languages (.sh, .rb, etc.). The SKILL.md
+   * is rewritten with unsupported_scripts_ok: true. Only set after
+   * reading those scripts manually.
+   */
+  unsupportedScriptsOkSkills?: string[];
+} = {}): Promise<PullToFilesystemSummary> {
+  const startedAt = Date.now();
+  const source    = opts.source ?? process.env.ZC_MARKETPLACE_SOURCE ?? "anthropics/skills";
+  const branch    = opts.branch ?? "main";
+  const pull_id   = randomUUID();
+
+  logger.info("skills", "marketplace_fs_pull_start", { pull_id, source, branch });
+
+  const localRoot = pathJoin(osHomedir(), ".claude", "skills");
+  fsMkdirSync(localRoot, { recursive: true });
+
+  // 1. Discover all repo paths + group by skill directory
+  let listing;
+  try {
+    listing = await listAllRepoPaths(source, branch);
+  } catch (e) {
+    logger.error("skills", "marketplace_fs_repo_list_failed", { error: (e as Error).message });
+    return {
+      pull_id, source, source_commit: "",
+      discovered: 0, materialized: 0, fetch_errors: 1, bundled_files: 0,
+      admission_results: { scanned: 0, inserted: 0, updated: 0, skipped_same: 0, errors: 0 },
+      duration_ms: Date.now() - startedAt,
+    };
+  }
+
+  const groups = groupBySkillDir(listing.paths);
+  const summary: PullToFilesystemSummary = {
+    pull_id, source, source_commit: listing.commit,
+    discovered: groups.size,
+    materialized: 0,
+    fetch_errors: 0,
+    bundled_files: 0,
+    admission_results: { scanned: 0, inserted: 0, updated: 0, skipped_same: 0, errors: 0 },
+    duration_ms: 0,
+  };
+
+  // 2. Materialize each skill directory (applying optional filter)
+  const shellExecOkSet = new Set(opts.shellExecOkSkills ?? []);
+  const unsupportedScriptsOkSet = new Set(opts.unsupportedScriptsOkSkills ?? []);
+  for (const [repoSkillDir, relFiles] of groups.entries()) {
+    const origName = repoSkillDir.split("/")[1];
+    if (opts.skillFilter && !opts.skillFilter(origName)) continue;
+    try {
+      const r = await materializeSkillDir(
+        source, listing.commit, repoSkillDir, relFiles, localRoot,
+        {
+          shellExecOk: shellExecOkSet.has(origName),
+          unsupportedScriptsOk: unsupportedScriptsOkSet.has(origName),
+        },
+      );
+      summary.materialized++;
+      summary.bundled_files += r.bundled_count;
+      logger.info("skills", "marketplace_fs_materialized", {
+        skill: r.anthropic_name, bundled_files: r.bundled_count,
+        shell_exec_ok: shellExecOkSet.has(origName),
+        unsupported_scripts_ok: unsupportedScriptsOkSet.has(origName),
+      });
+    } catch (e) {
+      summary.fetch_errors++;
+      logger.warn("skills", "marketplace_fs_materialize_failed", {
+        repo_skill_dir: repoSkillDir, error: (e as Error).message,
+      });
+    }
+  }
+
+  // 3. Delegate to the admission gate — this is where script_scanner runs,
+  //    HMACs are computed, and admission_log rows get written.
+  try {
+    const { importFilesystemSkills } = await import("./filesystem_skill_import.js");
+    const importSummary = await importFilesystemSkills({ globalRoot: localRoot });
+    summary.admission_results = {
+      scanned:      importSummary.scanned,
+      inserted:     importSummary.inserted,
+      updated:      importSummary.updated,
+      skipped_same: importSummary.skipped_same,
+      errors:       importSummary.errors,
+    };
+  } catch (e) {
+    logger.error("skills", "marketplace_fs_admission_failed", { error: (e as Error).message });
+  }
+
+  summary.duration_ms = Date.now() - startedAt;
+  logger.info("skills", "marketplace_fs_pull_complete", { ...summary });
+  return summary;
+}

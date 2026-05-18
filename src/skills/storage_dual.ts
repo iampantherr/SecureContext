@@ -47,7 +47,7 @@ export function projectHashOf(projectPath: string): string {
  * tiny / placeholder. NEVER use "test" in production paths — the gates
  * exist for a reason.
  */
-export type SkillUpsertSource = "mutator" | "marketplace" | "operator" | "auto-import" | "unknown" | "test";
+export type SkillUpsertSource = "mutator" | "marketplace" | "operator" | "auto-import" | "unknown" | "test" | "filesystem";
 
 /**
  * Upsert a skill into both PG and local SQLite (per backend mode).

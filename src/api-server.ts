@@ -185,6 +185,14 @@ export async function createApiServer(storeOverride?: Store) {
     // these routes will gate via the existing per-project RBAC token system.
     if (request.url === "/dashboard" || request.url.startsWith("/dashboard/")) return;
 
+    // v0.26.0 Step 4 — PreToolUse hook (~/.claude/hooks/skill-script-hmac-verify.mjs)
+    // calls /api/v1/skills/<name>/verify-script to ask "is this script's HMAC
+    // intact?" The hook is spawned per Bash invocation by Claude Code; it doesn't
+    // know the API key (the key lives in MCP env, not host env). Exempt this
+    // route from the global API key gate. The endpoint is READ-ONLY (verify by
+    // hash, no DB writes, no secret leakage) so the exemption is safe.
+    if (request.url.startsWith("/api/v1/skills/") && request.url.includes("/verify-script")) return;
+
     // Per-IP rate limiting
     const ip = request.ip;
     try {
@@ -682,9 +690,12 @@ export async function createApiServer(storeOverride?: Store) {
     try {
       const rows = await withClient(async (c) => {
         const res = await c.query<Record<string, unknown>>(
-          `SELECT skill_id, name, version, scope, description, frontmatter
+          // v0.26.0 Step 7 — also pull skill_dir + script_hmacs so the renderer
+          // can show the "📁 filesystem" badge and script count.
+          `SELECT skill_id, name, version, scope, description, frontmatter, skill_dir, script_hmacs
              FROM skills_pg
             WHERE archived_at IS NULL
+              AND (quarantined IS NULL OR quarantined = FALSE)
             ORDER BY scope, name`,
         );
         return res.rows;
@@ -722,6 +733,125 @@ export async function createApiServer(storeOverride?: Store) {
       reply.type("text/html").send(renderSkillsListFragment(rows, nameMap, effMap, trendMap));
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to load skills: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.26.0 Step 7 — HTML fragment: chain integrity banner for the
+  // filesystem-skills security panel. Green pill if intact, red if broken.
+  app.get("/dashboard/fs-skills/chain-banner", async (_request, reply) => {
+    try {
+      const { verifyAdmissionChain } = await import("./skills/admission_log.js");
+      const r = await verifyAdmissionChain();
+      const html = r.ok
+        ? `<div class="chain-banner chain-ok">
+             <span class="chain-status">🟢 CHAIN OK</span>
+             <span class="chain-detail">${r.totalRows} HMAC-chained admission event${r.totalRows === 1 ? "" : "s"} verified · machine_secret-keyed</span>
+           </div>`
+        : `<div class="chain-banner chain-broken">
+             <span class="chain-status">🔴 CHAIN TAMPERED</span>
+             <span class="chain-detail">Break at row #${r.brokenAt ?? "?"} (${escapeHtml(r.brokenKind ?? "unknown")}); ${r.totalRows} total rows. Investigate audit.log JSONL anchors for ground truth.</span>
+           </div>`;
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="chain-banner chain-error">⚠️ Chain verify failed: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.26.0 Step 7 — HTML fragment: quarantined-skill list with reasons.
+  // Pulls from skills_pg WHERE quarantined=TRUE; shows skill name, quarantine
+  // path, and the first-line reason. No bulk-restore button — operator must
+  // re-import explicitly (defense-in-depth).
+  app.get("/dashboard/fs-skills/quarantine", async (_request, reply) => {
+    try {
+      const { withClient: wc } = await import("./pg_pool.js");
+      const rows = await wc(async (c) => {
+        const r = await c.query<{
+          skill_id: string; name: string; skill_dir: string | null;
+          quarantine_reason: string | null; created_at: string;
+        }>(
+          `SELECT skill_id, name, skill_dir, quarantine_reason, created_at::text
+             FROM skills_pg
+            WHERE quarantined = TRUE
+            ORDER BY created_at DESC
+            LIMIT 50`,
+        );
+        return r.rows;
+      });
+      if (rows.length === 0) {
+        reply.type("text/html").send(`<p class="empty" style="color:#10b981">✅ No quarantined skills.</p>`);
+        return;
+      }
+      const html = `
+        <table class="fs-quarantine-table">
+          <thead>
+            <tr><th>Skill</th><th>Quarantine path</th><th>Reason</th><th>When</th></tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td><code>${escapeHtml(row.name)}</code> <small style="color:#94a3b8">${escapeHtml(row.skill_id)}</small></td>
+                <td><code style="font-size:0.78rem">${escapeHtml(row.skill_dir ?? "(unknown)")}</code></td>
+                <td style="max-width:380px; color:#fca5a5">${escapeHtml((row.quarantine_reason ?? "").slice(0, 200))}${(row.quarantine_reason ?? "").length > 200 ? "…" : ""}</td>
+                <td style="color:#94a3b8; font-size:0.85rem">${escapeHtml(row.created_at.slice(0, 19))}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load quarantine: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.26.0 Step 7 — HTML fragment: recent admission events (HMAC-chained).
+  app.get("/dashboard/fs-skills/admission-log", async (_request, reply) => {
+    try {
+      const { withClient: wc } = await import("./pg_pool.js");
+      const rows = await wc(async (c) => {
+        const r = await c.query<{
+          id: string; ts: string; event: string; skill_name: string;
+          skill_version: string | null; quarantined: boolean;
+          reason: string | null; row_hash: string;
+        }>(
+          `SELECT id, ts::text, event, skill_name, skill_version, quarantined, reason, row_hash
+             FROM skill_admission_log_pg
+            ORDER BY id DESC
+            LIMIT 25`,
+        );
+        return r.rows;
+      });
+      if (rows.length === 0) {
+        reply.type("text/html").send(`<p class="empty">No admission events yet.</p>`);
+        return;
+      }
+      const html = `
+        <table class="fs-admission-table">
+          <thead><tr><th>#</th><th>When</th><th>Event</th><th>Skill</th><th>Reason</th><th>row_hash</th></tr></thead>
+          <tbody>
+            ${rows.map((row) => {
+              const eventBadge = row.quarantined
+                ? `<span class="evt-badge evt-quar">${escapeHtml(row.event)}</span>`
+                : row.event === "admitted"
+                  ? `<span class="evt-badge evt-ok">${escapeHtml(row.event)}</span>`
+                  : `<span class="evt-badge evt-info">${escapeHtml(row.event)}</span>`;
+              return `
+                <tr>
+                  <td>${row.id}</td>
+                  <td style="color:#94a3b8; font-size:0.82rem">${escapeHtml(row.ts.slice(0, 19))}</td>
+                  <td>${eventBadge}</td>
+                  <td><code>${escapeHtml(row.skill_name)}</code> ${row.skill_version ? `<small style="color:#94a3b8">v${escapeHtml(row.skill_version)}</small>` : ""}</td>
+                  <td style="max-width:340px; color:#fca5a5; font-size:0.85rem">${escapeHtml((row.reason ?? "").slice(0, 140))}${(row.reason ?? "").length > 140 ? "…" : ""}</td>
+                  <td><code style="font-size:0.72rem; color:#94a3b8">${escapeHtml(row.row_hash.slice(0, 16))}…</code></td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      `;
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load admission log: ${escapeHtml((e as Error).message)}</div>`);
     }
   });
 
@@ -893,6 +1023,237 @@ export async function createApiServer(storeOverride?: Store) {
       reply.type("application/json").send({ ok: true, role, skills: rows });
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.26.0 Step 4 — Return the expected HMAC for a script bundled inside a
+  // filesystem-style skill. Consumed by the PreToolUse hook
+  // (~/.claude/hooks/skill-script-hmac-verify.mjs) which intercepts Bash calls
+  // that invoke ~/.claude/skills/<name>/scripts/... and verifies the on-disk
+  // HMAC matches what was stored at admission time.
+  //
+  // Response shape:
+  //   { expected: <hex hmac> | null,
+  //     quarantined: boolean,
+  //     quarantine_reason: string | null }
+  //
+  // Returns 404 only if the SKILL itself isn't known; if the skill is known
+  // but the requested script path isn't in script_hmacs, returns expected:null
+  // so the hook fails closed (it's treated as "no admission record → block").
+  app.get("/api/v1/skills/:name/script-hmac", async (request, reply) => {
+    try {
+      const { name } = request.params as { name: string };
+      const { path: scriptPath } = request.query as Record<string, unknown>;
+      if (!name || typeof name !== "string") throw new ApiError(400, "skill name path param is required");
+      if (typeof scriptPath !== "string" || !scriptPath) throw new ApiError(400, "path query param is required (e.g. scripts/foo.py)");
+      const { withClient: wc } = await import("./pg_pool.js");
+      const row = await wc(async (c) => {
+        const r = await c.query<{ script_hmacs: Record<string, string> | null; quarantined: boolean; quarantine_reason: string | null }>(
+          `SELECT script_hmacs, quarantined, quarantine_reason
+             FROM skills_pg
+            WHERE name = $1 AND archived_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1`,
+          [name],
+        );
+        return r.rows[0] ?? null;
+      });
+      if (!row) return reply.status(404).type("application/json").send({ error: `skill not found: ${name}` });
+      const expected = row.script_hmacs && typeof row.script_hmacs === "object"
+        ? row.script_hmacs[scriptPath] ?? null
+        : null;
+      reply.type("application/json").send({
+        expected,
+        quarantined: row.quarantined === true,
+        quarantine_reason: row.quarantine_reason ?? null,
+      });
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).type("application/json").send({ error: e.message });
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.26.0 Step 4 — Server-side script HMAC verification. The PreToolUse hook
+  // calls this so it doesn't need access to the machine_secret (which lives in
+  // the container's api_state volume, not on the host filesystem).
+  //
+  // Request: GET /api/v1/skills/:name/verify-script?path=scripts/foo.py
+  //          [&skill_dir=/abs/path] (optional; defaults to ~/.claude/skills/:name)
+  //
+  // The server:
+  //   1. Looks up the skill in skills_pg (must be non-archived, non-quarantined)
+  //   2. Resolves the file under its bind-mounted view of ~/.claude/skills/<name>/
+  //   3. Computes HMAC-SHA256("script:" || content) with machine_secret
+  //   4. Compares to stored value in script_hmacs JSONB
+  //
+  // Response:
+  //   { verified: bool, quarantined: bool, has_admission: bool,
+  //     reason: <description if not verified>, expected_present: bool }
+  app.get("/api/v1/skills/:name/verify-script", async (request, reply) => {
+    try {
+      const { name } = request.params as { name: string };
+      const { path: scriptPath } = request.query as Record<string, unknown>;
+      if (!name || typeof name !== "string") throw new ApiError(400, "skill name path param is required");
+      if (typeof scriptPath !== "string" || !scriptPath) throw new ApiError(400, "path query param required (e.g. scripts/foo.py)");
+
+      // Basic path-traversal defense — only allow paths inside scripts/, references/, resources/
+      if (scriptPath.includes("..") || scriptPath.startsWith("/") || scriptPath.startsWith("\\")) {
+        throw new ApiError(400, "invalid path: traversal segments are not allowed");
+      }
+
+      const { withClient: wc } = await import("./pg_pool.js");
+      const row = await wc(async (c) => {
+        const r = await c.query<{
+          skill_dir: string | null;
+          script_hmacs: Record<string, string> | null;
+          quarantined: boolean;
+          quarantine_reason: string | null;
+        }>(
+          `SELECT skill_dir, script_hmacs, quarantined, quarantine_reason
+             FROM skills_pg
+            WHERE name = $1 AND archived_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1`,
+          [name],
+        );
+        return r.rows[0] ?? null;
+      });
+
+      if (!row) {
+        return reply.status(404).type("application/json").send({
+          verified: false, has_admission: false, quarantined: false,
+          expected_present: false, reason: `skill not found in registry: ${name}`,
+        });
+      }
+      if (row.quarantined) {
+        return reply.type("application/json").send({
+          verified: false, has_admission: true, quarantined: true,
+          expected_present: false,
+          reason: `skill QUARANTINED: ${row.quarantine_reason ?? "see dashboard"}`,
+        });
+      }
+      const expected = row.script_hmacs && typeof row.script_hmacs === "object"
+        ? row.script_hmacs[scriptPath] ?? null
+        : null;
+      if (!expected) {
+        return reply.type("application/json").send({
+          verified: false, has_admission: false, quarantined: false,
+          expected_present: false,
+          reason: `no HMAC on record for ${name}/${scriptPath} (script not admitted)`,
+        });
+      }
+
+      // Resolve absolute path. If skill_dir was recorded at admission, use it;
+      // otherwise default to ~/.claude/skills/<name>/.
+      const { homedir } = await import("node:os");
+      const { join } = await import("node:path");
+      const { existsSync, readFileSync } = await import("node:fs");
+      const skillRoot = row.skill_dir ?? join(homedir(), ".claude", "skills", name);
+      const abs = join(skillRoot, scriptPath);
+
+      // Security: ensure the resolved path is still under the expected skill root.
+      const { resolve } = await import("node:path");
+      const absResolved = resolve(abs);
+      const rootResolved = resolve(skillRoot);
+      if (!absResolved.startsWith(rootResolved)) {
+        return reply.status(400).type("application/json").send({
+          verified: false, has_admission: true, quarantined: false,
+          expected_present: true,
+          reason: `resolved script path escapes skill root: ${absResolved}`,
+        });
+      }
+      if (!existsSync(abs)) {
+        return reply.status(404).type("application/json").send({
+          verified: false, has_admission: true, quarantined: false,
+          expected_present: true,
+          reason: `script not found on disk: ${scriptPath}`,
+        });
+      }
+
+      const { getMachineSecret } = await import("./security/machine_secret.js");
+      const { createHmac } = await import("node:crypto");
+      const content = readFileSync(abs);
+      const actual = createHmac("sha256", getMachineSecret())
+        .update("script:")
+        .update(content)
+        .digest("hex");
+
+      const verified = actual === expected;
+      reply.type("application/json").send({
+        verified,
+        has_admission: true,
+        quarantined: false,
+        expected_present: true,
+        reason: verified
+          ? null
+          : `HMAC mismatch: expected=${expected.slice(0, 16)}... actual=${actual.slice(0, 16)}... (script tampered after admission)`,
+      });
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).type("application/json").send({ error: e.message });
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.27.0 — Trigger admission import on a specific project directory.
+  // Use this to admit project-scoped skills at <projectPath>/.claude/skills/<name>/.
+  // The project path must be readable by the container (bind-mounted).
+  app.post("/api/v1/skills/import-project", async (request, reply) => {
+    try {
+      const { path: projectPath } = request.query as Record<string, unknown>;
+      if (typeof projectPath !== "string" || !projectPath) {
+        return reply.status(400).type("application/json").send({ error: "path query param required" });
+      }
+      const { importFilesystemSkills } = await import("./skills/filesystem_skill_import.js");
+      const summary = await importFilesystemSkills({ projectPaths: [projectPath] });
+      reply.type("application/json").send(summary);
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.26.0 Step 6 — Verify the HMAC chain of the skill admission log.
+  // Public read endpoint (everyone with access to the API can ask "is the
+  // audit trail tamper-free?"). The verification recomputes every row's
+  // HMAC using the machine_secret and walks prev_hash linkage.
+  //
+  // Response:
+  //   { ok: bool, total_rows: number, broken_at?: id, broken_kind?: string }
+  app.get("/api/v1/skills/admission-log/verify", async (_request, reply) => {
+    try {
+      const { verifyAdmissionChain } = await import("./skills/admission_log.js");
+      const result = await verifyAdmissionChain();
+      reply.type("application/json").send({
+        ok: result.ok,
+        total_rows: result.totalRows,
+        broken_at: result.brokenAt ?? null,
+        broken_kind: result.brokenKind ?? null,
+      });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
+  // v0.26.0 Step 6 — Return recent admission log rows for dashboard display.
+  app.get("/api/v1/skills/admission-log", async (request, reply) => {
+    try {
+      const { limit } = request.query as Record<string, unknown>;
+      const lim = Math.min(Math.max(parseInt(String(limit ?? 50), 10) || 50, 1), 500);
+      const { withClient: wc } = await import("./pg_pool.js");
+      const rows = await wc(async (c) => {
+        const r = await c.query(
+          `SELECT id, ts, event, skill_name, skill_version, skill_scope,
+                  skill_dir, body_hmac, script_count, quarantined, reason,
+                  prev_hash, row_hash
+             FROM skill_admission_log_pg
+            ORDER BY id DESC
+            LIMIT $1`,
+          [lim],
+        );
+        return r.rows;
+      });
+      reply.type("application/json").send({ rows });
+    } catch (e) {
       reply.status(500).type("application/json").send({ error: (e as Error).message });
     }
   });
@@ -1376,6 +1737,42 @@ export async function createApiServer(storeOverride?: Store) {
       reply.status(500).type("text/html").send(
         `<div class="error">Marketplace pull failed: ${escapeHtml((e as Error).message)}</div>`,
       );
+    }
+  });
+
+  // v0.27.0 — Marketplace pull WITH bundled scripts (fetcher-to-filesystem
+  // + admission gate delegation). Closes the gap where anthropic-docx,
+  // anthropic-pptx, etc. shipped without their scripts/ directory ever
+  // reaching disk. Optional `skills` query param: comma-separated list of
+  // ORIGINAL repo names (without the anthropic- prefix) to filter the pull.
+  // Empty/missing = pull all.
+  //
+  // Example: POST /api/v1/marketplace/pull-filesystem?skills=docx,pptx,xlsx
+  app.post("/api/v1/marketplace/pull-filesystem", async (request, reply) => {
+    try {
+      const { skills, shell_exec_ok } = request.query as Record<string, unknown>;
+      const filterList = typeof skills === "string" && skills.trim().length > 0
+        ? skills.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+        : null;
+      // v0.27.0 — operator must explicitly list which skills are pre-approved
+      // for shell_exec. Pass as comma-separated original names (no anthropic- prefix).
+      // Example: ?shell_exec_ok=webapp-testing
+      const shellExecList = typeof shell_exec_ok === "string" && shell_exec_ok.trim().length > 0
+        ? shell_exec_ok.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+        : undefined;
+      const { unsupported_scripts_ok } = request.query as Record<string, unknown>;
+      const unsupList = typeof unsupported_scripts_ok === "string" && unsupported_scripts_ok.trim().length > 0
+        ? unsupported_scripts_ok.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+        : undefined;
+      const { pullMarketplaceToFilesystem } = await import("./skills/marketplace_pull.js");
+      const summary = await pullMarketplaceToFilesystem({
+        skillFilter: filterList ? (name) => filterList.includes(name) : undefined,
+        shellExecOkSkills: shellExecList,
+        unsupportedScriptsOkSkills: unsupList,
+      });
+      reply.type("application/json").send(summary);
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
     }
   });
 
@@ -2574,6 +2971,27 @@ if (process.argv[1]?.endsWith("api-server.js")) {
         const roleBack = await backfillIntendedRoles();
         if (roleBack.scanned > 0) {
           console.log(`Skill role backfill: scanned=${roleBack.scanned} updated=${roleBack.updated} skipped=${roleBack.skipped}`);
+        }
+        // v0.26.0 Step 2 — walk ~/.claude/skills/<name>/ (Anthropic dir layout)
+        // and mirror to skills_pg with body_hmac + script_hmacs populated.
+        // Runs after the legacy flat-file auto-import so the two coexist.
+        try {
+          const { importFilesystemSkills } = await import("./skills/filesystem_skill_import.js");
+          // v0.27.0 — also walk per-project skill dirs declared via env.
+          // Set ZC_PROJECT_SKILL_PATHS to a colon-separated list of absolute
+          // project roots (e.g. "/projects/Test_Agent_Coordination:/projects/MyApp").
+          // Each must be a project root that contains .claude/skills/<name>/
+          // subdirs. The container must be able to read the path (bind-mounted).
+          const projectPathsRaw = process.env.ZC_PROJECT_SKILL_PATHS ?? "";
+          const projectPaths = projectPathsRaw
+            ? projectPathsRaw.split(/[:;,]/).map((p) => p.trim()).filter((p) => p.length > 0)
+            : [];
+          const fsSummary = await importFilesystemSkills({ projectPaths });
+          if (fsSummary.scanned > 0) {
+            console.log(`FS skill import: scanned=${fsSummary.scanned} +${fsSummary.inserted} ~${fsSummary.updated} =${fsSummary.skipped_same} ✗${fsSummary.errors}${projectPaths.length > 0 ? ` (projects=${projectPaths.length})` : ""}`);
+          }
+        } catch (e) {
+          console.error("FS skill import failed:", (e as Error).message);
         }
       } catch (e) {
         console.error("Skill auto-import failed:", (e as Error).message);

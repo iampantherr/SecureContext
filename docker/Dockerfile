@@ -27,6 +27,12 @@ FROM node:22-alpine AS runtime
 RUN addgroup -g 1001 -S securecontext && \
     adduser  -u 1001 -S securecontext -G securecontext
 
+# v0.26.0 Step 3 — install python3 for AST-based scanning of bundled scripts
+# in Anthropic-style filesystem skills. The script_scanner runs `python3 -c`
+# with a small ast.parse() walker that detects shell=True, eval, exec,
+# os.system, pickle.loads, etc. — patterns regex can't reliably catch.
+RUN apk add --no-cache python3
+
 WORKDIR /app
 
 # Copy built artifacts + production deps only
@@ -38,6 +44,10 @@ COPY --from=builder --chown=securecontext:securecontext /app/package.json ./pack
 # has something to scan on first boot. Operators can also volume-mount their
 # host skills/ over this in docker-compose for live editing.
 COPY --chown=securecontext:securecontext skills/ ./skills/
+
+# v0.26.0 Step 3 — bake the Python AST walker for skill bundled-script scanning.
+# Called by src/skills/script_scanner.ts via spawnSync("python3", ...).
+COPY --chown=securecontext:securecontext scripts/py_ast_walker.py ./scripts/py_ast_walker.py
 
 USER securecontext
 

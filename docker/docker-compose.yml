@@ -87,6 +87,17 @@ services:
       # Without this, HMAC-protected data in PG (skills.body_hmac, hash chains)
       # becomes unverifiable after every `docker compose build`.
       - api_state:/home/securecontext/.claude/zc-ctx
+      # v0.26.0 Step 2 — mount the operator's ~/.claude/skills/ directory so the
+      # filesystem-skill watcher can see Anthropic-style skill directories.
+      # Writable because Step 3's quarantine atomic-moves dirs to
+      # ~/.claude/skills.quarantine/ when admission scan fails.
+      - ${USERPROFILE:-${HOME}}/.claude/skills:/home/securecontext/.claude/skills
+      - ${USERPROFILE:-${HOME}}/.claude/skills.quarantine:/home/securecontext/.claude/skills.quarantine
+      # v0.27.0 — optional mount(s) for project-scoped skill admission. The boot
+      # importer + /api/v1/skills/import-project endpoint walk these paths to
+      # admit any <project>/.claude/skills/<name>/. Add more lines + extend
+      # ZC_PROJECT_SKILL_PATHS env to register additional projects.
+      - ${USERPROFILE:-${HOME}}/AI_projects/Test_Agent_Coordination:/projects/Test_Agent_Coordination
     ports:
       - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
     depends_on:

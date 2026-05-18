@@ -725,6 +725,58 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 24,
+    description: "v0.26.0 Step 2: support Anthropic-style filesystem skills at ~/.claude/skills/<name>/ with bundled scripts. Adds (a) skill_dir TEXT to record absolute path of the source directory, (b) script_hmacs JSONB to fingerprint every script file inside scripts/ for tamper detection, (c) quarantined BOOLEAN + quarantine_reason TEXT to support the Step 3 quarantine model, (d) extends chk_sss_source CHECK constraint to allow source='filesystem'. All additive (default NULL/FALSE); existing flat-file skills are unaffected.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE skills_pg ADD COLUMN IF NOT EXISTS skill_dir TEXT`);
+      await client.query(`ALTER TABLE skills_pg ADD COLUMN IF NOT EXISTS script_hmacs JSONB`);
+      await client.query(`ALTER TABLE skills_pg ADD COLUMN IF NOT EXISTS quarantined BOOLEAN NOT NULL DEFAULT FALSE`);
+      await client.query(`ALTER TABLE skills_pg ADD COLUMN IF NOT EXISTS quarantine_reason TEXT`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skills_pg_quarantined ON skills_pg (quarantined) WHERE quarantined = TRUE`);
+      // Allow source='filesystem' in skill_security_scans_pg (was added in migration 20)
+      await client.query(`ALTER TABLE skill_security_scans_pg DROP CONSTRAINT IF EXISTS chk_sss_source`);
+      await client.query(`ALTER TABLE skill_security_scans_pg ADD CONSTRAINT chk_sss_source CHECK (source IN ('mutator', 'marketplace', 'operator', 'auto-import', 'unknown', 'filesystem'))`);
+    },
+  },
+
+  {
+    id: 25,
+    description: "v0.26.0 Step 6: HMAC-chained skill admission log (tamper-evident audit trail for every admit/quarantine decision)",
+    up: async (client) => {
+      // Tamper-evident log of every skill admission decision. Each row is HMAC-keyed
+      // with the machine_secret. Chained via prev_hash → row_hash so any insertion,
+      // deletion, or modification breaks the chain on verification.
+      //
+      // Additionally, every row is mirrored to ~/.claude/zc-ctx/logs/audit.log as a
+      // JSONL line (external anchor). If the DB row is altered/deleted, the audit.log
+      // line still attests to the prev_hash, row_hash, and canonical row content —
+      // a second-line defense.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS skill_admission_log_pg (
+          id              BIGSERIAL PRIMARY KEY,
+          ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          event           TEXT NOT NULL,
+            -- one of: admitted, updated, quarantined_scan, quarantined_frontmatter, parse_error
+          skill_name      TEXT NOT NULL,
+          skill_version   TEXT,
+          skill_scope     TEXT,
+          skill_dir       TEXT NOT NULL,
+          body_hmac       TEXT,
+          script_count    INTEGER NOT NULL DEFAULT 0,
+          quarantined     BOOLEAN NOT NULL DEFAULT FALSE,
+          reason          TEXT,
+          prev_hash       TEXT NOT NULL,
+          row_hash        TEXT NOT NULL,
+          CONSTRAINT chk_sal_event CHECK (event IN ('admitted','updated','quarantined_scan','quarantined_frontmatter','parse_error','skipped_idempotent'))
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_admission_log_pg_ts ON skill_admission_log_pg (ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_admission_log_pg_skill ON skill_admission_log_pg (skill_name, ts DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_skill_admission_log_pg_quarantined ON skill_admission_log_pg (quarantined) WHERE quarantined = TRUE`);
+    },
+  },
+
 ];
 
 /**
