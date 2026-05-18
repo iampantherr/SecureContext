@@ -508,8 +508,9 @@ export function renderTrendSparkline(points: DailySnapshotPoint[]): string {
   return `
     <div class="trend-panel">
       <div class="trend-header">
-        <strong>${fmt(totalSaved)}</strong> tokens saved over ${points.length} completed day${points.length === 1 ? "" : "s"} ·
+        <strong>${fmt(totalSaved)}</strong> tokens saved over ${points.length} ${points.length === 1 ? "day" : "days"} ·
         <strong>$${totalCost.toFixed(4)}</strong> cost saved
+        <span class="trend-header-note" style="font-size:0.78rem; color:#94a3b8; margin-left:6px">(completed snapshots only)</span>
       </div>
       <!-- v0.22.7: explain why the trend total can be lower than the headline.
            Headline = live aggregate over the selected window (includes today).
@@ -518,7 +519,7 @@ export function renderTrendSparkline(points: DailySnapshotPoint[]): string {
                       per project. -->
       <div class="trend-footnote" style="font-size:0.75rem; color:#94a3b8; margin-top:4px">
         Trend reflects closed daily snapshots only — today's in-flight totals
-        are above (Headline = live live aggregate; Trend = sealed days).
+        are above (Headline = live aggregate; Trend = sealed-day snapshots).
       </div>
       <svg viewBox="0 0 ${W} ${H}" class="trend-svg" preserveAspectRatio="none">
         <path d="${fill}" fill="rgba(74,222,128,0.15)" />

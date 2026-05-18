@@ -329,8 +329,22 @@ export async function _dropSkillTablesForTesting(): Promise<void> {
     await c.query(`DROP TABLE IF EXISTS skill_mutations_pg CASCADE`);
     await c.query(`DROP TABLE IF EXISTS skill_runs_pg CASCADE`);
     await c.query(`DROP TABLE IF EXISTS skills_pg CASCADE`);
-    // v0.18.2 Sprint 2.6: include mig 11 (adds was_retry_after_promotion to
-    // skill_runs_pg) so it re-applies on the freshly-recreated table.
-    await c.query(`DELETE FROM schema_migrations_pg WHERE id IN (6, 7, 8, 11)`);
+    // v0.28.0 fix: re-include EVERY migration that touches the dropped tables
+    // so they re-apply on the freshly-recreated schema. Each migration's
+    // schema_migrations_pg row must be cleared, otherwise runPgMigrations()
+    // sees the row as "applied" and skips re-running it on the empty table.
+    //
+    // Migrations that ALTER skills_pg / skill_runs_pg / skill_mutations_pg:
+    //   6  — create skills_pg + skill_mutations_pg
+    //   7  — create skill_runs_pg
+    //   8  — additional skill_mutations_pg columns
+    //   11 — ALTER skill_runs_pg ADD was_retry_after_promotion
+    //   16 — ALTER skill_runs_pg ADD agent_id (was missing from this list,
+    //        which is why CI test storage_dual/postgres-skill_runs-round-trip
+    //        had been failing since v0.22.0 with "column agent_id does not exist")
+    //   21 — ALTER skill_runs_pg ADD is_exemplar + exemplar_* fields
+    //   24 — ALTER skills_pg ADD skill_dir + script_hmacs + quarantined +
+    //        quarantine_reason + the chk_sss_source CHECK constraint update
+    await c.query(`DELETE FROM schema_migrations_pg WHERE id IN (6, 7, 8, 11, 16, 21, 24)`);
   });
 }

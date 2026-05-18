@@ -65,11 +65,26 @@ const ipRateMap            = new Map<string, { count: number; resetAt: number }>
 // ─────────────────────────────────────────────────────────────────────────────
 
 function timingSafeKeyCheck(supplied: string | undefined): boolean {
-  if (!API_KEY) return true; // No key configured — open (dev mode warning logged at startup)
+  // v0.28.0 fix: read ZC_API_KEY dynamically per call rather than module-load capture.
+  // The module-load capture broke under test interleaving: when test file A set
+  // ZC_API_KEY before test file B's `beforeAll`, file B's `import { createApiServer }`
+  // ran with the stale key cached in the module-scope `API_KEY` constant, and
+  // subsequent requests using B's freshly-minted testApiKey returned 401.
+  // The original comment near the global gate said:
+  //   "API_KEY is captured at module-load. The test process imports api-server.ts
+  //    BEFORE beforeAll() sets ZC_API_KEY, so API_KEY is undefined and
+  //    timingSafeKeyCheck returns true regardless."
+  // …which was only true when api-server.ts was the FIRST module to import in
+  // the test worker. Once vitest started sharing workers across files (or once
+  // any other test file imports api-server.ts while having ZC_API_KEY set), the
+  // assumption broke. Reading per-call is the simple fix; perf cost is one
+  // env lookup, negligible vs. the sha256 + timingSafeEqual.
+  const apiKey = process.env["ZC_API_KEY"];
+  if (!apiKey) return true; // No key configured — open (dev mode warning logged at startup)
   if (!supplied) return false;
   try {
     const a = Buffer.from(createHash("sha256").update(supplied).digest("hex"), "hex");
-    const b = Buffer.from(createHash("sha256").update(API_KEY).digest("hex"),  "hex");
+    const b = Buffer.from(createHash("sha256").update(apiKey).digest("hex"),   "hex");
     return timingSafeEqual(a, b);
   } catch {
     return false;
