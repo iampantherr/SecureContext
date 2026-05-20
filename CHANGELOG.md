@@ -4,6 +4,137 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.29.0] — 2026-05-20 — Skill authoring chain (meta-skill, reference skill, β LLM filer)
+
+The shift from "SecureContext can admit and verify skills" to "agents can
+actually author + ship them." Three things land in this release, plus a
+known-followup file for the hook-bypass closure.
+
+### What ships
+
+**`docs/SKILL_AUTHORSHIP_GUIDE.md`** — canonical guide to authoring
+Anthropic-style filesystem skills. The four invariants, the frontmatter
+spec, the script-writing rules, the scope-decision matrix. Linked from
+the README.
+
+**`examples/skills/writing-skills/`** — the meta-skill. Ships three
+bundled scripts the operator (or an agent) uses to author other skills:
+
+- `scaffold-skill.py` — generates a new skill directory from CLI args.
+  Auto-admits the new skill via `POST /api/v1/skills/import-project`
+  (translates host path → in-container `/projects/<basename>`). Requires
+  `--scope-rationale` ≥20 chars; refuses without one. Persists the
+  rationale to `<skill>/.scope-rationale.txt` for audit. Distinguishes
+  populated SKILL.md (refuse-to-overwrite) from a stub leftover from a
+  crashed run (overwrite with warn). On admission failure, surfaces the
+  exact `docker-compose.yml` bind-mount line the operator needs to add.
+
+- `lint-skill.py` — checks frontmatter against the same strict-mode
+  rules the admission gate uses. Counts procedural steps (both `1.`
+  ordered-list and `### Step N` heading styles). Flags only project-
+  binding paths (user-home + project names), not generic system paths.
+  Output is UTF-8 across Windows cp1252 console.
+
+- `preview-admission.py` — dry-runs the AST scanner against bundled
+  scripts via the bundled `py_ast_walker`, reports findings before
+  admission would.
+
+**SCOPE-DECISION MATRIX is now in L2** — moved from
+`references/scope-decision.md` (L3, agent reads on demand) into the
+`writing-skills/SKILL.md` body. Six yes/no questions + a default
+tie-breaker + five worked examples from the SecureContext repo. Agents
+loading the skill now have the decision logic in their context
+automatically.
+
+**`examples/skills/publish-github-release/`** — first concrete reference
+skill. Five bundled scripts ship a complete release flow: `preflight.py`
+(gate checks with auto-detected git root via `git rev-parse --show-toplevel`),
+`bump-version.py` (atomic multi-file version bump), `regenerate-changelog.py`
+(git log → Keep-a-Changelog section, grouped by conventional-commit type),
+`wait-for-ci.sh` (`gh run watch` polling wrapper), `create-release.sh`
+(`gh release create` with notes extracted from CHANGELOG). Reads
+`<project>/.publish-github-release-config.json` for per-project overrides.
+
+**`src/skills/spotter/llm_filer.ts`** — v0.28.0-β LLM filer. Spawns
+`claude --model claude-sonnet-4-6` via subprocess, passes structured
+signals from an α dry-run, applies the four Anthropic quality gates
+(procedural-not-factual / clear-trigger / ≥3-occurrences /
+progressive-disclosure-leverage), and files matching signals as
+`skill_candidates_pg` rows with status='ready'. Operator approves to
+admit via the existing skill-candidate review flow.
+
+**Dashboard wiring** — `POST /dashboard/spotter/runs/:run_id/llm-file`
+endpoint; "🤖 Run LLM filer (sonnet-4-6)" button on spotter run drill-
+downs; per-signal outcome badges (filed_candidate / rejected_*).
+
+### Live verification at every step
+
+**Backend tests:** 868/868 vitest pass; 96/91 security-attack vectors
+(5 known-limitation warns, intentional sandbox design).
+
+**Multi-agent E2E on `Test_Agent_Coordination`** (round 1, earlier):
+fresh Claude CLI agents (Opus orchestrator + Sonnet developer) used the
+publish-github-release skill end-to-end. 9 distinct script invocations
+through the PreToolUse HMAC hook, all PASS. Agents recorded outcome
+scores (writing-skills: 1.0, publish-github-release: 0.75) via
+`zc_record_skill_outcome`. The 0.75 score reflected the agent's honest
+"gh release create skipped — origin is a local bare repo, not GitHub;
+tag pushed directly as equivalent" note.
+
+**Multi-agent E2E on `Test_Skill_E2E`** (round 2, new scratch project):
+clean git repo + local bare remote. Agent committed 4 files (SKILL.md +
+scripts/check-package.py + .scope-rationale.txt + config), bumped
+version 0.1.0→0.2.0, regenerated CHANGELOG with `[0.2.0] — 2026-05-19`
+section, made 3 git commits, pushed to local bare remote with tag v0.2.0.
+
+**Multi-agent E2E with ambiguous scope** (round 3): operator did NOT
+specify global vs project. Agent read the matrix from L2, applied it,
+chose project-local, and wrote a rationale citing the criteria
+("pattern has NOT appeared in >=2 distinct projects... only fires in
+Test_Skill_E2E repo... default tie-breaker is project-local"). All
+five script invocations (scaffold ×2, lint, preview ×2) passed the HMAC
+verify hook. The skill landed on the dashboard with the 📁 filesystem
+badge under Active skills.
+
+### Bug fixes during the work
+
+**Round 1 — preflight.py git-root detection** (caught by agents
+themselves in the first multi-agent E2E, filed against the skill with
+outcome_score 0.65). Earlier `preflight.py` required `--project` to
+point AT the git root; failed on monorepo subdirectory layouts. Fixed
+by `git rev-parse --show-toplevel` auto-detect.
+
+**Round 2 — three regressions from my own scope-rationale + auto-admit
+work**, surfaced by an agent run:
+
+- Bug A: `NameError: name 'os' is not defined` in `trigger_admission()`
+  — missing `import os` at module top.
+- Bug B: partial-scaffold directory from a crashed run blocked retry
+  with "SKILL.md already exists." Fixed by distinguishing populated
+  (>200 bytes) from stub-leftover SKILL.md.
+- Bug C: auto-admit hit wrong path layout — sent host path; sc-api can
+  only see paths under `/projects/<basename>/`. Fixed with host-path →
+  container-path translation; on failure, surfaces the exact
+  `docker-compose.yml` line the operator needs to add.
+
+### What's documented for the next release
+
+`docs/TODO_v0.28.1.md` — design for two hook-bypass closures
+discovered during multi-agent E2E:
+
+- PreRead block bypass: agent hit the "indexed file: build the summary
+  first" block on `Read`, then routed around via `Bash cat`/`head`/`tail`
+  or `PowerShell Get-Content`. Hook needs to scan command body of any
+  process-spawning tool.
+- HMAC verify bypass: PreToolUse hook is registered for `Bash` only.
+  An agent invoking `PowerShell python <skill-script>.py` skips the
+  HMAC check entirely. Same fix shape — extend hook registration to
+  `PowerShell` too.
+
+These are both pre-existing architectural gaps, not regressions from
+v0.29.0. Documented + tracked, not blocking the v0.29.0 release.
+
+
 ## [0.28.0] — 2026-05-18 — Skill spotter α (signal mining, no LLM yet)
 
 First step toward auto-detecting "which procedural patterns are skill-worthy"

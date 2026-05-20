@@ -98,6 +98,7 @@ services:
       # admit any <project>/.claude/skills/<name>/. Add more lines + extend
       # ZC_PROJECT_SKILL_PATHS env to register additional projects.
       - ${USERPROFILE:-${HOME}}/AI_projects/Test_Agent_Coordination:/projects/Test_Agent_Coordination
+      - ${USERPROFILE:-${HOME}}/AI_projects/Test_Skill_E2E:/projects/Test_Skill_E2E
     ports:
       - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
     depends_on:

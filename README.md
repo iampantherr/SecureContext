@@ -2,7 +2,7 @@
 
 > **The security and memory layer for Claude Code.** Persistent memory that survives restarts, cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs locally on PostgreSQL — zero cloud sync, MIT-licensed.
 
-[![Version](https://img.shields.io/badge/version-0.28.0-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.29.0-blue)](package.json)
 [![Tests](https://img.shields.io/badge/tests-786%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
@@ -245,6 +245,8 @@ Upcoming:
 - [SECURITY_REPORT.md](SECURITY_REPORT.md) — red-team test IDs + verification log
 - [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) — line-by-line refutation of the SafeSkill scanner's false positives
 - [SecureContext_ProductionReadiness_Report.md](SecureContext_ProductionReadiness_Report.md) — what's hardened, what's still in beta
+- [docs/SKILL_AUTHORSHIP_GUIDE.md](docs/SKILL_AUTHORSHIP_GUIDE.md) — the four invariants, frontmatter spec, script-writing rules, scope decisions
+- [examples/skills/](examples/skills/) — reference filesystem skills you can copy into `~/.claude/skills/`: `writing-skills` (meta-skill scaffolder + linter + admission preview), `publish-github-release` (bump version, regenerate CHANGELOG, push, wait for CI, create release)
 
 ---
 

@@ -1311,6 +1311,32 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.28.0-β — Run the LLM filer on a specific spotter run. Spawns the
+  // claude CLI subprocess with sonnet-4-6, applies the four Anthropic
+  // skill-quality gates to each observed signal, files matching ones as
+  // skill_candidates_pg rows with status='ready' (operator approves to
+  // trigger the existing mutator-generated body → admission flow).
+  //
+  // Cost: ~$0.15 per run with the operator's Pro plan. Time: ~30-90s.
+  //
+  // POST /api/v1/skills/spotter/runs/:run_id/llm-file
+  //   [?model=claude-sonnet-4-6] [?timeout_ms=300000]
+  app.post("/api/v1/skills/spotter/runs/:run_id/llm-file", async (request, reply) => {
+    try {
+      const { run_id } = request.params as { run_id: string };
+      const { model, timeout_ms } = request.query as Record<string, unknown>;
+      const { runSpotterLlmFiler } = await import("./skills/spotter/llm_filer.js");
+      const result = await runSpotterLlmFiler({
+        run_id,
+        model:      typeof model === "string" && model.trim() ? model : undefined,
+        timeout_ms: timeout_ms ? Math.max(60_000, Math.min(900_000, parseInt(String(timeout_ms), 10) || 300_000)) : undefined,
+      });
+      reply.type("application/json").send(result);
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
   // v0.28.0-α — Dashboard HTML fragments for the spotter panel.
   app.get("/dashboard/spotter/runs", async (_request, reply) => {
     try {
@@ -1357,14 +1383,33 @@ export async function createApiServer(storeOverride?: Store) {
         reply.type("text/html").send(`<p class="empty">This run found zero signals. Try widening the window with <code>days=30</code> or lowering <code>min_occurrences</code>.</p>`);
         return;
       }
+      const observed = signals.filter((s) => s.outcome === "observed").length;
+      const filed = signals.filter((s) => s.outcome === "filed_candidate").length;
+      const llmButton = observed > 0
+        ? `<button class="pull-marketplace-btn"
+                  hx-post="/dashboard/spotter/runs/${encodeURIComponent(run_id)}/llm-file"
+                  hx-target="#spotter-llm-result" hx-swap="innerHTML"
+                  hx-on:htmx:before-request="this.disabled=true; this.textContent='Calling claude-sonnet-4-6 (30-90s)...'"
+                  hx-on:htmx:after-request="this.disabled=false; this.textContent='🤖 Run LLM filer (sonnet-4-6)'; htmx.trigger('#spotter-runs-list', 'refresh')">
+            🤖 Run LLM filer (sonnet-4-6) — files candidates for ${observed} observed signal${observed === 1 ? "" : "s"}
+          </button>`
+        : `<span class="market-meta">All signals from this run have been classified by the LLM filer. ${filed} candidate${filed === 1 ? "" : "s"} filed.</span>`;
       const html = `
         <div class="spotter-signals">
           <h4 style="color:#94a3b8; margin-top:0">${signals.length} signal${signals.length === 1 ? "" : "s"} from run ${escapeHtml(run_id.slice(0, 8))}…</h4>
+          <div style="margin: 8px 0 12px">${llmButton}</div>
+          <div id="spotter-llm-result"></div>
           ${signals.map((s) => {
             const ev = s.evidence as Record<string, unknown> | null;
             const seq = (ev?.tool_sequence as string[] | undefined)?.join(" → ") ?? "";
             const files = (ev?.file_paths as string[] | undefined)?.join(", ") ?? "";
             const ssn = (ev?.session_ids as string[] | undefined) ?? [];
+            const outcome = s.outcome ?? "observed";
+            const outcomeBadge = outcome === "observed"
+              ? `<span class="evt-badge evt-info">observed</span>`
+              : outcome === "filed_candidate"
+                ? `<span class="evt-badge evt-ok">filed_candidate</span>`
+                : `<span class="evt-badge evt-quar">${escapeHtml(outcome)}</span>`;
             return `
               <div class="signal-row">
                 <div class="signal-header">
@@ -1372,12 +1417,14 @@ export async function createApiServer(storeOverride?: Store) {
                   <span style="margin-left:8px">×${s.occurrences} sessions</span>
                   <span style="margin-left:8px; color:#94a3b8">confidence ${s.confidence}</span>
                   <span style="margin-left:8px; color:#94a3b8">effort: ${escapeHtml(s.effort_estimate ?? "?")}</span>
+                  <span style="margin-left:8px">${outcomeBadge}</span>
                 </div>
                 ${s.proposed_name_hint ? `<div class="signal-name">name hint: <code>${escapeHtml(s.proposed_name_hint)}</code></div>` : ""}
                 ${s.proposed_trigger ? `<div class="signal-trigger"><em>${escapeHtml(s.proposed_trigger)}</em></div>` : ""}
                 ${seq ? `<div class="signal-evidence">sequence: <code>${escapeHtml(seq)}</code></div>` : ""}
                 ${files ? `<div class="signal-evidence">file(s): <code>${escapeHtml(files)}</code></div>` : ""}
                 ${ssn.length > 0 ? `<div class="signal-evidence" style="color:#94a3b8; font-size:0.78rem">sessions: ${escapeHtml(ssn.slice(0, 3).join(", "))}${ssn.length > 3 ? ` (+${ssn.length - 3} more)` : ""}</div>` : ""}
+                ${s.outcome_reason ? `<div class="signal-evidence" style="color:#fca5a5; font-size:0.84rem">LLM verdict: ${escapeHtml(s.outcome_reason)}</div>` : ""}
               </div>
             `;
           }).join("")}
@@ -1386,6 +1433,32 @@ export async function createApiServer(storeOverride?: Store) {
       reply.type("text/html").send(html);
     } catch (e) {
       reply.type("text/html").send(`<div class="error">Failed to load signals: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // v0.28.0-β — POST handler: triggers LLM filer + returns inline summary fragment.
+  app.post("/dashboard/spotter/runs/:run_id/llm-file", async (request, reply) => {
+    try {
+      const { run_id } = request.params as { run_id: string };
+      const { runSpotterLlmFiler } = await import("./skills/spotter/llm_filer.js");
+      const result = await runSpotterLlmFiler({ run_id });
+      const errorsHtml = result.errors.length > 0
+        ? `<div style="color:#fca5a5; margin-top:6px">Errors: ${result.errors.map(e => escapeHtml(e)).join("; ")}</div>`
+        : "";
+      reply.type("text/html").send(`
+        <div class="spotter-result">
+          <p><strong>LLM filer complete</strong> — ${result.signals_processed} signal${result.signals_processed === 1 ? "" : "s"} classified · <strong>${result.candidates_filed}</strong> candidate${result.candidates_filed === 1 ? "" : "s"} filed · ${result.llm_duration_ms}ms</p>
+          <div style="margin-top:6px">
+            ${Object.entries(result.by_outcome)
+              .filter(([_, n]) => n > 0)
+              .map(([t, n]) => `<span class="evt-badge evt-info" style="margin-right:6px">${escapeHtml(t)} ×${n}</span>`)
+              .join("")}
+          </div>
+          ${errorsHtml}
+        </div>
+      `);
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">LLM filer failed: ${escapeHtml((e as Error).message)}</div>`);
     }
   });
 

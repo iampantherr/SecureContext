@@ -1,6 +1,6 @@
 {
   "name": "zc-ctx",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Secure memory + persistent context + skill-admission gate for Claude Code. HMAC-chained tool_calls + outcomes, per-agent HKDF subkey isolation, Postgres RLS, work-stealing task queue, MemGPT-style persistent memory, Agent Notebook Model (Read→Summary redirect), and v0.26.0+ Anthropic-style filesystem skills with AST-based admission scanning, HMAC tamper detection, chained audit log, and marketplace bundled-script support. 30+ MCP tools. MIT license.",
   "type": "mcp",
   "mcp": {
