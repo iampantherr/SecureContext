@@ -20,6 +20,7 @@ inline AST scan; if that's unavailable, falls back to lint-skill.py's
 checks plus a local AST scan via the bundled py_ast_walker (if findable).
 """
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -27,6 +28,13 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Force UTF-8 stdout on Windows so unicode marker chars don't crash cp1252.
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except AttributeError:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 
 def find_py_ast_walker() -> Path | None:

@@ -31,6 +31,7 @@
 
 import type { MutationContext, MutationResult, MutationCandidate, Skill } from "./types.js";
 import { computeSkillBodyHmac } from "./loader.js";
+import { ANTHROPIC_SKILL_STANDARD } from "./anthropic_standard.js";
 
 /** Pluggable mutator interface — every impl satisfies this. */
 export interface Mutator {
@@ -138,6 +139,30 @@ export function buildProposerPrompt(ctx: MutationContext): string {
       ].join("\n")
     : "";
 
+  // v0.30.0 — Inject the Anthropic skill-design standard so candidates
+  // respect the four invariants, the script-writing rules, the scope
+  // matrix, and the small-composable-skills principle. Single source of
+  // truth lives in anthropic_standard.ts — both the mutator and the
+  // spotter β LLM filer pull from there.
+  const standardSection = [
+    "",
+    "## MANDATORY: the Anthropic skill-design standard",
+    "",
+    ANTHROPIC_SKILL_STANDARD,
+    "",
+    "Apply this standard to every candidate you propose:",
+    "- Each candidate must respect the four invariants",
+    "- Each candidate's body must NOT introduce hardcoded project specifics",
+    "  unless the parent skill is already project-scoped",
+    "- If the failure traces point at a missing bundled-script, your candidate",
+    "  should describe the script (you can't modify scripts in this proposal —",
+    "  body only — but a candidate that says 'run scripts/foo.py for X' is",
+    "  strictly better than one that inlines Python prose into the body)",
+    "- If the procedure has sprawled past 7-8 steps, consider proposing a",
+    "  DECOMPOSITION (one candidate may legitimately say 'this should be",
+    "  split into N smaller skills'; explain which in the rationale)",
+  ].join("\n");
+
   return [
     "You are improving a skill that has been showing recent failures.",
     "Propose 5 alternate skill bodies that would address the failure traces while still passing the fixtures.",
@@ -147,12 +172,23 @@ export function buildProposerPrompt(ctx: MutationContext): string {
     ctx.parent.body,
     "```",
     "",
+    "## Parent skill frontmatter (for context — DO NOT modify):",
+    JSON.stringify({
+      name:             ctx.parent.frontmatter.name,
+      description:      ctx.parent.frontmatter.description,
+      version:          ctx.parent.frontmatter.version,
+      scope:            ctx.parent.frontmatter.scope,
+      intended_roles:   ctx.parent.frontmatter.intended_roles,
+      tags:             ctx.parent.frontmatter.tags,
+    }, null, 2),
+    "",
     "## Recent failure traces:",
     failures.length > 0 ? failures.map((f, i) => `${i + 1}. ${f}`).join("\n") : "(none)",
     "",
     "## Fixtures the candidate must continue to pass:",
     fxSnippet || "(none)",
     exemplarSection,
+    standardSection,
     "",
     "## Acceptance criteria:",
     JSON.stringify(ctx.parent.frontmatter.acceptance_criteria ?? {}, null, 2),
@@ -169,6 +205,7 @@ export function buildProposerPrompt(ctx: MutationContext): string {
     "- Do NOT include the frontmatter (--- ... ---) — only the body markdown.",
     "- Generate exactly 5 candidates.",
     "- Optimize for clarity, robustness against the failure-traces, and the acceptance criteria.",
+    "- Respect the Anthropic skill-design standard above.",
     exemplars.length > 0 ? "- Where applicable, codify the patterns shown in the operator exemplars." : "",
   ].filter((s) => s !== "").join("\n");
 }

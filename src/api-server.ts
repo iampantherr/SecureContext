@@ -1299,6 +1299,22 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.30.0 — expose the v0.29.0 Anthropic skill-design standard so external
+  // consumers (e.g. A2A_dispatcher's sync-standard-from-securecontext.mjs)
+  // can pull it without needing a checkout of this repo.
+  app.get("/api/v1/skills/standard", async (_request, reply) => {
+    try {
+      const { ANTHROPIC_SKILL_STANDARD } = await import("./skills/anthropic_standard.js");
+      reply.type("application/json").send({
+        version:  "v0.29.0",
+        length:   ANTHROPIC_SKILL_STANDARD.length,
+        standard: ANTHROPIC_SKILL_STANDARD,
+      });
+    } catch (e) {
+      reply.status(500).type("application/json").send({ error: (e as Error).message });
+    }
+  });
+
   // v0.28.0-α — Signals from one run.
   app.get("/api/v1/skills/spotter/runs/:run_id", async (request, reply) => {
     try {
@@ -1311,25 +1327,38 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
-  // v0.28.0-β — Run the LLM filer on a specific spotter run. Spawns the
-  // claude CLI subprocess with sonnet-4-6, applies the four Anthropic
-  // skill-quality gates to each observed signal, files matching ones as
-  // skill_candidates_pg rows with status='ready' (operator approves to
-  // trigger the existing mutator-generated body → admission flow).
+  // v0.28.0-β — Run the LLM filer on a specific spotter run.
+  // v0.30.0 — REFACTORED: enqueues a skill-spotter-filer task into the
+  // mutator pool. A terminal Claude CLI agent (Pro-plan auth) claims it,
+  // applies the four Anthropic skill-quality gates to each observed signal,
+  // stores decisions in the mutation_results side-channel, and broadcasts
+  // a STATUS pointer. The β filer then writes filed_candidate decisions to
+  // skill_candidates_pg with status='ready'.
   //
-  // Cost: ~$0.15 per run with the operator's Pro plan. Time: ~30-90s.
+  // Cost: $0 (Pro plan). Time: ≤ timeout_ms (default 10 min).
   //
   // POST /api/v1/skills/spotter/runs/:run_id/llm-file
-  //   [?model=claude-sonnet-4-6] [?timeout_ms=300000]
+  //   [?project_path=...] [?agent_role=mutator] [?timeout_ms=600000]
+  // project_path falls back to ZC_SPOTTER_DEFAULT_PROJECT_PATH if unset.
   app.post("/api/v1/skills/spotter/runs/:run_id/llm-file", async (request, reply) => {
     try {
       const { run_id } = request.params as { run_id: string };
-      const { model, timeout_ms } = request.query as Record<string, unknown>;
+      const q = request.query as Record<string, unknown>;
+      const projectPath = (typeof q.project_path === "string" && q.project_path.trim())
+        ? q.project_path
+        : process.env.ZC_SPOTTER_DEFAULT_PROJECT_PATH;
+      if (!projectPath) {
+        reply.status(400).type("application/json").send({
+          error: "project_path is required (query param or ZC_SPOTTER_DEFAULT_PROJECT_PATH env var) — used to route the queue task to a terminal mutator agent",
+        });
+        return;
+      }
       const { runSpotterLlmFiler } = await import("./skills/spotter/llm_filer.js");
       const result = await runSpotterLlmFiler({
         run_id,
-        model:      typeof model === "string" && model.trim() ? model : undefined,
-        timeout_ms: timeout_ms ? Math.max(60_000, Math.min(900_000, parseInt(String(timeout_ms), 10) || 300_000)) : undefined,
+        project_path: projectPath,
+        agent_role:   typeof q.agent_role === "string" && q.agent_role.trim() ? q.agent_role : undefined,
+        timeout_ms:   q.timeout_ms ? Math.max(60_000, Math.min(1_800_000, parseInt(String(q.timeout_ms), 10) || 600_000)) : undefined,
       });
       reply.type("application/json").send(result);
     } catch (e) {
@@ -1437,11 +1466,21 @@ export async function createApiServer(storeOverride?: Store) {
   });
 
   // v0.28.0-β — POST handler: triggers LLM filer + returns inline summary fragment.
+  // v0.30.0 — uses terminal-agent queue pattern. project_path comes from
+  // ZC_SPOTTER_DEFAULT_PROJECT_PATH or the ?project_path query parameter.
   app.post("/dashboard/spotter/runs/:run_id/llm-file", async (request, reply) => {
     try {
       const { run_id } = request.params as { run_id: string };
+      const q = request.query as Record<string, unknown>;
+      const projectPath = (typeof q.project_path === "string" && q.project_path.trim())
+        ? q.project_path
+        : process.env.ZC_SPOTTER_DEFAULT_PROJECT_PATH;
+      if (!projectPath) {
+        reply.type("text/html").send(`<div class="error">LLM filer failed: project_path is required. Set ZC_SPOTTER_DEFAULT_PROJECT_PATH on sc-api or pass <code>?project_path=...</code>.</div>`);
+        return;
+      }
       const { runSpotterLlmFiler } = await import("./skills/spotter/llm_filer.js");
-      const result = await runSpotterLlmFiler({ run_id });
+      const result = await runSpotterLlmFiler({ run_id, project_path: projectPath });
       const errorsHtml = result.errors.length > 0
         ? `<div style="color:#fca5a5; margin-top:6px">Errors: ${result.errors.map(e => escapeHtml(e)).join("; ")}</div>`
         : "";

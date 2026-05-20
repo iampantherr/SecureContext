@@ -159,7 +159,15 @@ export class CliClaudeMutator implements Mutator {
     const sinceId = await this.broadcastSource.currentMaxId(this.projectPath);
 
     // 3. Enqueue the task. The mutator agent's prompt knows to claim
-    //    role='mutator' tasks; it parses the payload and builds a prompt.
+    //    role='mutator-*' tasks; it parses the payload and builds a prompt.
+    //
+    // v0.30.0 — the Anthropic skill-design standard is now baked into the
+    // mutator-* deepPrompt at spawn time (via A2A_dispatcher's augment-role-
+    // prompt.mjs Lever #5). No per-task bridge needed — the agent already
+    // knows the standard from its system prompt. We still call
+    // buildProposerPrompt(ctx) above for the secret scan (it generates the
+    // exact text we WOULD have sent if there were no agent in the loop).
+    void promptSnapshot;  // referenced only for the secret scan
     const inserted = await this.enqueueFn({
       taskId: mutationId,
       projectPath: this.projectPath,
@@ -199,6 +207,11 @@ export class CliClaudeMutator implements Mutator {
       "You are processing a SKILL MUTATION request.",
       "Generate 5 candidate skill bodies that fix the failure patterns.",
       "Each candidate is a FULL replacement for the parent body (markdown only — NO frontmatter).",
+      "",
+      "v0.30.0 — your system prompt already includes the Anthropic v0.29.0 skill-design",
+      "standard (baked in at spawn time by A2A_dispatcher's augment-role-prompt.mjs).",
+      "Every candidate you generate MUST respect that standard — the admission gate and",
+      "replay engine will reject candidates that violate it.",
       "",
       "STEP 1 — persist via the side-channel (option-b architecture):",
       `  zc_record_mutation_result({`,
