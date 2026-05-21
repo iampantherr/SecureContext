@@ -48,43 +48,86 @@ table holds the answer.
 
 ---
 
-## 1. AUTHORING — operator writes a new skill
+## 1. AUTHORING — three operator paths, one admission gate
+
+The operator has THREE ways to create a skill. All three converge on the same
+admission gate so the security guarantees (HMAC + AST + chained audit log) hold
+regardless of how the skill was authored.
 
 ```
-                    operator
-                       │
-                       │ (a) write SKILL.md by hand
-                       │     under ~/.claude/skills/<name>/
-                       │
-                       │     OR
-                       │
-                       │ (b) call the writing-skills meta-skill:
-                       │       /skill writing-skills
-                       │       → scaffold-skill.py generates template
-                       │       → lint-skill.py verifies 4 invariants
-                       │       → preview-admission.py dry-runs gate
-                       ▼
-                  ~/.claude/skills/<name>/
-                       │
-                       │   POST /dashboard/skills/import   (or auto on sc-api boot)
-                       ▼
-              filesystem_skill_import.ts
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-   parseFsSkill    body_hmac     script AST scan
-   (YAML+body)    SHA-256        py_ast_walker.py + acorn
-        │              │              │
-        ▼              ▼              ▼
-   pass?           pass?         pass?
-        │              │              │
-        ├──no──► QUARANTINE atomic-move to ~/.claude/skills.quarantine/
-        │       skill_admission_log_pg INSERT (kind=admit, status=quarantined)
-        │       AUDIT BANNER on dashboard
-        ▼
-   PG INSERT skills_pg
-   PG INSERT skill_admission_log_pg (status=admitted, prev_hash chained)
-   PG INSERT skill_security_scans_pg (per-script HMAC + scan result)
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │  PATH A — Dashboard "+ New skill" form (v0.25.0)                     │
+   │     operator clicks button on /dashboard, fills name/version/scope/  │
+   │     description/intended_roles/body in HTMX form                     │
+   │     POST /dashboard/skills/new                                       │
+   │     ✓ no shell / no filesystem access required                       │
+   │     ✗ body-only — no L3 bundled scripts (single textarea)            │
+   │     ✗ no references/ folder                                          │
+   │     → admitted skill marked as 👤 custom                              │
+   │     best for: quick body-only skills (text instructions only)        │
+   └────────────────────────────────┬─────────────────────────────────────┘
+                                    │
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │  PATH B — Filesystem (Anthropic-style, full L3 leverage)             │
+   │     operator writes by hand under                                     │
+   │       ~/.claude/skills/<name>/SKILL.md       (L2 body)               │
+   │       ~/.claude/skills/<name>/scripts/*.py    (L3 bundled scripts)   │
+   │       ~/.claude/skills/<name>/references/*.md (on-demand refs)       │
+   │     POST /dashboard/skills/import   (or auto on sc-api boot)         │
+   │     ✓ full L3 leverage (bundled scripts get HMAC + AST scan)         │
+   │     ✓ supports references/                                            │
+   │     ✗ requires shell / file access                                    │
+   │     best for: production skills with bundled scripts                  │
+   └────────────────────────────────┬─────────────────────────────────────┘
+                                    │
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │  PATH C — Agent uses writing-skills meta-skill (delegated authoring) │
+   │     operator types in any terminal agent:                             │
+   │       "Write a skill for X" / "Scaffold skill Y"                     │
+   │     agent calls zc_skill_show({name:'writing-skills'})               │
+   │       → loads four-invariant checklist + scope matrix + script rules │
+   │     agent runs bundled tools from writing-skills/scripts/:           │
+   │       scaffold-skill.py    (generates SKILL.md + scripts/ template)  │
+   │       lint-skill.py        (verifies 4 invariants)                   │
+   │       preview-admission.py (dry-runs the admission gate)             │
+   │     operator reviews diff, commits to disk → PATH B re-import        │
+   │     ✓ guided by the meta-skill's procedural checklist                │
+   │     ✓ enforces the v0.29.0 standard automatically                    │
+   │     best for: when you want the agent to do the work + sanity-check  │
+   │                                                                       │
+   │     NOTE: this is the SAME meta-skill v0.30.1 mutators consult before │
+   │           generating candidates (see §4). One skill, two consumers.   │
+   └────────────────────────────────┬─────────────────────────────────────┘
+                                    │
+                                    ▼
+                      ┌─────────────────────────┐
+                      │   THE ADMISSION GATE    │
+                      │   (one funnel for all   │
+                      │    three paths above)   │
+                      └────────────┬────────────┘
+                                   │
+   filesystem_skill_import.ts (PATH B) | storage_dual.upsertSkill (PATH A)
+                                   │
+        ┌──────────────────────────┼──────────────────────────┐
+        │                          │                          │
+   parseFsSkill                body_hmac                  script AST scan
+   (YAML+body)                 HMAC-SHA256                py_ast_walker.py
+   lint-skill.py rules         "script:" || body          + acorn (for .js)
+        │                          │                          │
+        ▼                          ▼                          ▼
+   PASS or REJECT       PASS (always)        PASS or QUARANTINE
+        │                          │                          │
+        ├─ reject (PATH A: error)  │                          ├─ violation:
+        ├─ quarantine (PATH B):    │                          │   eval(), exec(),
+        │     atomic-move to       │                          │   shell=True,
+        │     ~/.claude/skills.quarantine/                    │   pickle, yaml
+        │     skill_admission_log_pg INSERT                   │   without Loader
+        │     (kind=admit, status=quarantined)                │
+        │     dashboard AUDIT BANNER                          │
+        ▼                                                     ▼
+   PG INSERT skills_pg                       PG INSERT skill_security_scans_pg
+   PG INSERT skill_admission_log_pg          (one row per script, with HMAC)
+   (status=admitted, prev_hash chained)
         │
         ▼
    broadcast STATUS state='skill-admitted'
@@ -93,6 +136,19 @@ table holds the answer.
    AGENT'S "## YOUR SKILLS" block updated on next spawn
    (via augment-role-prompt.mjs → /api/v1/skills/by-role?role=<role>)
 ```
+
+### Comparison table — which authoring path fits which job?
+
+| Need | Path A (dashboard) | Path B (FS) | Path C (agent) |
+|---|---|---|---|
+| Body-only skill (text instructions) | ✓ best | ✓ works | ✓ works |
+| Bundled scripts at L3 | ✗ | ✓ | ✓ (via agent) |
+| references/ folder | ✗ | ✓ | ✓ |
+| No shell access | ✓ | ✗ | ✗ (agent needs it) |
+| Guided by meta-skill checklist | ✗ | ✗ | ✓ |
+| Operator-typed by hand | ✓ | ✓ | partial |
+| Goes through admission gate | ✓ | ✓ | ✓ |
+| Survives HMAC tamper detection | ✓ | ✓ | ✓ |
 
 ---
 
