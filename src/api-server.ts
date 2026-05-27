@@ -2241,12 +2241,27 @@ export async function createApiServer(storeOverride?: Store) {
   });
 
   // ─── v0.25.0 — operator create-skill flow ─────────────────────────────
+  // v0.30.2 — fixed two gaps:
+  //   (a) admission was NOT logged to skill_admission_log_pg for PATH A. Now we
+  //       call recordAdmissionEvent after a successful upsertSkill so the
+  //       HMAC-chained audit trail has parity with the filesystem-import path.
+  //   (b) scope was global-only in the form. Now the form enumerates known
+  //       projects (project_paths_pg + agents.json) so operators can author
+  //       project-scoped skills (scope='project:<hash>') from the dashboard.
+  //
   // GET /dashboard/skills/new-form  → renders the form
-  // POST /dashboard/skills/new       → creates skill (gates run via storage_dual)
+  // POST /dashboard/skills/new       → creates skill (gates + chain-log)
   app.get("/dashboard/skills/new-form", async (_request, reply) => {
-    const { renderNewSkillForm } = await import("./dashboard/render.js");
+    const { renderNewSkillForm, loadProjectNameMap } = await import("./dashboard/render.js");
     const { ROLES_CATALOG } = await import("./skills/roles_catalog.js");
-    reply.type("text/html").send(renderNewSkillForm(ROLES_CATALOG.map((r) => r.name)));
+    // Enumerate known projects so the form can render scope options.
+    const nameMap = await loadProjectNameMap();
+    const projects = Array.from(nameMap.entries())
+      .map(([hash, name]) => ({ hash, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    reply.type("text/html").send(
+      renderNewSkillForm(ROLES_CATALOG.map((r) => r.name), projects),
+    );
   });
 
   app.post("/dashboard/skills/new", async (request, reply) => {
@@ -2269,15 +2284,25 @@ export async function createApiServer(storeOverride?: Store) {
       );
       return;
     }
+    // v0.30.2 — accept scope='global' OR scope='project:<hex>'. buildSkill
+    // re-validates via the same regex (loader.ts:213); rejecting bad shapes
+    // here gives a friendlier error than the lint-gate's deep diagnostic.
+    if (scope !== "global" && !/^project:[a-f0-9]{8,}$/.test(scope)) {
+      reply.type("text/html").send(
+        `<div class="error">❌ Invalid scope '${escapeHtml(scope)}' — must be 'global' or 'project:&lt;hex&gt;'.</div>`,
+      );
+      return;
+    }
     try {
       const { buildSkill } = await import("./skills/loader.js");
       const { upsertSkill } = await import("./skills/storage_dual.js");
+      const { recordAdmissionEvent } = await import("./skills/admission_log.js");
       const { DatabaseSync } = await import("node:sqlite");
       const skill = await buildSkill(
         {
           name,
           version,
-          scope: scope as "global",
+          scope: scope as import("./skills/types.js").SkillScope,
           description,
           intended_roles: intendedRoles.length > 0 ? intendedRoles : undefined,
           tags: [],  // empty tags → 👤 custom badge
@@ -2291,8 +2316,29 @@ export async function createApiServer(storeOverride?: Store) {
       } finally {
         memDb.close();
       }
+      // v0.30.2 — chain-log the admission so PATH A has audit-trail parity
+      // with PATH B (filesystem). Best-effort: an audit-log failure does NOT
+      // roll back the skill creation (the skills_pg row is canonical truth).
+      try {
+        await recordAdmissionEvent({
+          event: "admitted",
+          skill_name: skill.frontmatter.name,
+          skill_version: skill.frontmatter.version,
+          skill_scope: skill.frontmatter.scope,
+          skill_dir: "operator-created (dashboard PATH A)",
+          body_hmac: skill.body_hmac,
+          script_count: 0,  // body-only authoring — no L3 scripts via this path
+          quarantined: false,
+          reason: null,
+        });
+      } catch (e) {
+        // Surface to UI but don't fail the request — skill is already in PG.
+        return reply.type("text/html").send(
+          `<div class="ok">✓ Skill <code>${escapeHtml(skill.skill_id)}</code> created (but admission-log append failed: ${escapeHtml((e as Error).message)} — investigate)</div>`,
+        );
+      }
       reply.type("text/html").send(
-        `<div class="ok">✓ Skill <code>${escapeHtml(skill.skill_id)}</code> created. Reload to see it in the Active skills list.</div>`,
+        `<div class="ok">✓ Skill <code>${escapeHtml(skill.skill_id)}</code> created. Audit-log appended. Reload to see it in the Active skills list.</div>`,
       );
     } catch (e) {
       // Lint or scan rejection — surface the message

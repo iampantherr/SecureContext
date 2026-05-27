@@ -1994,9 +1994,18 @@ export interface SecurityScanRow {
 }
 
 // v0.25.0 — Operator-create-skill form (rendered inline, posts to /dashboard/skills/new)
-export function renderNewSkillForm(roles: string[]): string {
+export function renderNewSkillForm(
+  roles: string[],
+  projects: Array<{ hash: string; name: string }> = [],
+): string {
   const roleOptions = roles.slice(0, 80).map((r) =>
     `<label class="role-checkbox"><input type="checkbox" name="intended_roles" value="${escapeHtml(r)}"> ${escapeHtml(r)}</label>`
+  ).join("");
+  // v0.30.2 — enumerate known projects so the operator can author a
+  // project-scoped skill from the dashboard (was global-only in v0.25.0).
+  // Values use the canonical `project:<hash>` form that loader.ts validates.
+  const projectOptions = projects.slice(0, 60).map((p) =>
+    `<option value="project:${escapeHtml(p.hash)}">project: ${escapeHtml(p.name)} (${escapeHtml(p.hash.slice(0, 8))}…)</option>`
   ).join("");
   return `
     <form class="new-skill-form" hx-post="/dashboard/skills/new" hx-target="#new-skill-zone" hx-swap="innerHTML">
@@ -2004,7 +2013,8 @@ export function renderNewSkillForm(roles: string[]): string {
         Create a new operator-authored skill. Body must be ≥100 chars. Lint
         gates apply: needs <code>## Goal</code> + <code>## Steps</code>
         sections to avoid warnings (recommended) and proper frontmatter.
-        Skill lands as <strong>👤 custom</strong>.
+        Skill lands as <strong>👤 custom</strong> and the admission is
+        appended to the HMAC-chained <code>skill_admission_log_pg</code>.
       </div>
       <label>
         <strong>name</strong> <small>(kebab-case, no spaces)</small>
@@ -2016,9 +2026,10 @@ export function renderNewSkillForm(roles: string[]): string {
           <input type="text" name="version" value="1.0.0" pattern="\\d+(\\.\\d+){0,2}" required>
         </label>
         <label>
-          <strong>scope</strong>
+          <strong>scope</strong> <small>(global = visible to every project; project = scoped to one)</small>
           <select name="scope">
             <option value="global" selected>global</option>
+            ${projectOptions}
           </select>
         </label>
       </div>
