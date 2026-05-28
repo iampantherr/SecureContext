@@ -2316,6 +2316,80 @@ export async function createApiServer(storeOverride?: Store) {
       } finally {
         memDb.close();
       }
+      // v0.30.4 — PATH A symmetry with PATH B: also write the skill body to
+      // ~/.claude/skills/<name>/SKILL.md (or <project>/.claude/skills/<name>/
+      // for project-scoped). Without this, dashboard-authored skills are
+      // invisible to Claude Code's native /skill autocomplete (which scans
+      // the filesystem) and the wiki-fed propose_skill pipeline can't surface
+      // them either. Best-effort — a write failure does NOT roll back the
+      // skill creation (PG is canonical truth) but surfaces in the UI.
+      let writtenPath: string | null = null;
+      let writeWarning: string | null = null;
+      try {
+        const { writeFileSync, mkdirSync, existsSync } = await import("node:fs");
+        const { dirname, join: joinPath } = await import("node:path");
+        const { homedir } = await import("node:os");
+        // Resolve target dir per scope.
+        // global → ~/.claude/skills/<name>/
+        // project:<hash> → look up project_path from project_paths_pg, write
+        //                  to <project_path>/.claude/skills/<name>/.
+        let skillDir: string;
+        if (skill.frontmatter.scope === "global") {
+          skillDir = joinPath(homedir(), ".claude", "skills", skill.frontmatter.name);
+        } else {
+          const projectHash = String(skill.frontmatter.scope).replace(/^project:/, "");
+          const { withClient: wc2 } = await import("./pg_pool.js");
+          const pp = await wc2(async (c) => {
+            const r = await c.query<{ project_path: string }>(
+              `SELECT project_path FROM project_paths_pg WHERE project_hash = $1 LIMIT 1`,
+              [projectHash],
+            );
+            return r.rows[0]?.project_path ?? null;
+          });
+          if (!pp) {
+            writeWarning = `project_hash ${projectHash} not in project_paths_pg — cannot resolve a path. Skill is in PG but no SKILL.md was written. Re-run after the project has emitted at least one tool call.`;
+            // fall through to admission log + success message with warning
+          } else {
+            skillDir = joinPath(pp, ".claude", "skills", skill.frontmatter.name);
+          }
+        }
+        if (!writeWarning) {
+          // Refuse to overwrite if a SKILL.md already exists at this path —
+          // operator may have authored via PATH B/C and we'd clobber it.
+          const target = joinPath(skillDir!, "SKILL.md");
+          if (existsSync(target)) {
+            writeWarning = `A SKILL.md already exists at ${target} — refusing to overwrite. The PG row is created; edit the existing file by hand if you want them in sync.`;
+          } else {
+            mkdirSync(dirname(target), { recursive: true });
+            // Serialize frontmatter + body. Compact frontmatter (one key per
+            // line, inline arrays) — same shape the auto-importer parses.
+            const fm = skill.frontmatter;
+            const fmLines: string[] = ["---"];
+            fmLines.push(`name: ${fm.name}`);
+            if (fm.description) {
+              fmLines.push(`description: |`);
+              for (const line of String(fm.description).split("\n")) {
+                fmLines.push(`  ${line}`);
+              }
+            }
+            fmLines.push(`version: ${fm.version}`);
+            fmLines.push(`scope: ${fm.scope}`);
+            if (fm.intended_roles?.length) {
+              fmLines.push(`intended_roles: [${fm.intended_roles.map((r) => JSON.stringify(r)).join(", ")}]`);
+            }
+            if (fm.tags?.length) {
+              fmLines.push(`tags: [${fm.tags.map((t) => JSON.stringify(t)).join(", ")}]`);
+            }
+            fmLines.push(`---`);
+            fmLines.push("");
+            const content = fmLines.join("\n") + skill.body;
+            writeFileSync(target, content, "utf-8");
+            writtenPath = target;
+          }
+        }
+      } catch (e) {
+        writeWarning = `filesystem write failed: ${(e as Error).message}`;
+      }
       // v0.30.2 — chain-log the admission so PATH A has audit-trail parity
       // with PATH B (filesystem). Best-effort: an audit-log failure does NOT
       // roll back the skill creation (the skills_pg row is canonical truth).
@@ -2325,11 +2399,11 @@ export async function createApiServer(storeOverride?: Store) {
           skill_name: skill.frontmatter.name,
           skill_version: skill.frontmatter.version,
           skill_scope: skill.frontmatter.scope,
-          skill_dir: "operator-created (dashboard PATH A)",
+          skill_dir: writtenPath ?? "operator-created (dashboard PATH A, no FS write)",
           body_hmac: skill.body_hmac,
           script_count: 0,  // body-only authoring — no L3 scripts via this path
           quarantined: false,
-          reason: null,
+          reason: writeWarning,
         });
       } catch (e) {
         // Surface to UI but don't fail the request — skill is already in PG.
@@ -2337,8 +2411,13 @@ export async function createApiServer(storeOverride?: Store) {
           `<div class="ok">✓ Skill <code>${escapeHtml(skill.skill_id)}</code> created (but admission-log append failed: ${escapeHtml((e as Error).message)} — investigate)</div>`,
         );
       }
+      const fsLine = writtenPath
+        ? ` Body written to <code>${escapeHtml(writtenPath)}</code>.`
+        : writeWarning
+          ? ` <span style="color:#fca5a5">⚠ FS write: ${escapeHtml(writeWarning)}</span>`
+          : "";
       reply.type("text/html").send(
-        `<div class="ok">✓ Skill <code>${escapeHtml(skill.skill_id)}</code> created. Audit-log appended. Reload to see it in the Active skills list.</div>`,
+        `<div class="ok">✓ Skill <code>${escapeHtml(skill.skill_id)}</code> created. Audit-log appended.${fsLine} Reload to see it in the Active skills list.</div>`,
       );
     } catch (e) {
       // Lint or scan rejection — surface the message
