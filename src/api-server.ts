@@ -2277,6 +2277,14 @@ export async function createApiServer(storeOverride?: Store) {
     const rolesField = body.intended_roles;
     if (Array.isArray(rolesField)) intendedRoles = rolesField.map((s) => String(s));
     else if (typeof rolesField === "string" && rolesField.length > 0) intendedRoles = [rolesField];
+    // v0.30.5 — accept `tags` field. Same shape rules as intended_roles.
+    // Also accepts a comma-separated string for convenience (curl/form clients).
+    let tags: string[] = [];
+    const tagsField = body.tags;
+    if (Array.isArray(tagsField)) tags = tagsField.map((s) => String(s).trim()).filter(Boolean);
+    else if (typeof tagsField === "string" && tagsField.length > 0) {
+      tags = tagsField.split(",").map((s) => s.trim()).filter(Boolean);
+    }
 
     if (!name || !version || !description || !skillBody) {
       reply.type("text/html").send(
@@ -2305,7 +2313,10 @@ export async function createApiServer(storeOverride?: Store) {
           scope: scope as import("./skills/types.js").SkillScope,
           description,
           intended_roles: intendedRoles.length > 0 ? intendedRoles : undefined,
-          tags: [],  // empty tags → 👤 custom badge
+          // v0.30.5 — honor caller-supplied tags. Empty tags still render as
+          // 👤 custom; a `wiki-origin` tag means it came from personal-wiki
+          // (or any other auto-generator) and is queryable for ROI rollup.
+          tags: tags.length > 0 ? tags : [],
         },
         skillBody,
         { source_path: "operator-created" },
