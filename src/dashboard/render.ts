@@ -289,478 +289,403 @@ export function renderDashboardHtml(): string {
 <title>SecureContext Operator Console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    margin: 0; padding: 24px;
-    background: #0e1116; color: #e6e8eb;
-    line-height: 1.5;
+  /* ════════════════════════════════════════════════════════════════
+     SecureContext Operator Console — "Operator's terminal, elevated"
+     Redesign 2026-06-02. Restyles every class in the dashboard to one
+     cohesive security-console design system. Tab classes (tab-active /
+     tab-content-active), data-tab, #badge, and all hx-* attrs preserved.
+     ════════════════════════════════════════════════════════════════ */
+  :root{
+    --bg:#080b11; --bg-2:#0a0e16; --surface:#0e131c; --surface-2:#121a26; --surface-3:#16202e;
+    --border:#1d2634; --border-bright:#2b3850; --hairline:rgba(255,255,255,.045);
+    --text:#e9eef5; --text-dim:#8b99ad; --text-faint:#7a8799;
+    --signal:#2fe6a6; --signal-deep:#0f7d59; --signal-glow:rgba(47,230,166,.30);
+    --info:#5aa2ff; --violet:#a98bff; --warn:#f1b84c; --alert:#ff5d6c;
+    --display:'Chakra Petch',ui-sans-serif,system-ui,sans-serif;
+    --sans:'IBM Plex Sans',ui-sans-serif,system-ui,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
+    --ease:cubic-bezier(.2,.8,.2,1); --ease-out:cubic-bezier(.16,1,.3,1);
+    --fast:.18s; --med:.32s;
   }
-  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid #2a2f37; }
-  h1 { margin: 0; font-size: 1.5rem; font-weight: 600; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.85rem; font-weight: 600; background: #1f2937; color: #94a3b8; }
-  .badge.alert { background: #7f1d1d; color: #fecaca; animation: pulse 1.5s ease-in-out infinite; }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
-  main { max-width: 1100px; margin: 0 auto; }
-  .panel { background: #161b22; border: 1px solid #2a2f37; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-  .panel h2 { margin: 0 0 12px 0; font-size: 1.1rem; font-weight: 600; color: #e6e8eb; }
-  .empty { color: #94a3b8; font-style: italic; }
-  .result {
-    border: 1px solid #2a2f37; border-radius: 6px; padding: 12px; margin-bottom: 12px; background: #0e1116;
+  *{box-sizing:border-box;}
+  body{
+    font-family:var(--sans); margin:0; padding:0; background:var(--bg); color:var(--text);
+    line-height:1.5; font-size:14px; -webkit-font-smoothing:antialiased; letter-spacing:.005em;
+    position:relative; min-height:100vh;
   }
-  .result-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-  .result-id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9rem; color: #38bdf8; }
-  .skill-id { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85rem; color: #a78bfa; }
-  .project-name { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #064e3b; color: #d1fae5; font-weight: 600; font-size: 0.85rem; cursor: help; }
-  .project-name.unresolved { background: #1f2937; color: #94a3b8; font-weight: 400; }
-  .meta { color: #94a3b8; font-size: 0.85rem; margin-bottom: 8px; }
-  .meta code { background: #1f2937; padding: 1px 4px; border-radius: 3px; }
-  details { margin-bottom: 6px; }
-  summary { cursor: pointer; padding: 6px 0; font-weight: 500; user-select: none; }
-  summary:hover { color: #38bdf8; }
-  summary .score { color: #4ade80; font-family: ui-monospace, monospace; font-size: 0.85rem; margin-left: 8px; }
-  .candidate-body {
-    background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 10px;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.82rem;
-    white-space: pre-wrap; word-wrap: break-word;
-    max-height: 300px; overflow: auto;
+  body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:radial-gradient(900px 420px at 18% -8%,rgba(47,230,166,.10),transparent 60%),radial-gradient(700px 500px at 100% 0%,rgba(90,162,255,.06),transparent 55%);}
+  body::after{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.03;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
+  body > *{position:relative;z-index:1;}
+
+  /* top signature accent */
+  .topline{height:2px;width:100%;background:linear-gradient(90deg,transparent,var(--signal) 18%,var(--info) 50%,var(--violet) 78%,transparent);opacity:.85;box-shadow:0 0 18px var(--signal-glow);}
+
+  /* ── masthead ── */
+  header{display:flex;align-items:center;gap:18px;padding:22px 32px 18px;max-width:1180px;margin:0 auto;animation:rise .6s var(--ease-out) both;}
+  .brand{display:flex;align-items:center;gap:13px;}
+  .mark{width:38px;height:38px;flex:none;filter:drop-shadow(0 0 10px var(--signal-glow));}
+  .wordmark{display:flex;flex-direction:column;line-height:1;}
+  .wordmark .eyebrow{font-family:var(--mono);font-size:.62rem;letter-spacing:.4em;color:var(--text-faint);text-transform:uppercase;margin-bottom:5px;padding-left:2px;}
+  h1{font-family:var(--display);font-weight:600;font-size:1.5rem;margin:0;letter-spacing:.01em;color:var(--text);}
+  h1 b{color:var(--signal);font-weight:700;}
+  .masthead-spacer{flex:1;}
+  .status-cluster{display:flex;align-items:center;gap:16px;}
+  .live{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:.7rem;letter-spacing:.18em;color:var(--text-dim);text-transform:uppercase;}
+  .live-dot{width:8px;height:8px;border-radius:50%;background:var(--signal);position:relative;}
+  .live-dot::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--signal);animation:ping 1.8s var(--ease-out) infinite;}
+  .sys-pills{display:flex;gap:7px;}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:.7rem;padding:5px 10px;border-radius:7px;background:var(--surface);border:1px solid var(--border);color:var(--text-dim);}
+  .pill .dot{width:6px;height:6px;border-radius:50%;}
+  .pill.up .dot{background:var(--signal);box-shadow:0 0 8px var(--signal-glow);}
+  .pill.warn .dot{background:var(--warn);}
+  .pill.down .dot{background:var(--alert);}
+  /* health badge (#badge, populated by pollHealth) */
+  .badge{display:inline-flex;align-items:center;gap:6px;padding:3px 11px;border-radius:20px;font-family:var(--mono);font-size:.74rem;font-weight:500;letter-spacing:.02em;background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border);}
+  .badge.ok{background:rgba(47,230,166,.10);color:var(--signal);border-color:rgba(47,230,166,.28);}
+  .badge.err{background:rgba(255,93,108,.12);color:var(--alert);border-color:rgba(255,93,108,.35);}
+  .badge.alert{background:rgba(255,93,108,.12);color:var(--alert);border-color:rgba(255,93,108,.35);animation:pulse 1.6s var(--ease) infinite;}
+  .badge.dim-badge{background:var(--surface-2);color:var(--text-faint);border-color:var(--border);}
+
+  /* ── tab nav (real classes: tab-active / tab-content-active) ── */
+  .tab-nav{display:flex;gap:4px;max-width:1180px;margin:6px auto 0;padding:0 32px;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100;background:rgba(8,11,17,.78);backdrop-filter:blur(10px);overflow-x:auto;scrollbar-width:none;animation:rise .6s .06s var(--ease-out) both;}
+  .tab-nav::-webkit-scrollbar{display:none;}
+  .tab-button{display:inline-flex;align-items:center;gap:9px;background:transparent;border:0;cursor:pointer;font-family:var(--sans);font-weight:500;font-size:.9rem;color:var(--text-dim);padding:13px 16px 15px;position:relative;white-space:nowrap;flex:none;transition:color var(--fast) var(--ease);}
+  .tab-button svg{width:16px;height:16px;opacity:.8;transition:opacity var(--fast) var(--ease),transform var(--fast) var(--ease);}
+  .tab-button::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;border-radius:2px;background:var(--signal);transform:scaleX(0);transition:transform var(--med) var(--ease);box-shadow:0 0 12px var(--signal-glow);}
+  .tab-button:hover{color:var(--text);}
+  .tab-button:hover svg{opacity:1;transform:translateY(-1px);}
+  .tab-button.tab-active{color:var(--text);}
+  .tab-button.tab-active svg{opacity:1;color:var(--signal);}
+  .tab-button.tab-active::after{transform:scaleX(1);}
+  .tab-content{display:none;}
+  .tab-content.tab-content-active{display:block;animation:swap .34s var(--ease-out);}
+
+  /* ── layout / panels ── */
+  main{max-width:1180px;margin:0 auto;padding:24px 32px 56px;}
+  .panel{background:linear-gradient(180deg,var(--surface),var(--bg-2));border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin-bottom:18px;position:relative;box-shadow:0 1px 0 var(--hairline) inset,0 10px 30px -18px rgba(0,0,0,.8);transition:border-color var(--med) var(--ease);animation:rise .55s var(--ease-out) both;}
+  .panel:hover{border-color:var(--border-bright);}
+  .tab-content-active .panel:nth-of-type(1){animation-delay:.04s}
+  .tab-content-active .panel:nth-of-type(2){animation-delay:.10s}
+  .tab-content-active .panel:nth-of-type(3){animation-delay:.16s}
+  .tab-content-active .panel:nth-of-type(4){animation-delay:.22s}
+  .panel h2{font-family:var(--display);font-weight:600;font-size:1.02rem;letter-spacing:.01em;margin:0 0 14px;color:var(--text);display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+  .panel h2 span{font-family:var(--sans)!important;font-weight:400!important;}
+  .empty,.muted{color:var(--text-faint);font-style:italic;font-size:.9rem;}
+  .dim{color:var(--text-faint);}
+  .mono,.mono.small{font-family:var(--mono);}
+
+  /* result cards / ids */
+  .result{border:1px solid var(--border);border-radius:10px;padding:13px 15px;margin-bottom:12px;background:var(--bg-2);transition:border-color var(--fast) var(--ease);}
+  .result:hover{border-color:var(--border-bright);}
+  .result-header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
+  .result-id{font-family:var(--mono);font-size:.88rem;color:var(--info);}
+  .skill-id{font-family:var(--mono);font-size:.84rem;color:var(--violet);}
+  .project-name{display:inline-block;padding:2px 8px;border-radius:6px;background:rgba(47,230,166,.1);color:#9af0cf;font-weight:500;font-size:.82rem;cursor:help;border:1px solid rgba(47,230,166,.24);}
+  .project-name.unresolved{background:var(--surface-2);color:var(--text-dim);font-weight:400;border-color:var(--border);}
+  .meta{color:var(--text-dim);font-size:.84rem;margin-bottom:8px;}
+  .meta code,.skill-health-banner code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-family:var(--mono);font-size:.85em;}
+  .rationale{color:var(--text-dim);font-style:italic;margin-bottom:6px;padding-left:12px;border-left:2px solid var(--signal);}
+  .tooltip{border-bottom:1px dotted var(--text-faint);cursor:help;position:relative;}
+
+  /* details / summary */
+  details{margin-bottom:8px;}
+  summary{cursor:pointer;padding:8px 0;font-weight:500;user-select:none;color:var(--text);}
+  summary:hover{color:var(--signal);}
+  summary .score{color:var(--signal);font-family:var(--mono);font-size:.84rem;margin-left:8px;}
+
+  /* code/body blocks */
+  .candidate-body,.skill-body-text{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:11px;font-family:var(--mono);font-size:.8rem;white-space:pre-wrap;word-wrap:break-word;max-height:340px;overflow:auto;color:var(--text);line-height:1.55;}
+
+  /* diff view */
+  .diff-summary{font-size:.84rem;color:var(--text-dim);margin:8px 0;}
+  .diff-stat-add{color:var(--signal);font-family:var(--mono);margin-right:8px;}
+  .diff-stat-del{color:var(--alert);font-family:var(--mono);margin-right:8px;}
+  .diff-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .diff-side{background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+  .diff-label{padding:5px 9px;background:var(--surface-3);color:var(--text-dim);font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;}
+  .diff-content{max-height:400px;overflow:auto;font-family:var(--mono);font-size:.78rem;}
+  .diff-row{padding:1px 9px;white-space:pre-wrap;word-wrap:break-word;min-height:1em;}
+  .diff-row.diff-equal{color:#c3ccd9;}
+  .diff-row.diff-add{color:#aef3d8;background:rgba(47,230,166,.1);border-left:2px solid var(--signal);}
+  .diff-row.diff-del{color:#ffb3bb;background:rgba(255,93,108,.1);border-left:2px solid var(--alert);text-decoration:line-through;}
+  .diff-row.diff-blank{background:var(--bg);min-height:1em;}
+  .diff-fallback{display:flex;gap:8px;}.diff-fallback .diff-side{flex:1;}.diff-fallback pre{padding:8px;margin:0;max-height:400px;overflow:auto;font-size:.78rem;}
+  .candidate-tabs{margin-top:8px;}
+  .candidate-tabs>details{margin-bottom:6px;border:1px solid var(--border);border-radius:8px;padding:6px 8px;}
+  .tab-label{font-size:.84rem;color:var(--text-dim);cursor:pointer;padding:2px 4px;}
+  .tab-label:hover{color:var(--signal);}
+
+  /* skill rows */
+  .skill-scope{margin-bottom:16px;}
+  .skill-scope-header{font-family:var(--mono);font-size:.72rem;letter-spacing:.06em;color:var(--text-faint);text-transform:uppercase;margin:4px 0 8px;}
+  .skill-row{background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:13px 15px;margin-bottom:9px;transition:border-color var(--fast) var(--ease),transform var(--fast) var(--ease),background var(--fast) var(--ease);}
+  .skill-row:hover{border-color:var(--border-bright);transform:translateY(-1px);background:var(--surface);}
+  .skill-header{display:flex;justify-content:space-between;align-items:center;gap:12px;}
+  .skill-name{font-family:var(--mono);font-weight:600;font-size:.92rem;color:var(--text);}
+  .skill-meta{color:var(--text-dim);font-size:.82rem;margin-top:6px;}
+  .skill-meta .role-tag{font-family:var(--mono);background:rgba(90,162,255,.1);color:#9ec5ff;padding:1px 7px;border-radius:5px;font-size:.7rem;margin-right:4px;border:1px solid rgba(90,162,255,.22);}
+  .skill-meta .guidance-preview{color:var(--text-dim);font-style:italic;}
+  .skill-actions{display:flex;gap:5px;}
+  .skill-edit-zone{margin-top:8px;}
+  .skill-eff{color:var(--text-dim);font-size:.82rem;cursor:help;border-bottom:1px dotted var(--text-faint);}
+  .skill-eff strong{color:var(--signal);font-family:var(--mono);}
+  .skill-eff-none{color:var(--text-faint);}.skill-eff-none em{font-style:italic;}
+
+  /* source badges */
+  .src-badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:11px;font-family:var(--mono);font-size:.68rem;font-weight:500;margin-left:8px;vertical-align:middle;cursor:help;}
+  .src-marketplace{background:rgba(90,162,255,.12);color:#9ec5ff;border:1px solid rgba(90,162,255,.3);}
+  .src-filesystem{background:rgba(47,230,166,.11);color:#7ff0c6;border:1px solid rgba(47,230,166,.3);}
+  .src-filesystem small{color:#5ed6a4;font-size:.66rem;margin-left:4px;}
+  .src-role-extracted{background:rgba(241,184,76,.12);color:#f6cf85;border:1px solid rgba(241,184,76,.3);}
+  .src-custom{background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border);}
+
+  /* score trend sparkline */
+  .skill-trend{display:inline-flex;align-items:center;gap:5px;vertical-align:middle;}
+  .sparkline{vertical-align:middle;color:var(--text-faint);}
+  .sparkline.trend-up{color:var(--signal);}.sparkline.trend-down{color:var(--alert);}.sparkline.trend-flat{color:var(--text-dim);}
+  .sparkline-label{font-size:.76rem;font-family:var(--mono);}
+  .sparkline-label small{font-size:.68rem;margin-left:3px;}
+  .sparkline-label.trend-up small{color:var(--signal);}.sparkline-label.trend-down small{color:var(--alert);}.sparkline-label.trend-flat small{color:var(--text-dim);}
+  .sparkline-empty{color:var(--text-faint);font-size:.76rem;}
+
+  /* buttons */
+  button{font-family:var(--sans);padding:8px 15px;border-radius:8px;cursor:pointer;font-weight:500;font-size:.88rem;border:1px solid var(--border);background:var(--surface-2);color:var(--text-dim);transition:transform var(--fast) var(--ease),border-color var(--fast) var(--ease),background var(--fast) var(--ease),color var(--fast) var(--ease),box-shadow var(--fast) var(--ease);}
+  button:hover{transform:translateY(-1px);border-color:var(--border-bright);color:var(--text);}
+  .edit-btn,.polish-btn,.runs-btn,.security-btn,.body-btn,.pull-details-btn,.pull-body-btn,.proj-skills-btn,.star-btn{background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border);padding:5px 12px;border-radius:7px;cursor:pointer;font-size:.82rem;transition:transform var(--fast) var(--ease),border-color var(--fast) var(--ease),color var(--fast) var(--ease),background var(--fast) var(--ease);}
+  .edit-btn:hover,.runs-btn:hover,.security-btn:hover,.body-btn:hover,.polish-btn:hover,.pull-details-btn:hover,.pull-body-btn:hover,.proj-skills-btn:hover,.star-btn:hover{transform:translateY(-1px);border-color:var(--border-bright);color:var(--text);background:var(--surface-3);}
+  .link-btn{background:none;border:0;color:var(--info);cursor:pointer;padding:0;font-size:.84rem;}
+  .link-btn:hover{color:#bcd8ff;text-decoration:underline;}
+  .new-skill-btn,button.approve,.approve-btn,.apply-polish-btn{background:linear-gradient(180deg,rgba(47,230,166,.16),rgba(47,230,166,.06));color:var(--signal);border:1px solid rgba(47,230,166,.34);padding:7px 15px;border-radius:8px;cursor:pointer;font-weight:500;}
+  .new-skill-btn:hover,button.approve:hover,.approve-btn:hover,.apply-polish-btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 6px 20px -8px var(--signal-glow);border-color:var(--signal);}
+  button.reject,.reject-btn{background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border);}
+  button.reject:hover,.reject-btn:hover{color:#ff97a1;border-color:rgba(255,93,108,.4);transform:translateY(-1px);}
+  .pull-marketplace-btn{background:rgba(90,162,255,.12);color:#bcd8ff;border:1px solid rgba(90,162,255,.32);padding:8px 16px;border-radius:8px;cursor:pointer;font-weight:500;transition:transform var(--fast) var(--ease),border-color var(--fast) var(--ease),box-shadow var(--fast) var(--ease);}
+  .pull-marketplace-btn:hover:not(:disabled){transform:translateY(-1px);border-color:var(--info);box-shadow:0 6px 20px -8px rgba(90,162,255,.4);}
+  .pull-marketplace-btn:disabled,.apply-polish-btn:disabled{opacity:.55;cursor:progress;transform:none;}
+  .apply-polish-btn-blocked{background:rgba(255,93,108,.12)!important;color:#ff97a1!important;border-color:rgba(255,93,108,.35)!important;}
+  .star-btn{color:var(--warn);}
+  .star-btn.star-on{background:rgba(241,184,76,.14);color:#ffd97a;border-color:rgba(241,184,76,.4);cursor:default;}
+  .new-skill-meta,.market-meta,.runs-meta,.scans-meta,.polish-meta,.proj-skills-meta,.skill-body-meta,.skill-candidate-meta{font-size:.8rem;color:var(--text-faint);}
+
+  /* skill body view */
+  .skill-body-view,.polish-result,.runs-list,.scans-list,.new-skill-form,.skill-edit-form,.pull-details,.market-summary,.proj-skills-table{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px;margin-top:8px;}
+  .skill-body-header,.polish-header,.runs-header,.scans-header,.proj-skills-header,.market-summary-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+  .skill-body-warning{background:rgba(241,184,76,.1);border-left:3px solid var(--warn);padding:8px 12px;margin-top:8px;font-size:.82rem;color:#fbe3a8;border-radius:0 6px 6px 0;}
+
+  /* chain banner */
+  .chain-banner{display:flex;align-items:center;gap:12px;padding:13px 16px;border-radius:10px;margin:8px 0 14px;font-size:.9rem;}
+  .chain-banner.chain-ok{background:linear-gradient(180deg,rgba(47,230,166,.1),rgba(47,230,166,.03));border:1px solid rgba(47,230,166,.3);color:#aef3d8;}
+  .chain-banner.chain-broken{background:rgba(255,93,108,.1);border:1px solid rgba(255,93,108,.34);color:#ffb3bb;}
+  .chain-banner.chain-error{background:rgba(241,184,76,.1);border:1px solid rgba(241,184,76,.3);color:#fbe3a8;}
+  .chain-banner .chain-status{font-family:var(--mono);font-weight:600;letter-spacing:.04em;}
+  .chain-banner .chain-detail{color:inherit;opacity:.85;}
+
+  /* fs quarantine / admission */
+  .fs-quarantine-details,.fs-admission-details,.per-agent-panel,.anti-patterns-panel,.savings-methodology,.skill-edit-form details.fixtures-readonly,.summarizer-breakdown,.trend-panel{margin-top:12px;padding:8px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;}
+  .fs-quarantine-table,.fs-admission-table,.spotter-runs-table,.runs-table,.scans-table,.savings-table,.summarizer-table,.mutations-table,.broadcasts-table,.market-pulls-table,.pull-details-table{width:100%;border-collapse:collapse;font-size:.84rem;}
+  .fs-quarantine-table th,.fs-admission-table th,.spotter-runs-table th,.runs-table th,.scans-table th,.savings-table th,.summarizer-table th,.mutations-table th,.broadcasts-table th,.market-pulls-table th,.pull-details-table th{text-align:left;padding:9px 10px;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint);background:transparent;border-bottom:1px solid var(--border);font-weight:500;}
+  .fs-quarantine-table td,.fs-admission-table td,.spotter-runs-table td,.runs-table td,.scans-table td,.savings-table td,.summarizer-table td,.mutations-table td,.broadcasts-table td,.market-pulls-table td,.pull-details-table td{padding:9px 10px;border-bottom:1px solid var(--hairline);color:var(--text);vertical-align:top;}
+  .broadcasts-table tbody tr,.mutations-table tbody tr,.runs-table tbody tr{transition:background var(--fast) var(--ease);}
+  .broadcasts-table tbody tr:hover,.mutations-table tbody tr:hover,.runs-table tbody tr:hover{background:rgba(47,230,166,.03);}
+  .summarizer-table td.error-msg,.runs-table .mono.small,.scans-table .mono.small,.summarizer-table td.small{font-family:var(--mono);font-size:.78rem;color:var(--text-dim);}
+  .summarizer-table td.error-msg{color:#ffb3bb;max-width:480px;word-break:break-word;}
+
+  /* event / status chips */
+  .evt-badge,.bcast-type,.badge-status,.badge-source,.count,.skill-candidate-status,.skill-candidate-count,.scan-sev-tag{display:inline-flex;align-items:center;font-family:var(--mono);font-size:.7rem;font-weight:500;padding:2px 9px;border-radius:8px;letter-spacing:.02em;}
+  .evt-ok{background:rgba(47,230,166,.12);color:var(--signal);}
+  .evt-quar{background:rgba(255,93,108,.12);color:#ff97a1;}
+  .evt-info{background:rgba(90,162,255,.12);color:#9ec5ff;}
+  .bcast-assign,.bcast-proposed{background:rgba(90,162,255,.13);color:#9ec5ff;}
+  .bcast-status,.bcast-revise,.bcast-dependency{background:rgba(241,184,76,.13);color:#f6cf85;}
+  .bcast-merge{background:rgba(47,230,166,.13);color:var(--signal);}
+  .bcast-reject{background:rgba(255,93,108,.13);color:#ff97a1;}
+  .bcast-launch_role{background:rgba(169,139,255,.14);color:#c9b6ff;}
+  .bcast-retire_role{background:var(--surface-2);color:var(--text-dim);}
+  .score,.badge-status{padding:2px 8px;border-radius:7px;font-family:var(--mono);}
+  .score-high,.badge-status.succeeded,.badge-status.ok,.badge-source.semantic{background:rgba(47,230,166,.12);color:var(--signal);}
+  .score-mid,.badge-status.skipped,.badge-status.fallback_truncation,.badge-source.truncation{background:rgba(241,184,76,.13);color:#f6cf85;}
+  .score-low,.badge-status.failed,.badge-status.error{background:rgba(255,93,108,.12);color:#ff97a1;}
+  .badge-source.ast{background:rgba(90,162,255,.12);color:#9ec5ff;}
+  .badge-source.unknown{background:var(--surface-2);color:var(--text-dim);}
+  .skill-candidate-count{background:rgba(255,93,108,.13);color:#ff97a1;border-radius:11px;}
+  .skill-candidate-status{border-radius:11px;text-transform:uppercase;}
+  .skill-candidate-status.pending{background:rgba(241,184,76,.13);color:#f6cf85;}
+  .skill-candidate-status.generating{background:rgba(90,162,255,.13);color:#9ec5ff;}
+  .skill-candidate-status.ready,.skill-candidate-status.approved{background:rgba(47,230,166,.12);color:var(--signal);}
+  .skill-candidate-status.rejected{background:rgba(169,139,255,.14);color:#c9b6ff;opacity:.7;}
+  .skill-candidate-status.superseded{background:var(--surface-2);color:var(--text-dim);opacity:.7;}
+  .count-added{background:rgba(47,230,166,.12);color:var(--signal);}
+  .count-already{background:rgba(90,162,255,.12);color:#9ec5ff;}
+  .count-stale{background:rgba(241,184,76,.13);color:#f6cf85;}
+  .count-rejlint,.count-rejscan,.count-error{background:rgba(255,93,108,.12);color:#ff97a1;}
+  .count-total{background:var(--surface-2);color:var(--text-dim);}
+
+  /* skill candidate / spotter / signals */
+  .skill-candidate,.signal-row,.spotter-result{background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:13px 15px;margin-bottom:8px;}
+  .skill-candidate-header{display:flex;gap:10px;align-items:center;margin-bottom:6px;flex-wrap:wrap;}
+  .skill-candidate-headline,.signal-header{color:var(--text);font-size:.9rem;margin:6px 0;line-height:1.45;}
+  .skill-candidate-actions{margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+  .skill-candidate-actions small{color:var(--text-dim);font-style:italic;}
+  .spotter-controls{display:flex;gap:8px;align-items:center;margin:8px 0 12px;flex-wrap:wrap;}
+  .signal-name,.signal-trigger,.signal-evidence{font-size:.84rem;color:#c3ccd9;margin-top:4px;}
+  .signal-evidence code{font-size:.78rem;color:#9ec5ff;}
+  .spotter-result{background:rgba(47,230,166,.06);color:#aef3d8;}
+
+  /* forms */
+  form{margin-top:16px;padding-top:14px;border-top:1px solid var(--border);}
+  form label,.new-skill-form label,.skill-edit-form label,.savings-controls label{display:block;margin-bottom:11px;font-size:.84rem;color:#c3ccd9;}
+  form .form-banner,.new-skill-form .form-banner,.skill-edit-form .form-banner{background:var(--surface-2);border-left:3px solid var(--signal);padding:8px 12px;margin-bottom:14px;font-size:.84rem;color:#c3ccd9;border-radius:0 6px 6px 0;}
+  input[type=text],input[type=number],select,textarea{width:100%;padding:8px 11px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:7px;font-family:var(--sans);font-size:16px;margin-top:4px;transition:border-color var(--fast) var(--ease);}
+  textarea{font-family:var(--mono);font-size:.84rem;resize:vertical;}
+  input[type=text]:focus,input[type=number]:focus,select:focus,textarea:focus{outline:none;border-color:var(--signal);box-shadow:0 0 0 3px rgba(47,230,166,.12);}
+  form .row,.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  form .checkbox{display:flex;align-items:center;gap:8px;margin:12px 0;}
+  form .checkbox input,form input[type=checkbox]{width:auto;margin:0;}
+  form .help,.help,.savings-tile-label{font-size:.78rem;color:var(--text-faint);margin-top:4px;}
+  form .actions,.form-actions,.skill-create-actions,.market-pull-actions{display:flex;gap:8px;align-items:center;}
+  .skill-create-actions,.market-pull-actions{margin-bottom:14px;}
+  .role-picker summary{cursor:pointer;padding:7px 11px;background:var(--bg);border:1px solid var(--border);border-radius:7px;font-size:.84rem;color:#c3ccd9;}
+  .role-checkbox-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-top:4px;max-height:240px;overflow-y:auto;}
+  .role-checkbox{display:flex;align-items:center;gap:5px;font-size:.78rem;color:#c3ccd9;cursor:pointer;}
+  .response .ok{background:rgba(47,230,166,.1);color:#aef3d8;padding:10px;border-radius:8px;}
+  .response .error{background:rgba(255,93,108,.1);color:#ffb3bb;padding:10px;border-radius:8px;}
+  .lint-errors{margin-top:8px;padding:7px 10px;background:rgba(255,93,108,.1);border-left:3px solid var(--alert);border-radius:0 6px 6px 0;}
+  .lint-err{color:#ffb3bb;font-size:.84rem;}
+  .lint-warns summary{cursor:pointer;font-size:.84rem;color:var(--warn);}
+  .lint-warn{font-size:.82rem;color:#c3ccd9;padding-left:16px;}
+  .scan-fail{padding:7px 10px;margin:4px 0;border-radius:7px;font-size:.82rem;}
+  .scan-sev-block{background:rgba(255,93,108,.1);border-left:3px solid var(--alert);}
+  .scan-sev-warn{background:rgba(241,184,76,.1);border-left:3px solid var(--warn);}
+  .scan-detail{font-family:var(--mono);font-size:.78rem;color:#c3ccd9;margin-top:4px;}
+
+  /* polish columns */
+  .polish-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .polish-col{background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:9px;}
+  .polish-col-new{border-color:rgba(47,230,166,.4);background:rgba(47,230,166,.05);}
+  .polish-col-title{font-size:.78rem;color:var(--text-faint);margin-bottom:6px;}
+  .polish-col-text,.polish-current{font-size:.88rem;color:var(--text);line-height:1.45;white-space:pre-wrap;}
+  .polish-no-change{border-color:rgba(47,230,166,.3);background:rgba(47,230,166,.04);}
+  .polish-no-change-icon{color:var(--signal);}
+
+  /* market / pull rows */
+  .market-summary-counts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
+  .market-details-link{color:var(--info);font-size:.84rem;cursor:pointer;text-decoration:none;}
+  .market-details-link:hover{text-decoration:underline;}
+  .pull-details-table tr.decision-added{background:rgba(47,230,166,.04);}
+  .pull-details-table tr.decision-rejected-lint,.pull-details-table tr.decision-rejected-scan,.pull-details-table tr.decision-error{background:rgba(255,93,108,.05);}
+  .pull-details-table tr.decision-already-exists{background:rgba(90,162,255,.04);}
+  .pull-details-table tr.decision-stale-version{background:rgba(241,184,76,.04);}
+  .pull-details-header{font-size:.84rem;color:#c3ccd9;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border);}
+
+  /* skill-health banner + rows */
+  .skill-health-banner{padding:11px 14px;border-radius:10px;margin-bottom:10px;font-size:.92rem;border-left:3px solid;}
+  .skill-health-banner-ok{background:rgba(47,230,166,.08);color:#aef3d8;border-left-color:var(--signal);}
+  .skill-health-banner-warn{background:rgba(241,184,76,.08);color:#fbe3a8;border-left-color:var(--warn);}
+  .skill-health-banner-bad{background:rgba(255,93,108,.08);color:#ffb3bb;border-left-color:var(--alert);}
+  .skill-health-banner-info{background:rgba(90,162,255,.08);color:#bcd8ff;border-left-color:var(--info);}
+  .skill-health-row{display:flex;align-items:center;gap:10px;padding:8px 4px;font-size:.88rem;border-bottom:1px solid var(--hairline);}
+  .skill-health-row:last-child{border-bottom:none;}
+  .skill-health-row .skill-health-icon{width:20px;font-weight:700;font-size:1rem;flex-shrink:0;}
+  .skill-health-row .skill-health-name{font-family:var(--mono);font-weight:600;min-width:180px;}
+  .skill-health-row .skill-health-detail{color:#c3ccd9;flex:1;}
+  .skill-health-bad .skill-health-icon{color:var(--alert);}
+  .skill-health-warn .skill-health-icon{color:var(--warn);}
+  .skill-health-ok .skill-health-icon{color:var(--signal);}
+  .skill-health-info .skill-health-icon{color:var(--info);}
+  .skill-health-empty,.proj-skills-empty,.trend-empty,.summarizer-empty.muted{color:var(--text-faint);font-style:italic;padding:8px 4px;}
+
+  /* stat tiles (savings + summarizer) */
+  .savings-totals,.summarizer-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px;}
+  .savings-tile,.summarizer-stats .stat-tile{background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;text-align:center;transition:border-color var(--fast) var(--ease);}
+  .savings-tile:hover,.summarizer-stats .stat-tile:hover{border-color:var(--border-bright);}
+  .savings-tile-num,.summarizer-stats .stat-num{font-family:var(--display);font-size:1.6rem;font-weight:600;color:var(--signal);letter-spacing:.01em;margin-bottom:4px;}
+  .savings-tile-label,.summarizer-stats .stat-label{font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint);}
+  .savings-table td.savings-cell{color:var(--signal);}
+  .savings-methodology{font-size:.8rem;color:var(--text-dim);}.savings-methodology ul{margin:8px 0 0;padding-left:20px;}.savings-methodology li{margin-bottom:4px;}
+  .summarizer-breakdown .breakdown-title{font-family:var(--mono);font-size:.7rem;color:var(--text-faint);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;}
+  .summarizer-breakdown .breakdown-row{font-size:.88rem;color:#c3ccd9;padding:3px 0;}
+
+  /* trend / anti-patterns */
+  .trend-header{font-size:.85rem;color:#c3ccd9;margin-bottom:8px;}
+  .trend-svg{width:100%;height:80px;display:block;}
+  .trend-axis{display:flex;justify-content:space-between;font-size:.72rem;color:var(--text-faint);margin-top:4px;}
+  .anti-patterns-panel summary{cursor:pointer;color:var(--warn);font-weight:600;}
+  .per-agent-panel summary{cursor:pointer;color:#c3ccd9;font-weight:600;}
+  .anti-pattern{padding:6px 10px;margin-top:6px;border-radius:7px;font-size:.85rem;}
+  .anti-pattern.warn-chip{background:rgba(255,93,108,.1);color:#ffb3bb;border-left:3px solid var(--alert);}
+  .anti-pattern.info-chip{background:var(--surface-2);color:#c3ccd9;border-left:3px solid var(--warn);}
+
+  /* footer → status strip */
+  footer{display:flex;align-items:center;gap:16px;flex-wrap:wrap;color:var(--text-faint);font-family:var(--mono);font-size:.74rem;letter-spacing:.03em;margin-top:36px;padding:14px 0 0;border-top:1px solid var(--border);}
+  footer code{color:var(--text-dim);}
+
+  /* keyframes */
+  @keyframes rise{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+  @keyframes swap{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+  @keyframes ping{0%{transform:scale(.6);opacity:.9;}70%,100%{transform:scale(1.9);opacity:0;}}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.55;}}
+  @keyframes sheen{to{background-position:200% 0;}}
+  /* motion polish — restrained, refresh-safe (no per-row animation that would flicker on auto-refresh) */
+  button:active,.edit-btn:active,.runs-btn:active,.security-btn:active,.body-btn:active,.new-skill-btn:active,.pull-marketplace-btn:active,.approve-btn:active,.reject-btn:active,.link-btn:active,.proj-skills-btn:active,.star-btn:active{transform:translateY(0) scale(.97);}
+  .topline{background-size:200% 100%;animation:sheen 11s linear infinite;}
+  .badge.ok,.evt-ok,.bcast-merge,.health-status.healthy,.skill-health-ok .skill-health-icon{text-shadow:0 0 10px var(--signal-glow);}
+  .mark{transition:filter var(--med) var(--ease);}
+  header:hover .mark{filter:drop-shadow(0 0 16px var(--signal-glow));}
+
+  @media (max-width:760px){
+    header{flex-wrap:wrap;gap:12px;padding:18px;}
+    .sys-pills{display:none;}
+    main,.tab-nav{padding-left:18px;padding-right:18px;}
+    .panel{overflow-x:auto;}
+    .diff-grid,.polish-grid,form .row,.form-row,.role-checkbox-grid{grid-template-columns:1fr;}
+    .skill-header{flex-wrap:wrap;gap:8px;}
   }
-  /* v0.18.4 — diff view */
-  .diff-summary { font-size: 0.85rem; color: #94a3b8; margin: 8px 0; }
-  .diff-stat-add { color: #4ade80; font-family: ui-monospace, monospace; margin-right: 8px; }
-  .diff-stat-del { color: #f87171; font-family: ui-monospace, monospace; margin-right: 8px; }
-  .diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .diff-side { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; overflow: hidden; }
-  .diff-label { padding: 4px 8px; background: #1f2937; color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  .diff-content { max-height: 400px; overflow: auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.78rem; }
-  .diff-row { padding: 1px 8px; white-space: pre-wrap; word-wrap: break-word; min-height: 1em; }
-  .diff-row.diff-equal { color: #cbd5e1; }
-  .diff-row.diff-add   { color: #d1fae5; background: #064e3b; border-left: 2px solid #4ade80; }
-  .diff-row.diff-del   { color: #fecaca; background: #7f1d1d; border-left: 2px solid #f87171; text-decoration: line-through; }
-  .diff-row.diff-blank { background: #050709; min-height: 1em; }
-  .diff-fallback { display: flex; gap: 8px; }
-  .diff-fallback .diff-side { flex: 1; }
-  .diff-fallback pre { padding: 8px; margin: 0; max-height: 400px; overflow: auto; font-size: 0.78rem; }
-  .candidate-tabs { margin-top: 8px; }
-  .candidate-tabs > details { margin-bottom: 6px; border: 1px solid #1f2937; border-radius: 4px; padding: 6px; }
-  .tab-label { font-size: 0.85rem; color: #94a3b8; cursor: pointer; padding: 2px 4px; }
-  .tab-label:hover { color: #38bdf8; }
-  /* v0.18.5 — Skills panel + edit form */
-  .skill-scope { margin-bottom: 16px; }
-  .skill-scope-header { font-size: 0.85rem; color: #94a3b8; margin-bottom: 6px; }
-  .skill-row { background: #0e1116; border: 1px solid #1f2937; border-radius: 4px; padding: 10px; margin-bottom: 8px; }
-  .skill-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  .skill-name { font-weight: 600; font-family: ui-monospace, monospace; font-size: 0.95rem; color: #e6e8eb; }
-  .skill-meta { color: #94a3b8; font-size: 0.85rem; margin-top: 4px; }
-  .skill-meta .role-tag { background: #1e3a8a; color: #dbeafe; padding: 1px 6px; border-radius: 3px; font-size: 0.78rem; margin-right: 4px; }
-  /* v0.24.2 — source badges (marketplace / role-extracted / custom) */
-  .src-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 500; margin-left: 8px; vertical-align: middle; cursor: help; }
-  .src-marketplace { background: #1e3a8a; color: #93c5fd; border: 1px solid #1e40af; }
-  .src-role-extracted { background: #422006; color: #fbbf24; border: 1px solid #ca8a04; }
-  .src-custom { background: #1f2937; color: #9ca3af; border: 1px solid #374151; }
-  /* v0.26.0 Step 7 — filesystem-skill badge (Anthropic ~/.claude/skills/) */
-  .src-filesystem { background: #064e3b; color: #a7f3d0; border: 1px solid #047857; }
-  .src-filesystem small { color: #6ee7b7; font-size: 0.66rem; margin-left: 4px; }
-  /* v0.26.0 Step 7 — chain-integrity banner + quarantine + admission log */
-  .chain-banner { padding: 10px 14px; border-radius: 6px; margin: 8px 0 12px; font-size: 0.92rem; display: flex; align-items: center; gap: 12px; }
-  .chain-banner.chain-ok { background: #064e3b; border: 1px solid #047857; color: #d1fae5; }
-  .chain-banner.chain-broken { background: #7f1d1d; border: 1px solid #b91c1c; color: #fecaca; }
-  .chain-banner.chain-error { background: #422006; border: 1px solid #ca8a04; color: #fbbf24; }
-  .chain-banner .chain-status { font-weight: 700; }
-  .chain-banner .chain-detail { color: inherit; opacity: 0.92; }
-  .fs-quarantine-details, .fs-admission-details { margin-top: 12px; padding: 8px 12px; background: #0f172a; border-radius: 6px; }
-  .fs-quarantine-details summary, .fs-admission-details summary { cursor: pointer; padding: 4px 0; }
-  .fs-quarantine-table, .fs-admission-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.86rem; }
-  .fs-quarantine-table th, .fs-admission-table th { text-align: left; padding: 6px 8px; background: #1e293b; color: #94a3b8; font-weight: 600; }
-  .fs-quarantine-table td, .fs-admission-table td { padding: 6px 8px; border-bottom: 1px solid #1f2937; vertical-align: top; }
-  .evt-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 500; }
-  .evt-ok { background: #064e3b; color: #a7f3d0; }
-  .evt-quar { background: #7f1d1d; color: #fecaca; }
-  .evt-info { background: #1f2937; color: #93c5fd; }
-  /* v0.28.0-α — skill-spotter panel */
-  .spotter-controls { display: flex; gap: 8px; align-items: center; margin: 8px 0 12px; }
-  .spotter-runs-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
-  .spotter-runs-table th { text-align: left; padding: 6px 8px; background: #1e293b; color: #94a3b8; }
-  .spotter-runs-table td { padding: 6px 8px; border-bottom: 1px solid #1f2937; }
-  .link-btn { background: transparent; border: 0; color: #93c5fd; cursor: pointer; padding: 0; font-size: 0.85rem; }
-  .link-btn:hover { color: #dbeafe; text-decoration: underline; }
-  .signal-row { padding: 10px 12px; background: #0f172a; border-radius: 6px; margin-bottom: 8px; }
-  .signal-header { font-size: 0.92rem; margin-bottom: 6px; }
-  .signal-name, .signal-trigger, .signal-evidence { font-size: 0.85rem; color: #cbd5e1; margin-top: 4px; }
-  .signal-evidence code { font-size: 0.78rem; color: #93c5fd; }
-  .spotter-result { padding: 10px 12px; background: #064e3b; border-radius: 6px; margin-top: 8px; color: #d1fae5; }
-  /* v0.25.0 — score-trend sparkline */
-  .skill-trend { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
-  .sparkline { vertical-align: middle; color: #6b7280; }
-  .sparkline.trend-up { color: #4ade80; }
-  .sparkline.trend-down { color: #f87171; }
-  .sparkline.trend-flat { color: #94a3b8; }
-  .sparkline-label { font-size: 0.78rem; font-family: ui-monospace, monospace; }
-  .sparkline-label small { font-size: 0.72rem; margin-left: 3px; }
-  .sparkline-label.trend-up small { color: #4ade80; }
-  .sparkline-label.trend-down small { color: #f87171; }
-  .sparkline-label.trend-flat small { color: #94a3b8; }
-  .sparkline-empty { color: #6b7280; font-size: 0.78rem; }
-  /* v0.25.0 — operator create-skill form */
-  .skill-create-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-  .new-skill-btn { background: #166534; color: #dcfce7; border: 1px solid #15803d; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 0.88rem; font-weight: 500; }
-  .new-skill-btn:hover { background: #15803d; }
-  .new-skill-meta { font-size: 0.82rem; color: #94a3b8; }
-  .new-skill-form { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 16px; margin-bottom: 16px; }
-  .new-skill-form .form-banner { background: #1f2937; border-left: 3px solid #4ade80; padding: 8px 12px; margin-bottom: 16px; font-size: 0.85rem; color: #cbd5e1; border-radius: 0 4px 4px 0; }
-  .new-skill-form label { display: block; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; }
-  .new-skill-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .new-skill-form input[type=text], .new-skill-form select, .new-skill-form textarea {
-    width: 100%; padding: 6px 10px; background: #0e1116; color: #e6e8eb;
-    border: 1px solid #2a2f37; border-radius: 4px; font-family: inherit; font-size: 0.9rem; margin-top: 4px;
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;}
+    .live-dot::after{display:none;}
   }
-  .new-skill-form textarea { font-family: ui-monospace, monospace; font-size: 0.82rem; resize: vertical; }
-  .new-skill-form .form-actions { display: flex; gap: 8px; margin-top: 12px; }
-  .role-picker summary { cursor: pointer; padding: 6px 10px; background: #0e1116; border: 1px solid #2a2f37; border-radius: 4px; font-size: 0.85rem; color: #cbd5e1; }
-  .role-picker summary:hover { background: #1f2937; }
-  .role-checkbox-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 12px; background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; margin-top: 4px; max-height: 240px; overflow-y: auto; }
-  .role-checkbox { display: flex; align-items: center; gap: 4px; font-size: 0.78rem; color: #cbd5e1; cursor: pointer; }
-  .role-checkbox input { margin: 0; }
-  /* v0.25.0 — completed mutations + live broadcasts */
-  .mutations-table, .broadcasts-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  .mutations-table th, .broadcasts-table th { background: #1f2937; color: #94a3b8; padding: 6px 8px; text-align: left; font-weight: 500; }
-  .mutations-table td, .broadcasts-table td { padding: 6px 8px; border-top: 1px solid #1f2937; color: #e6e8eb; }
-  .mutations-table .reason-cell, .broadcasts-table .state-cell { max-width: 320px; word-wrap: break-word; }
-  .bcast-type { padding: 2px 8px; border-radius: 3px; font-size: 0.72rem; font-family: ui-monospace, monospace; font-weight: 500; }
-  .bcast-assign { background: #1e3a8a; color: #93c5fd; }
-  .bcast-status { background: #422006; color: #fbbf24; }
-  .bcast-merge { background: #052e16; color: #4ade80; }
-  .bcast-reject { background: #7f1d1d; color: #fecaca; }
-  .bcast-revise { background: #422006; color: #fbbf24; }
-  .bcast-proposed { background: #1e3a8a; color: #93c5fd; }
-  .bcast-launch_role { background: #1e1b4b; color: #c4b5fd; }
-  .bcast-retire_role { background: #1f2937; color: #9ca3af; }
-  .bcast-dependency { background: #422006; color: #fbbf24; }
-  .skill-meta .guidance-preview { color: #cbd5e1; font-style: italic; }
-  .edit-btn, .polish-btn, .runs-btn, .security-btn {
-    background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37;
-    padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 0.85rem;
-    margin-left: 4px;
-  }
-  .edit-btn:hover { background: #2a2f37; color: #38bdf8; }
-  .polish-btn:hover { background: #2a2f37; color: #c4b5fd; }
-  .runs-btn:hover { background: #2a2f37; color: #fbbf24; }
-  .security-btn:hover { background: #2a2f37; color: #34d399; }
-  .body-btn:hover { background: #2a2f37; color: #c084fc; }
-  .skill-body-view { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
-  .skill-body-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-  .skill-body-meta { font-size: 0.8rem; color: #94a3b8; }
-  .skill-body-text { background: #0e1116; border: 1px solid #1f2937; border-radius: 3px; padding: 10px; font-family: ui-monospace, monospace; font-size: 0.82rem; color: #e6e8eb; white-space: pre-wrap; word-wrap: break-word; max-height: 600px; overflow-y: auto; line-height: 1.5; }
-  .skill-body-warning { background: #422006; border-left: 3px solid #fbbf24; padding: 8px 12px; margin-top: 8px; font-size: 0.82rem; color: #fde68a; border-radius: 0 4px 4px 0; }
-  .skill-actions { display: flex; gap: 4px; }
-  .skill-edit-zone { margin-top: 8px; }
-  /* v0.23.2 — polish preview / runs list / security scans */
-  .polish-result { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
-  /* v0.23.3 — no-change state: clearly distinct from the diff state, no Apply button at all */
-  .polish-no-change { border-color: #1f3a3a; background: #061616; }
-  .polish-no-change-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-  .polish-no-change-icon { color: #4ade80; font-size: 1.1rem; }
-  .polish-no-change-body { font-size: 0.85rem; color: #94a3b8; margin-bottom: 8px; }
-  .polish-current { font-size: 0.85rem; color: #cbd5e1; padding: 6px 8px; background: #0a0d12; border-radius: 3px; }
-  .polish-col-new { border-color: #15803d; background: #052e16; }
-  .apply-polish-btn-blocked { background: #450a0a !important; color: #fecaca !important; border-color: #7f1d1d !important; }
-  /* v0.24.0 Phase 2 — marketplace pulls */
-  .market-pull-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-  .pull-marketplace-btn { background: #1e3a8a; color: #dbeafe; border: 1px solid #1e40af; padding: 8px 18px; border-radius: 5px; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
-  .pull-marketplace-btn:hover:not(:disabled) { background: #1e40af; }
-  .pull-marketplace-btn:disabled { opacity: 0.6; cursor: progress; }
-  .market-meta { font-size: 0.82rem; color: #94a3b8; }
-  .market-summary { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
-  .market-summary-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-  .market-summary-counts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-  .count { padding: 3px 10px; border-radius: 3px; font-size: 0.82rem; font-family: ui-monospace, monospace; }
-  .count-added    { background: #052e16; color: #4ade80; }
-  .count-rejlint  { background: #7f1d1d; color: #fecaca; }
-  .count-rejscan  { background: #450a0a; color: #fecaca; }
-  .count-already  { background: #1e3a8a; color: #93c5fd; }
-  .count-stale    { background: #422006; color: #fbbf24; }
-  .count-error    { background: #7f1d1d; color: #fecaca; }
-  .count-total    { background: #1f2937; color: #cbd5e1; }
-  .market-details-link { color: #38bdf8; font-size: 0.85rem; text-decoration: none; cursor: pointer; }
-  .market-details-link:hover { text-decoration: underline; }
-  .market-details-zone { margin-top: 8px; }
-  .market-pulls-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }
-  .market-pulls-table th { background: #1f2937; color: #94a3b8; padding: 6px 8px; text-align: left; font-weight: 500; }
-  .market-pulls-table td { padding: 6px 8px; border-top: 1px solid #1f2937; color: #e6e8eb; vertical-align: top; }
-  .market-pulls-table .pull-details-row { background: transparent; }
-  .market-pulls-table .pull-details-row td { border-top: none; padding: 0; }
-  .pull-details { background: #0a0d12; border: 1px solid #1f2937; border-radius: 4px; padding: 10px; margin: 4px 8px 12px 8px; }
-  .pull-details-header { font-size: 0.85rem; color: #cbd5e1; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #1f2937; }
-  .pull-details-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-  .pull-details-table th { background: #1f2937; color: #94a3b8; padding: 5px 8px; text-align: left; }
-  .pull-details-table td { padding: 5px 8px; border-top: 1px solid #1f2937; }
-  .pull-details-table tr.decision-added { background: rgba(74, 222, 128, 0.05); }
-  .pull-details-table tr.decision-rejected-lint { background: rgba(248, 113, 113, 0.05); }
-  .pull-details-table tr.decision-rejected-scan { background: rgba(248, 113, 113, 0.07); }
-  .pull-details-table tr.decision-already-exists { background: rgba(147, 197, 253, 0.05); }
-  .pull-details-table tr.decision-stale-version { background: rgba(251, 191, 36, 0.05); }
-  .pull-details-table tr.decision-error { background: rgba(248, 113, 113, 0.10); }
-  .pull-details-table .reason-cell { max-width: 360px; word-wrap: break-word; }
-  .pull-details-btn { background: #1f2937; color: #cbd5e1; border: 1px solid #2a2f37; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 0.78rem; }
-  .pull-details-btn:hover { background: #2a2f37; color: #38bdf8; }
-  .pull-body-btn { background: #1f2937; color: #c084fc; border: 1px solid #2a2f37; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 0.78rem; }
-  .pull-body-btn:hover { background: #2a2f37; color: #d8b4fe; }
-  .pull-body-row { background: transparent; }
-  .pull-body-row td { border-top: none !important; padding: 0 !important; }
-  .pull-body-zone { margin: 4px 8px; }
-  .badge.dim-badge { background: #374151; color: #9ca3af; }
-  .polish-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-  .polish-meta { font-size: 0.8rem; color: #94a3b8; }
-  .polish-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .polish-col { background: #0e1116; border: 1px solid #1f2937; border-radius: 4px; padding: 8px; }
-  .polish-col-title { font-size: 0.78rem; color: #94a3b8; margin-bottom: 6px; }
-  .polish-col-text { font-size: 0.9rem; color: #e6e8eb; line-height: 1.4; white-space: pre-wrap; }
-  .polish-actions { margin-top: 10px; }
-  .apply-polish-btn { background: #166534; color: #dcfce7; border: 1px solid #15803d; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
-  .apply-polish-btn:hover:not(:disabled) { background: #15803d; }
-  .apply-polish-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .lint-errors { margin-top: 8px; padding: 6px 8px; background: #450a0a; border-left: 3px solid #ef4444; border-radius: 0 4px 4px 0; }
-  .lint-err { color: #fecaca; font-size: 0.85rem; }
-  .lint-warns { margin-top: 8px; }
-  .lint-warns summary { cursor: pointer; font-size: 0.85rem; color: #fbbf24; }
-  .lint-warn { font-size: 0.82rem; color: #cbd5e1; padding-left: 16px; }
-  .badge { padding: 2px 8px; border-radius: 3px; font-size: 0.75rem; font-weight: 600; }
-  .badge.ok { background: #166534; color: #dcfce7; }
-  .badge.err { background: #7f1d1d; color: #fecaca; }
-  .runs-list, .scans-list { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
-  .runs-header, .scans-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-  .runs-meta, .scans-meta { font-size: 0.78rem; color: #94a3b8; }
-  .runs-table, .scans-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  .runs-table th, .scans-table th { background: #1f2937; color: #94a3b8; padding: 6px 8px; text-align: left; font-weight: 500; }
-  .runs-table td, .scans-table td { padding: 6px 8px; border-top: 1px solid #1f2937; color: #e6e8eb; }
-  .runs-table .mono.small, .scans-table .mono.small { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #94a3b8; }
-  .star-btn { background: #1f2937; color: #fbbf24; border: 1px solid #2a2f37; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 0.82rem; }
-  .star-btn:hover { background: #2a2f37; }
-  .star-btn.star-on { background: #422006; color: #fde047; border-color: #ca8a04; cursor: default; }
-  .star-btn:disabled { opacity: 0.85; cursor: default; }
-  .score { padding: 2px 6px; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 0.82rem; }
-  .score-high { background: #052e16; color: #4ade80; }
-  .score-mid { background: #422006; color: #fbbf24; }
-  .score-low { background: #450a0a; color: #f87171; }
-  .badge-status { padding: 2px 8px; border-radius: 3px; font-size: 0.75rem; }
-  .badge-status.succeeded { background: #052e16; color: #4ade80; }
-  .badge-status.failed { background: #450a0a; color: #f87171; }
-  .scan-fail { padding: 6px 8px; margin: 4px 0; border-radius: 3px; font-size: 0.82rem; }
-  .scan-sev-block { background: #450a0a; border-left: 3px solid #ef4444; }
-  .scan-sev-warn { background: #422006; border-left: 3px solid #fbbf24; }
-  .scan-sev-tag { font-size: 0.7rem; background: #1f2937; padding: 1px 6px; border-radius: 2px; margin-left: 6px; color: #cbd5e1; }
-  .scan-detail { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #cbd5e1; margin-top: 4px; }
-  .dim { color: #6b7280; }
-  .skill-edit-form { background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px; padding: 12px; margin-top: 8px; }
-  .skill-edit-form .form-banner { background: #1f2937; border-left: 3px solid #fbbf24; padding: 8px 12px; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; border-radius: 0 4px 4px 0; }
-  .skill-edit-form label { display: block; margin-bottom: 12px; font-size: 0.85rem; color: #cbd5e1; }
-  .skill-edit-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .skill-edit-form input[type=text], .skill-edit-form input[type=number], .skill-edit-form textarea {
-    width: 100%; padding: 6px 10px; background: #0a0d12; color: #e6e8eb;
-    border: 1px solid #2a2f37; border-radius: 4px; font-family: inherit; font-size: 0.9rem;
-    margin-top: 2px;
-  }
-  .skill-edit-form .help { display: block; font-size: 0.78rem; color: #6b7280; margin-top: 2px; }
-  .skill-edit-form details.fixtures-readonly { margin: 12px 0; padding: 8px; background: #050709; border: 1px solid #1f2937; border-radius: 4px; }
-  .skill-edit-form details.fixtures-readonly summary { cursor: pointer; color: #94a3b8; font-size: 0.85rem; }
-  .skill-edit-form hr { border: none; border-top: 1px solid #2a2f37; margin: 16px 0; }
-  .skill-edit-response { margin-top: 12px; }
-  /* v0.18.8 — skill efficiency column (Loop B) */
-  .skill-eff { color: #cbd5e1; font-size: 0.82rem; cursor: help; border-bottom: 1px dotted #6b7280; }
-  .skill-eff strong { color: #4ade80; font-family: ui-monospace, monospace; }
-  .skill-eff-none { color: #6b7280; }
-  .skill-eff-none em { font-style: italic; }
-  /* v0.19.0 — skill candidates panel */
-  .skill-candidate { background: #0e1116; border: 1px solid #1f2937; border-radius: 4px; padding: 12px; margin-bottom: 8px; }
-  .skill-candidate-header { display: flex; gap: 12px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
-  .skill-candidate-count { background: #7f1d1d; color: #fecaca; padding: 2px 8px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; }
-  .skill-candidate-status { padding: 2px 8px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; text-transform: uppercase; }
-  .skill-candidate-status.pending   { background: #1f2937; color: #fbbf24; }
-  .skill-candidate-status.generating{ background: #1e3a8a; color: #93c5fd; }
-  .skill-candidate-status.ready     { background: #064e3b; color: #6ee7b7; }
-  .skill-candidate-status.approved  { background: #064e3b; color: #d1fae5; }
-  .skill-candidate-status.rejected  { background: #4c1d95; color: #ddd6fe; opacity: 0.7; }
-  .skill-candidate-status.superseded{ background: #1f2937; color: #94a3b8; opacity: 0.6; }
-  .skill-candidate-headline { color: #cbd5e1; font-size: 0.9rem; margin: 6px 0; line-height: 1.4; }
-  .skill-candidate-meta { color: #6b7280; font-size: 0.78rem; }
-  .skill-candidate-actions { margin-top: 8px; padding-top: 8px; border-top: 1px solid #1f2937; }
-  .skill-candidate-actions small { color: #94a3b8; font-style: italic; }
-  /* v0.18.7 — token savings panel */
-  .savings-controls { display: flex; gap: 16px; margin-bottom: 12px; align-items: center; }
-  .savings-controls label { font-size: 0.85rem; color: #cbd5e1; display: flex; gap: 6px; align-items: center; }
-  .savings-controls select { padding: 4px 8px; background: #0a0d12; color: #e6e8eb; border: 1px solid #2a2f37; border-radius: 4px; font-family: inherit; font-size: 0.9rem; }
-  .savings-summary .savings-header { font-size: 0.85rem; color: #94a3b8; margin-bottom: 12px; line-height: 1.5; }
-  .savings-totals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px; }
-  .savings-tile { background: #0e1116; border: 1px solid #2a2f37; border-radius: 6px; padding: 12px; text-align: center; }
-  .savings-tile-num { font-size: 1.4rem; font-weight: 700; color: #4ade80; font-family: ui-monospace, monospace; }
-  .savings-tile-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
-  .savings-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-bottom: 12px; }
-  .savings-table th { text-align: left; padding: 6px 10px; background: #1f2937; color: #94a3b8; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; font-weight: 600; border-bottom: 1px solid #2a2f37; }
-  .savings-table td { padding: 6px 10px; border-bottom: 1px solid #1f2937; color: #cbd5e1; }
-  .savings-table td.savings-cell { color: #4ade80; }
-  .savings-methodology { margin-top: 8px; padding: 8px 12px; background: #050709; border: 1px solid #2a2f37; border-radius: 4px; font-size: 0.8rem; color: #94a3b8; }
-  .savings-methodology summary { cursor: pointer; }
-  .savings-methodology ul { margin: 8px 0 0 0; padding-left: 20px; }
-  .savings-methodology li { margin-bottom: 4px; }
-  /* v0.18.8 — trend / per-agent / anti-patterns */
-  .trend-panel { margin-top: 16px; padding: 12px; background: #0e1116; border: 1px solid #2a2f37; border-radius: 6px; }
-  .trend-header { font-size: 0.85rem; color: #cbd5e1; margin-bottom: 8px; }
-  .trend-svg { width: 100%; height: 80px; display: block; }
-  .trend-axis { display: flex; justify-content: space-between; font-size: 0.72rem; color: #6b7280; margin-top: 4px; }
-  .trend-empty { color: #94a3b8; font-style: italic; padding: 8px; background: #050709; border-radius: 4px; font-size: 0.85rem; }
-  .per-agent-panel { margin-top: 12px; padding: 8px 12px; background: #0a0d12; border: 1px solid #1f2937; border-radius: 4px; font-size: 0.85rem; }
-  .per-agent-panel summary { cursor: pointer; color: #cbd5e1; font-weight: 600; }
-  .anti-patterns-panel { margin-top: 12px; padding: 8px 12px; background: #050709; border: 1px solid #2a2f37; border-radius: 4px; font-size: 0.85rem; }
-  .anti-patterns-panel summary { cursor: pointer; color: #fbbf24; font-weight: 600; }
-  .anti-pattern { padding: 6px 10px; margin-top: 6px; border-radius: 4px; font-size: 0.85rem; }
-  .anti-pattern.warn-chip { background: #7f1d1d; color: #fecaca; border-left: 3px solid #f87171; }
-  .anti-pattern.info-chip { background: #1f2937; color: #cbd5e1; border-left: 3px solid #fbbf24; }
-  .rationale { color: #cbd5e1; font-style: italic; margin-bottom: 6px; padding-left: 12px; border-left: 2px solid #38bdf8; }
-  form { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2a2f37; }
-  form label { display: block; margin-bottom: 8px; font-size: 0.85rem; color: #cbd5e1; }
-  form input[type=text], form input[type=number], form textarea {
-    width: 100%; padding: 6px 10px; background: #0a0d12; color: #e6e8eb;
-    border: 1px solid #2a2f37; border-radius: 4px; font-family: inherit; font-size: 0.9rem;
-  }
-  form input[type=text]:focus, form input[type=number]:focus, form textarea:focus {
-    outline: none; border-color: #38bdf8;
-  }
-  form .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
-  form .checkbox { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
-  form .checkbox input { width: auto; }
-  form .help { font-size: 0.8rem; color: #94a3b8; margin-top: 4px; }
-  form .actions { display: flex; gap: 8px; }
-  button { padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; font-family: inherit; font-size: 0.9rem; border: 1px solid; }
-  button.approve { background: #166534; color: #d1fae5; border-color: #14532d; }
-  button.approve:hover { background: #15803d; }
-  button.reject { background: #7f1d1d; color: #fecaca; border-color: #7f1d1d; }
-  button.reject:hover { background: #991b1b; }
-  .response { margin-top: 12px; padding: 10px; border-radius: 4px; font-size: 0.9rem; }
-  .response .ok { background: #064e3b; color: #d1fae5; padding: 10px; border-radius: 4px; }
-  .response .error { background: #7f1d1d; color: #fecaca; padding: 10px; border-radius: 4px; }
-  footer { color: #94a3b8; font-size: 0.8rem; margin-top: 32px; padding-top: 12px; border-top: 1px solid #2a2f37; }
-  footer code { color: #cbd5e1; }
-  .tooltip {
-    border-bottom: 1px dotted #94a3b8; cursor: help; position: relative;
-  }
-  /* v0.22.6 — Skill-activity health banner (top of dashboard) */
-  .skill-health-banner {
-    padding: 10px 14px; border-radius: 6px; margin-bottom: 10px;
-    font-size: 0.95rem; border-left: 4px solid;
-  }
-  .skill-health-banner-bad {
-    background: #3f1d1d; color: #fecaca; border-left-color: #ef4444;
-  }
-  .skill-health-banner-warn {
-    background: #3a2e0e; color: #fde68a; border-left-color: #f59e0b;
-  }
-  .skill-health-banner-ok {
-    background: #0e2f1f; color: #d1fae5; border-left-color: #10b981;
-  }
-  /* v0.25.2 — task-in-progress (skill_show > 0 but no MERGE yet) */
-  .skill-health-banner-info {
-    background: #0e2438; color: #bfdbfe; border-left-color: #3b82f6;
-  }
-  .skill-health-info .skill-health-icon { color: #60a5fa; }
-  /* v0.25.3 — per-project skills-used rollup */
-  .proj-skills-btn {
-    background: #1f2937; color: #c084fc; border: 1px solid #2a2f37;
-    padding: 2px 10px; border-radius: 3px; cursor: pointer; font-size: 0.78rem;
-    margin-left: 10px;
-  }
-  .proj-skills-btn:hover { background: #2a2f37; color: #d8b4fe; }
-  .proj-skills-zone { padding: 0 14px; }
-  .proj-skills-table {
-    background: #0a0d12; border: 1px solid #2a2f37; border-radius: 4px;
-    padding: 10px; margin: 6px 0 12px;
-  }
-  .proj-skills-header {
-    display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 8px; font-size: 0.85rem;
-  }
-  .proj-skills-meta { color: #94a3b8; font-size: 0.78rem; }
-  .proj-skills-empty {
-    color: #94a3b8; font-style: italic; padding: 8px 14px; font-size: 0.85rem;
-  }
-  .skill-health-banner code {
-    background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.85em;
-  }
-  .skill-health-row {
-    display: flex; align-items: center; gap: 10px;
-    padding: 6px 14px; font-size: 0.88rem;
-    border-bottom: 1px solid #1f2937;
-  }
-  .skill-health-row:last-child { border-bottom: none; }
-  .skill-health-row .skill-health-icon { width: 20px; font-weight: 700; font-size: 1rem; flex-shrink: 0; }
-  .skill-health-row .skill-health-name { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; min-width: 180px; }
-  .skill-health-row .skill-health-detail { color: #cbd5e1; flex: 1; }
-  .skill-health-bad .skill-health-icon { color: #f87171; }
-  .skill-health-warn .skill-health-icon { color: #fbbf24; }
-  .skill-health-ok .skill-health-icon { color: #4ade80; }
-  .skill-health-empty { color: #94a3b8; font-style: italic; padding: 8px 14px; }
-  .skill-health-empty .skill-health-icon { margin-right: 8px; }
-  /* v0.22.7 — Summarizer activity panel */
-  .summarizer-stats {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 10px; margin-bottom: 14px;
-  }
-  .summarizer-stats .stat-tile {
-    background: #0e1116; border: 1px solid #1f2937; border-radius: 6px;
-    padding: 12px; text-align: center;
-  }
-  .summarizer-stats .stat-num {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 1.6rem; font-weight: 700; color: #4ade80; margin-bottom: 4px;
-  }
-  .summarizer-stats .stat-label { font-size: 0.78rem; color: #94a3b8; line-height: 1.3; }
-  .summarizer-breakdown {
-    background: #0a0d12; border: 1px solid #1f2937; border-radius: 4px;
-    padding: 10px 12px; margin-bottom: 12px;
-  }
-  .summarizer-breakdown .breakdown-title {
-    font-size: 0.85rem; color: #94a3b8; margin-bottom: 6px;
-    text-transform: uppercase; letter-spacing: 0.05em;
-  }
-  .summarizer-breakdown .breakdown-row {
-    font-size: 0.9rem; color: #cbd5e1; padding: 3px 0;
-  }
-  .summarizer-breakdown .badge-source {
-    display: inline-block; padding: 1px 8px; border-radius: 3px;
-    font-size: 0.78rem; font-weight: 600; margin-right: 6px;
-    font-family: ui-monospace, monospace;
-  }
-  .badge-source.semantic    { background: #064e3b; color: #d1fae5; }
-  .badge-source.ast         { background: #1e3a8a; color: #dbeafe; }
-  .badge-source.truncation  { background: #4a2e0e; color: #fde68a; }
-  .badge-source.unknown     { background: #1f2937; color: #94a3b8; }
-  .badge-status { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 0.78rem; font-weight: 600; font-family: ui-monospace, monospace; }
-  .badge-status.error    { background: #7f1d1d; color: #fecaca; }
-  .badge-status.skipped  { background: #4a2e0e; color: #fde68a; }
-  .badge-status.ok       { background: #064e3b; color: #d1fae5; }
-  .badge-status.fallback_truncation { background: #4a2e0e; color: #fde68a; }
-  .summarizer-empty { padding: 12px; }
-  .summarizer-empty.muted { color: #94a3b8; font-style: italic; }
-  .summarizer-list { margin: 12px 0; }
-  .summarizer-list summary { font-size: 0.9rem; color: #cbd5e1; padding: 6px 0; cursor: pointer; }
-  .summarizer-list summary:hover { color: #38bdf8; }
-  .summarizer-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 0.82rem; }
-  .summarizer-table th { text-align: left; padding: 4px 8px; color: #94a3b8; font-weight: 500; border-bottom: 1px solid #1f2937; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  .summarizer-table td { padding: 4px 8px; border-bottom: 1px solid #161b22; vertical-align: top; }
-  .summarizer-table td.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-  .summarizer-table td.small { font-size: 0.78rem; color: #94a3b8; }
-  .summarizer-table td.error-msg { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #fecaca; max-width: 480px; word-break: break-word; }
-  .muted { color: #94a3b8; font-size: 0.85rem; }
+  :focus-visible{outline:2px solid var(--signal);outline-offset:2px;border-radius:4px;}
 </style>
 </head>
 <body>
+<div class="topline"></div>
 <header>
-  <h1>SecureContext Operator Console</h1>
-  <span id="badge" class="badge">…</span>
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+      <path d="M20 2.5 34.5 11v18L20 37.5 5.5 29V11L20 2.5Z" stroke="var(--signal)" stroke-width="1.6" stroke-linejoin="round" opacity=".55"/>
+      <path d="M20 2.5 34.5 11v18L20 37.5 5.5 29V11L20 2.5Z" fill="rgba(47,230,166,.05)"/>
+      <circle cx="20" cy="20" r="3.4" fill="var(--signal)"/>
+      <circle cx="13" cy="13.5" r="1.9" fill="var(--info)"/>
+      <circle cx="27" cy="13.5" r="1.9" fill="var(--violet)"/>
+      <circle cx="20" cy="28.5" r="1.9" fill="var(--text-dim)"/>
+      <path d="M20 20 13 13.5M20 20 27 13.5M20 20 20 28.5" stroke="var(--signal)" stroke-width="1.1" opacity=".5"/>
+    </svg>
+    <div class="wordmark">
+      <span class="eyebrow">Operator Console</span>
+      <h1>Secure<b>Context</b></h1>
+    </div>
+  </div>
+  <div class="masthead-spacer"></div>
+  <div class="status-cluster">
+    <span id="badge" class="badge">…</span>
+    <div class="live"><span class="live-dot"></span>Live</div>
+  </div>
 </header>
+<nav class="tab-nav" id="dashboard-tabs" aria-label="Dashboard sections">
+  <button type="button" class="tab-button" data-tab="health"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>Health</button>
+  <button type="button" class="tab-button" data-tab="skills"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg>Skills</button>
+  <button type="button" class="tab-button" data-tab="authoring"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Authoring</button>
+  <button type="button" class="tab-button" data-tab="wiki"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h13v17H6a2 2 0 0 0-2 2V5Z"/><path d="M19 3v17"/></svg>Wiki &amp; Savings</button>
+</nav>
 <main>
 
+<section class="tab-content" data-tab="health">
 <!-- v0.22.6 — Skill-activity health banner. First panel so operators see
      immediately when the closed-loop self-improvement system has gone dark
      on any active project. Polls every 60s (lower frequency than other
@@ -774,7 +699,9 @@ export function renderDashboardHtml(): string {
     Loading skill-activity health…
   </div>
 </div>
+</section>
 
+<section class="tab-content" data-tab="health">
 <!-- v0.22.7 — Summarizer activity. Operator visibility into the L0/L1
      indexer: how many summaries exist, when they were created, what failed,
      which model is being used. Without this, the operator was blind to
@@ -813,7 +740,9 @@ export function renderDashboardHtml(): string {
     })();
   </script>
 </div>
+</section>
 
+<section class="tab-content" data-tab="skills">
 <div class="panel">
   <h2>Pending mutation reviews</h2>
   <!-- v0.20.1 — skip poll when any input/textarea/select inside the panel has
@@ -828,7 +757,9 @@ export function renderDashboardHtml(): string {
     Loading…
   </div>
 </div>
+</section>
 
+<section class="tab-content" data-tab="health">
 <!-- v0.25.0 — Live agent activity (last 20 broadcasts, refreshes every 5s) -->
 <div class="panel">
   <h2>Live agent activity <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(last 20 broadcasts across all projects, auto-refresh 5s)</span></h2>
@@ -839,7 +770,9 @@ export function renderDashboardHtml(): string {
     Loading…
   </div>
 </div>
+</section>
 
+<section class="tab-content" data-tab="skills">
 <!-- v0.25.0 — Completed mutations (promotion history with score delta) -->
 <div class="panel">
   <h2>Completed mutations <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(L1 mutation cycle outcomes — was the skill actually improved?)</span></h2>
@@ -850,7 +783,9 @@ export function renderDashboardHtml(): string {
     Loading…
   </div>
 </div>
+</section>
 
+<section class="tab-content" data-tab="authoring">
 <!-- v0.26.0 Step 7 — Filesystem skills security panel.
      Surfaces: chain integrity status, admission log tail, quarantined skills.
      Chain banner refreshes every 30s; quarantine list + admission tail refresh
@@ -885,7 +820,32 @@ export function renderDashboardHtml(): string {
     </div>
   </details>
 </div>
+</section>
 
+<section class="tab-content" data-tab="wiki">
+<!-- v0.30.6 — Personal-wiki KB graph. Operator-curated knowledge base
+     (creators / videos / topics / wiki-origin skills) rendered as a d3
+     force-directed view. Reads wiki/graph.json produced by the
+     personal-wiki/viz/build_graph.py script (which runs at end of
+     approve.py and at end of the twice-weekly promotion-check cron).
+     Inlined here so the operator sees their KB shape without leaving
+     the dashboard. Lazy-loaded inside a <details> so it doesn't push
+     other panels down when not in use. -->
+<div class="panel" id="wiki-graph-panel">
+  <h2>Personal wiki — KB graph <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(operator-curated content + wiki-origin skills, d3 force-directed)</span></h2>
+  <details class="wiki-graph-details">
+    <summary><strong>Show graph</strong> <small>(loads on first open — d3 + the wiki/graph.json snapshot)</small></summary>
+    <div id="wiki-graph"
+         hx-get="/dashboard/wiki-graph"
+         hx-trigger="click from:previous summary once"
+         hx-target="this" hx-swap="innerHTML">
+      <em style="color:#94a3b8; font-size:0.85rem">Click the heading above to load the graph.</em>
+    </div>
+  </details>
+</div>
+</section>
+
+<section class="tab-content" data-tab="authoring">
 <!-- v0.28.0-α — Skill spotter dry-run panel. Mines tool_calls_pg +
      pretool_events_pg for repeated patterns and surfaces them as
      signals the operator can review. No LLM yet; β adds the
@@ -920,7 +880,9 @@ export function renderDashboardHtml(): string {
     Loading spotter runs…
   </div>
 </div>
+</section>
 
+<section class="tab-content" data-tab="skills">
 <div class="panel">
   <h2>Active skills <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(edit frontmatter — body is mutator-managed)</span></h2>
   <!-- v0.25.0: + New skill button — opens an inline form, posts to
@@ -942,7 +904,9 @@ export function renderDashboardHtml(): string {
     Loading…
   </div>
 </div>
+</section>
 
+<section class="tab-content" data-tab="authoring">
 <!-- v0.24.0 Phase 2 — marketplace pulls panel -->
 <div class="panel">
   <h2>Marketplace pulls <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(historic skill imports from anthropics/skills + others — see what was added vs rejected, with reasons)</span></h2>
@@ -964,7 +928,9 @@ export function renderDashboardHtml(): string {
     Loading historic pulls…
   </div>
 </div>
+</section>
 
+<section class="tab-content" data-tab="wiki">
 <div class="panel">
   <h2>Token savings <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(estimated, vs counterfactual native flow)</span></h2>
   <div class="savings-controls">
@@ -1099,7 +1065,9 @@ export function renderDashboardHtml(): string {
     }, 10000);
   </script>
 </div>
+</section>
 
+<section class="tab-content" data-tab="skills">
 <!-- v0.19.0 Sprint 2.10 — Skill candidates panel (REJECT clusters → propose new skill) -->
 <div class="panel">
   <h2>Skill candidates <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(from REJECT patterns where the role has no governing skill)</span></h2>
@@ -1112,6 +1080,7 @@ export function renderDashboardHtml(): string {
     <p class="empty">Loading skill candidates…</p>
   </div>
 </div>
+</section>
 
 <footer>
   v0.20.0 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
@@ -1158,6 +1127,40 @@ function enableNotifications() {
     document.getElementById('notify-btn').textContent = p === 'granted' ? 'Enabled ✓' : 'Denied';
   });
 }
+</script>
+<script>
+// v0.30.7 — tab switcher for the dashboard. Active tab persisted in
+// localStorage so a refresh keeps you on the section you were just viewing.
+// Default tab = 'skills' because that's where the actionable Pending
+// mutation reviews live.
+(function tabSwitcher() {
+  var KEY = 'sc-dashboard-active-tab-v1';
+  function applyTab(name) {
+    document.querySelectorAll('.tab-button').forEach(function (b) {
+      b.classList.toggle('tab-active', b.dataset.tab === name);
+    });
+    document.querySelectorAll('section.tab-content').forEach(function (s) {
+      s.classList.toggle('tab-content-active', s.dataset.tab === name);
+    });
+    try { localStorage.setItem(KEY, name); } catch (e) { /* private mode etc */ }
+  }
+  function init() {
+    var buttons = document.querySelectorAll('.tab-button');
+    buttons.forEach(function (b) {
+      b.addEventListener('click', function () { applyTab(b.dataset.tab); });
+    });
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) { /* ignore */ }
+    var validTabs = Array.from(buttons).map(function (b) { return b.dataset.tab; });
+    var initialTab = (saved && validTabs.indexOf(saved) !== -1) ? saved : 'skills';
+    applyTab(initialTab);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
 </script>
 </body>
 </html>`;
@@ -2499,4 +2502,233 @@ export function renderSecurityScansFragment(skillId: string, rows: SecurityScanR
       </table>
     </div>
   `;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// v0.30.6 — Personal-wiki KB graph fragment.
+// Reads wiki/graph.json produced by personal-wiki/viz/build_graph.py
+// and emits an inline d3-rendered force-directed graph for the
+// /dashboard/wiki-graph endpoint.
+//
+// Wiki root is resolved via the PERSONAL_WIKI_ROOT env var (falls back
+// to the hard-coded path for the primary operator). When the snapshot
+// is missing or empty, we return a friendly help fragment instead of
+// throwing — the panel should never look broken just because the wiki
+// isn't populated yet.
+//
+// d3.js is loaded lazily from the CDN inside the fragment. If the
+// dashboard page already has d3 loaded (e.g. from another panel) the
+// fragment reuses it; otherwise it injects a one-shot <script> tag.
+// ─────────────────────────────────────────────────────────────────────
+
+export async function renderWikiGraphFragment(): Promise<string> {
+  const fs = await import("node:fs/promises");
+  const nodePath = await import("node:path");
+  const { homedir } = await import("node:os");
+
+  // Resolution order: PERSONAL_WIKI_ROOT env (set by docker-compose to the
+  // read-only /personal-wiki mount) → ~/AI_projects/personal-wiki for
+  // host-run dev. No hardcoded operator paths.
+  const wikiRoot =
+    process.env["PERSONAL_WIKI_ROOT"] ||
+    nodePath.join(homedir(), "AI_projects", "personal-wiki");
+  const dataPath = nodePath.join(wikiRoot, "wiki", "graph.json");
+
+  type GraphData = {
+    schema_version?: number;
+    built_at?: string;
+    counts?: { creators?: number; videos?: number; topics?: number; skills?: number; nodes?: number; edges?: number };
+    nodes?: Array<{ id: string; label: string; type: string; size: number; title?: string; url?: string }>;
+    edges?: Array<{ source: string; target: string; kind: string }>;
+  };
+  let data: GraphData | null = null;
+
+  try {
+    const raw = await fs.readFile(dataPath, "utf-8");
+    data = JSON.parse(raw) as GraphData;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") {
+      return `<div class="wiki-graph-empty" style="padding:14px; font-size:0.9rem; line-height:1.55; color:#cbd5e1">
+        <p style="margin:0 0 8px 0"><strong>No KB graph snapshot yet.</strong> Looked for: <code>${escapeHtml(dataPath)}</code></p>
+        <p style="margin:0 0 8px 0">To populate the wiki:</p>
+        <ol style="margin:0 0 8px 18px; padding:0">
+          <li>Invoke the <code>wiki-watch</code> skill on a video URL (agent does this, or you can directly).</li>
+          <li>Review pending: <code>python ${escapeHtml(nodePath.join(wikiRoot, "approve.py"))}</code> and press <kbd>a</kbd>.</li>
+          <li>The inline pipeline writes <code>wiki/raw/</code> + <code>wiki/videos/</code>, then rebuilds <code>wiki/graph.json</code>.</li>
+          <li>Reload this page — the graph appears here.</li>
+        </ol>
+        <p style="margin:0; color:#94a3b8; font-size:0.82rem">If your personal-wiki lives elsewhere, set <code>PERSONAL_WIKI_ROOT</code> on the SC server.</p>
+      </div>`;
+    }
+    return `<div class="wiki-graph-empty" style="padding:14px; color:#fca5a5; font-size:0.85rem">
+      Error reading <code>${escapeHtml(dataPath)}</code>: ${escapeHtml(String(err.message))}
+    </div>`;
+  }
+
+  if (!data?.nodes?.length) {
+    return `<div class="wiki-graph-empty" style="padding:14px; font-size:0.9rem; color:#94a3b8; line-height:1.5">
+      <p style="margin:0 0 6px 0"><strong>KB graph file exists but is empty.</strong></p>
+      <p style="margin:0 0 6px 0">Last build: <code>${escapeHtml(String(data?.built_at ?? "unknown"))}</code></p>
+      <p style="margin:0">Approve at least one wiki-watch proposal in <code>approve.py</code> to add real nodes.</p>
+    </div>`;
+  }
+
+  // Embed graph data safely — close any </script> token that could break
+  // out of our inline <script> tag, and any HTML comment opener.
+  const safeJson = JSON.stringify(data)
+    .replace(/<\/script>/gi, "<\\/script>")
+    .replace(/<!--/g, "<\\!--");
+
+  const builtAt = escapeHtml(String(data.built_at || ""));
+  const c = data.counts || {};
+  return `
+  <div class="wiki-graph-meta" style="display:flex; gap:14px; flex-wrap:wrap; padding:6px 2px 12px 2px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.76rem; color:#8b99ad">
+    <span><b style="color:#a98bff">${c.creators ?? 0}</b> creators</span>
+    <span><b style="color:#5aa2ff">${c.videos ?? 0}</b> videos</span>
+    <span><b style="color:#2fe6a6">${c.topics ?? 0}</b> topics</span>
+    <span><b style="color:#f1b84c">${c.skills ?? 0}</b> wiki-skills</span>
+    <span style="color:#7a8799">${c.nodes ?? 0} nodes, ${c.edges ?? 0} edges</span>
+    <span style="color:#7a8799; margin-left:auto">built ${builtAt}</span>
+  </div>
+  <div id="wiki-graph-canvas" style="width:100%; height:560px; background:radial-gradient(620px 420px at 50% 45%, rgba(47,230,166,.05), transparent 70%), #080b11; border:1px solid #1d2634; border-radius:12px; position:relative; overflow:hidden">
+    <div id="wiki-graph-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#7a8799; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.82rem">loading graph&hellip;</div>
+  </div>
+  <div id="wiki-graph-sel" style="margin-top:10px; padding:10px 12px; background:#0a0e16; border:1px solid #1d2634; border-radius:10px; font-size:0.82rem; color:#c3ccd9; min-height:44px">
+    <em style="color:#7a8799">Click any node for details. Scroll to zoom, drag the background to pan, hover to focus its connections.</em>
+  </div>
+  <script>
+  (function bootstrapWikiGraph() {
+    var data = ${safeJson};
+    function render() {
+      var canvas = document.getElementById("wiki-graph-canvas");
+      var loading = document.getElementById("wiki-graph-loading");
+      var selBox = document.getElementById("wiki-graph-sel");
+      if (!canvas || !selBox) return;
+      if (loading) loading.parentNode.removeChild(loading);
+      // Clear any prior render (HTMX could swap us in twice).
+      while (canvas.firstChild) canvas.removeChild(canvas.firstChild);
+      var W = canvas.clientWidth || 800;
+      var H = canvas.clientHeight || 560;
+      var svg = d3.select(canvas).append("svg").attr("width", W).attr("height", H);
+      var g = svg.append("g");
+      var zoom = d3.zoom().scaleExtent([0.15, 4]).on("zoom", function(e) { g.attr("transform", e.transform); });
+      svg.call(zoom);
+      var RM = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+      var TYPE_COLOR = { creator:"#a98bff", video:"#5aa2ff", topic:"#2fe6a6", skill:"#f1b84c" };
+      var LINK_COLOR = { publishes:"#5a4a7a", cites:"#2f567f", origin:"#1f8f66" };
+      // soft glow so nodes read as luminous on the dark field (skills glow strongest)
+      var defs = svg.append("defs");
+      var glow = defs.append("filter").attr("id","wg-glow").attr("x","-70%").attr("y","-70%").attr("width","240%").attr("height","240%");
+      glow.append("feGaussianBlur").attr("stdDeviation","2.4").attr("result","b");
+      var fm = glow.append("feMerge"); fm.append("feMergeNode").attr("in","b"); fm.append("feMergeNode").attr("in","SourceGraphic");
+      // adjacency for hover focus
+      var ADJ = {}; data.nodes.forEach(function(n){ ADJ[n.id] = {}; ADJ[n.id][n.id] = 1; });
+      data.edges.forEach(function(l){ var s=(typeof l.source==="object")?l.source.id:l.source, t=(typeof l.target==="object")?l.target.id:l.target; if(ADJ[s])ADJ[s][t]=1; if(ADJ[t])ADJ[t][s]=1; });
+      function linkId(l, end) { var v = l[end]; return (typeof v==="object") ? v.id : v; }
+
+      var link = g.append("g").attr("stroke-linecap","round").selectAll("line").data(data.edges).enter().append("line")
+        .attr("stroke", function(d){ return LINK_COLOR[d.kind] || "#33415a"; })
+        .attr("stroke-opacity", RM ? 0.42 : 0).attr("stroke-width", 1.1);
+      var node = g.append("g").selectAll("g.node").data(data.nodes).enter().append("g").attr("class","wiki-graph-node")
+        .style("cursor","pointer")
+        .call(d3.drag()
+          .on("start", function(e, d) { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+          .on("drag",  function(e, d) { d.fx=e.x; d.fy=e.y; })
+          .on("end",   function(e, d) { if (!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
+      var circ = node.append("circle").attr("r", RM ? function(d){ return d.size; } : 0.01)
+        .attr("fill", function(d){ return TYPE_COLOR[d.type] || "#7a8799"; })
+        .attr("stroke", "#080b11").attr("stroke-width", 1.4)
+        .attr("filter", function(d){ return d.type === "skill" ? "url(#wg-glow)" : null; });
+      node.append("title").text(function(d){ return d.title || d.label; });
+      var label = node.append("text").attr("dy", function(d){ return d.size + 11; }).attr("text-anchor","middle")
+        .style("font-family", "'JetBrains Mono',ui-monospace,monospace").style("font-size", "9.5px").style("fill", "#aeb8c8").style("pointer-events", "none")
+        .style("opacity", RM ? 1 : 0)
+        .style("text-shadow", "0 0 4px #080b11, 0 0 4px #080b11")
+        .text(function(d){ return d.label.length > 32 ? d.label.slice(0, 31) + "\\u2026" : d.label; });
+
+      // entrance: nodes scale in with a short stagger; links + labels fade in.
+      // one composed arrival moment (directs attention) — skipped under reduced-motion.
+      if (!RM) {
+        circ.transition().delay(function(d,i){ return Math.min(i * 1.3, 520); }).duration(560).ease(d3.easeCubicOut)
+          .attr("r", function(d){ return d.size; });
+        label.transition().delay(440).duration(620).style("opacity", 1);
+        link.transition().delay(160).duration(720).attr("stroke-opacity", 0.42);
+      }
+
+      // hover: focus a node + its connections, dim the rest (attention + causality)
+      function focusNode(d) {
+        var adj = ADJ[d.id] || {};
+        node.style("opacity", function(n){ return adj[n.id] ? 1 : 0.12; });
+        circ.transition().duration(140).ease(d3.easeCubicOut).attr("r", function(n){ return n.id === d.id ? n.size * 1.55 : n.size; });
+        link.attr("stroke-opacity", function(l){ return (linkId(l,"source")===d.id || linkId(l,"target")===d.id) ? 0.9 : 0.035; })
+            .attr("stroke", function(l){ return (linkId(l,"source")===d.id || linkId(l,"target")===d.id) ? "#2fe6a6" : (LINK_COLOR[l.kind]||"#33415a"); });
+      }
+      function unfocus() {
+        node.style("opacity", 1);
+        circ.transition().duration(180).ease(d3.easeCubicOut).attr("r", function(n){ return n.size; });
+        link.attr("stroke-opacity", 0.42).attr("stroke", function(l){ return LINK_COLOR[l.kind] || "#33415a"; });
+      }
+      node.on("mouseenter", function(e, d){ focusNode(d); }).on("mouseleave", function(){ unfocus(); });
+
+      node.on("click", function(e, d) {
+        e.stopPropagation();
+        circ.attr("stroke", function(n){ return n.id===d.id ? "#2fe6a6" : "#080b11"; }).attr("stroke-width", function(n){ return n.id===d.id ? 2.6 : 1.4; });
+        var neighbors = new Set();
+        data.edges.forEach(function(l) {
+          var sId = linkId(l,"source"), tId = linkId(l,"target");
+          if (sId === d.id) neighbors.add(tId);
+          if (tId === d.id) neighbors.add(sId);
+        });
+        var html = "<strong style='color:#e9eef5'>" + esc(d.label) + "</strong> &nbsp; <em style='color:" + (TYPE_COLOR[d.type]||"#8b99ad") + "'>" + esc(d.type) + "</em>";
+        if (d.title) html += '<pre style="white-space:pre-wrap; word-break:break-word; font-size:11px; margin:6px 0 4px 0; padding:7px; background:#080b11; border:1px solid #1d2634; border-radius:6px; color:#c3ccd9">' + esc(d.title) + '</pre>';
+        if (d.url) html += '<a target="_blank" rel="noopener" href="' + esc(d.url) + '" style="color:#5aa2ff">open URL</a> &nbsp; ';
+        html += "<b style='color:#2fe6a6'>" + neighbors.size + "</b> connection(s).";
+        selBox.innerHTML = html;
+      });
+      svg.on("click", function(){ circ.attr("stroke","#080b11").attr("stroke-width",1.4); });
+
+      var sim = d3.forceSimulation(data.nodes)
+        .force("link", d3.forceLink(data.edges).id(function(d){ return d.id; }).distance(64).strength(0.65))
+        .force("charge", d3.forceManyBody().strength(-175))
+        .force("center", d3.forceCenter(W/2, H/2))
+        // gentle pull toward center so DISCONNECTED components (e.g. a lone video
+        // sharing no topics with the rest, like the Think School node) stay gathered
+        // in-frame instead of drifting to a far corner and reading as "missing".
+        .force("x", d3.forceX(W/2).strength(0.07))
+        .force("y", d3.forceY(H/2).strength(0.07))
+        .force("collide", d3.forceCollide().radius(function(d){ return d.size + 4; }))
+        .velocityDecay(0.34).alphaDecay(0.045);
+      sim.on("tick", function() {
+        link.attr("x1", function(d){ return d.source.x; }).attr("y1", function(d){ return d.source.y; })
+            .attr("x2", function(d){ return d.target.x; }).attr("y2", function(d){ return d.target.y; });
+        node.attr("transform", function(d){ return "translate(" + d.x + "," + d.y + ")"; });
+      });
+      // auto-fit the settled graph into view (continuity — it never sits half off-screen)
+      var fitted = false;
+      function fitToView() {
+        if (fitted || !data.nodes.length) return; fitted = true;
+        var xs = data.nodes.map(function(n){ return n.x; }), ys = data.nodes.map(function(n){ return n.y; });
+        var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+        var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+        var gw = (maxX - minX) || 1, gh = (maxY - minY) || 1, pad = 56;
+        var k = Math.max(0.15, Math.min((W - pad) / gw, (H - pad) / gh, 2));
+        var t = d3.zoomIdentity.translate((W - k*(minX+maxX))/2, (H - k*(minY+maxY))/2).scale(k);
+        svg.transition().duration(RM ? 0 : 750).ease(d3.easeCubicInOut).call(zoom.transform, t);
+      }
+      sim.on("end", fitToView);
+      setTimeout(fitToView, 2800);
+      function esc(s) { return String(s).replace(/[&<>"']/g, function(c){ return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[c]; }); }
+    }
+    if (typeof d3 !== 'undefined') { render(); return; }
+    var s = document.createElement('script');
+    s.src = 'https://d3js.org/d3.v7.min.js';
+    s.onload = render;
+    s.onerror = function() {
+      var l = document.getElementById("wiki-graph-loading");
+      if (l) l.textContent = "d3.js failed to load from CDN. Check network or vendor it locally.";
+    };
+    document.head.appendChild(s);
+  })();
+  </script>`;
 }

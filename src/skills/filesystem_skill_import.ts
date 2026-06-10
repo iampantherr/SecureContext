@@ -255,15 +255,28 @@ function parseFrontmatter(raw: string): { fm: AnthropicSkillFrontmatter; body: s
     if (!m) { i++; continue; }
     const [, key, restRaw] = m;
     const rest = restRaw.trim();
-    if (rest === "|") {
-      // Block scalar
+    // YAML block scalars: `|` literal (keep newlines) and `>` folded (single
+    // newlines fold to spaces), each optionally with a chomping indicator
+    // (`-` strip / `+` keep). The skill-creator and many hand-authored skills
+    // emit `description: >-` for long descriptions; before this branch handled
+    // `>`, the parser fell through and set the field to the literal ">-" string,
+    // so the skill admitted with a garbage description (or failed downstream).
+    const blockScalar = rest.match(/^([|>])[+-]?$/);
+    if (blockScalar) {
+      const style = blockScalar[1];
       const block: string[] = [];
       i++;
       while (i < lines.length && (lines[i].startsWith("  ") || lines[i].trim() === "")) {
         block.push(lines[i].replace(/^ {2}/, ""));
         i++;
       }
-      fm[key] = block.join("\n").trimEnd();
+      if (style === ">") {
+        // Folded: a run of non-blank lines joins with single spaces; a blank
+        // line is a paragraph break preserved as a newline.
+        fm[key] = block.join(" ").replace(/\s+/g, " ").trim();
+      } else {
+        fm[key] = block.join("\n").trimEnd();
+      }
       continue;
     }
     if (rest.startsWith("[") && rest.endsWith("]")) {

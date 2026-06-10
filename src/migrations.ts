@@ -959,6 +959,17 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 29,
+    description: "v0.30.8: evidence column on skill_runs — structured what_worked/what_didnt/recommendation_for_skill (JSON text; mirrors PG migration 27)",
+    up: (db) => {
+      const safeAdd = (table: string, col: string, def: string) => {
+        try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); } catch { /* column exists */ }
+      };
+      safeAdd("skill_runs", "evidence", "TEXT");
+    },
+  },
+
 ];
 
 /**

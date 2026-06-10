@@ -136,15 +136,16 @@ export async function recordSkillRunPg(run: SkillRun, projectHash: string): Prom
       INSERT INTO skill_runs_pg (
         run_id, skill_id, project_hash, session_id, task_id, inputs, outcome_score,
         total_cost, total_tokens, duration_ms, status, failure_trace, ts,
-        was_retry_after_promotion, agent_id
+        was_retry_after_promotion, agent_id, evidence
       )
-      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW()), $14, $15)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, NOW()), $14, $15, $16::jsonb)
       ON CONFLICT (run_id) DO NOTHING
     `, [
       run.run_id, run.skill_id, projectHash, run.session_id, run.task_id,
       JSON.stringify(run.inputs), run.outcome_score, run.total_cost, run.total_tokens,
       run.duration_ms, run.status, run.failure_trace, run.ts,
       run.was_retry_after_promotion ?? false, run.agent_id ?? null,
+      run.evidence ? JSON.stringify(run.evidence) : null,
     ]);
   });
 }

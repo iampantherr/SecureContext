@@ -851,6 +851,18 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 27,
+    description: "v0.30.8: evidence JSONB on skill_runs_pg — structured what_worked/what_didnt/recommendation_for_skill from zc_record_skill_outcome (mutator learning signal; mirrors SQLite migration 29)",
+    up: async (client) => {
+      // Before this column, only 2/91 runs carried any improvement evidence —
+      // agents recorded scores but never WHY, starving the mutator. The tool
+      // layer now requires what_didnt + recommendation_for_skill on failed or
+      // low-scoring (<0.6) runs and persists them here.
+      await client.query(`ALTER TABLE skill_runs_pg ADD COLUMN IF NOT EXISTS evidence JSONB`);
+    },
+  },
+
 ];
 
 /**

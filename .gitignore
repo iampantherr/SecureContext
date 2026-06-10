@@ -17,3 +17,6 @@ docs/HARNESS_EVOLUTION_PLAN.md
 docs/internal/
 docs/planning/
 *.planning.md
+
+# Scratch/diagnostic scripts (underscore prefix = local-only, never published)
+scripts/_*

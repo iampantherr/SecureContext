@@ -907,6 +907,9 @@ const TOOLS: Tool[] = [
         status:        { type: "string", enum: ["succeeded", "failed", "timeout"], description: "Run status. 'failed' or 'timeout' will trigger the L1 mutation hook." },
         outcome_score: { type: "number", description: "Optional 0..1 score. Below 0.5 also triggers the L1 mutation hook even if status='succeeded'." },
         failure_trace: { type: "string", description: "Required when status='failed' — short description of what went wrong." },
+        what_worked:   { type: "string", description: "v0.30.8 evidence — 1-2 sentences: which parts of the skill's guidance actually helped on this task. Recommended on every run." },
+        what_didnt:    { type: "string", description: "v0.30.8 evidence — 1-2 sentences: which guidance was wrong, missing, or misleading for this task. REQUIRED when status is failed/timeout or outcome_score < 0.6 — this is the signal the mutator uses to fix the skill." },
+        recommendation_for_skill: { type: "string", description: "v0.30.8 evidence — one concrete, actionable change to the skill body (e.g. 'add a Windows path example to step 3'). REQUIRED when status is failed/timeout or outcome_score < 0.6." },
         duration_ms:   { type: "number", description: "Wall-clock duration of the run in ms." },
         total_cost:    { type: "number", description: "USD cost of the run (default 0)." },
         total_tokens:  { type: "number", description: "Total tokens consumed in the run (default 0)." },
@@ -2398,13 +2401,22 @@ async function dispatchToolCall(
                   [name]
                 );
                 if (exact.rows[0]) return exact.rows[0];
+                // Resilient name resolution. Agents frequently pass a full/partial
+                // id like "foo@1.0.0@global" because the orchestrator hands out BARE
+                // skill names in its REQUIRED SKILLS line and the worker GUESSES a
+                // version. When the exact skill_id doesn't exist (e.g. the skill has
+                // since been version-bumped to 1.0.2), strip the "@version@scope" and
+                // resolve by the bare name — otherwise a wrong/stale version produces
+                // a spurious "not found" for a skill that is actually present. Skill
+                // names never contain "@", so split("@")[0] is a safe bare-name extract.
+                const bareName = String(name).split("@")[0];
                 const byName = await c.query(
                   `SELECT skill_id, name, version, scope, description, frontmatter, body, body_hmac
                      FROM skills_pg
-                    WHERE name=$1 AND archived_at IS NULL
+                    WHERE name=$1 AND archived_at IS NULL AND quarantined IS NOT TRUE
                     ORDER BY (CASE WHEN scope='global' THEN 0 ELSE 1 END), version DESC
                     LIMIT 1`,
-                  [name]
+                  [bareName]
                 );
                 return byName.rows[0] ?? null;
               });
@@ -2698,6 +2710,7 @@ async function dispatchToolCall(
       // The outcome write triggers the L1 mutation hook if ZC_L1_MUTATION_ENABLED=1.
       case "zc_record_skill_outcome": {
         const { skill_id, fixture_id, inputs, status, outcome_score, failure_trace,
+                what_worked, what_didnt, recommendation_for_skill,
                 duration_ms, total_cost, total_tokens, task_id, session_id,
                 was_retry_after_promotion } = args as {
           skill_id: string;
@@ -2706,6 +2719,9 @@ async function dispatchToolCall(
           status: "succeeded" | "failed" | "timeout";
           outcome_score?: number;
           failure_trace?: string;
+          what_worked?: string;
+          what_didnt?: string;
+          recommendation_for_skill?: string;
           duration_ms?: number;
           total_cost?: number;
           total_tokens?: number;
@@ -2719,6 +2735,28 @@ async function dispatchToolCall(
         if (!["succeeded", "failed", "timeout"].includes(status)) {
           return { content: [{ type: "text", text: `status must be one of: succeeded, failed, timeout (got ${status}).` }], isError: true };
         }
+        // v0.30.8 — evidence gate. Failed/low-score runs are exactly the ones
+        // the mutator learns from; a bare score tells it nothing. Require the
+        // WHY before accepting the recording (audit found 2/91 runs carried
+        // any evidence — the loop was starving).
+        const isLowOrFailed =
+          status === "failed" || status === "timeout" ||
+          (typeof outcome_score === "number" && outcome_score < 0.6);
+        if (isLowOrFailed && (!what_didnt?.trim() || !recommendation_for_skill?.trim())) {
+          return { content: [{ type: "text", text:
+            `Recording rejected: this run is ${status === "succeeded" ? `low-scoring (${outcome_score})` : status}, ` +
+            `so 'what_didnt' and 'recommendation_for_skill' are REQUIRED. ` +
+            `Tell the system WHY the skill fell short (what guidance was wrong/missing) and ONE concrete change ` +
+            `to the skill body — that's the signal the mutator uses to improve it. Re-call with both fields.` }], isError: true };
+        }
+        const evidence: Record<string, unknown> | null =
+          (what_worked || what_didnt || recommendation_for_skill)
+            ? {
+                ...(what_worked?.trim() ? { what_worked: what_worked.trim() } : {}),
+                ...(what_didnt?.trim() ? { what_didnt: what_didnt.trim() } : {}),
+                ...(recommendation_for_skill?.trim() ? { recommendation_for_skill: recommendation_for_skill.trim() } : {}),
+              }
+            : null;
 
         const { DatabaseSync: RsoDb } = await import("node:sqlite");
         const { mkdirSync: rsoMkd } = await import("node:fs");
@@ -2760,6 +2798,7 @@ async function dispatchToolCall(
             was_retry_after_promotion: was_retry_after_promotion === true,
             agent_id:      AGENT_ID,
             project_hash:  projectHashOf16,
+            evidence,
           }, PROJECT_PATH);
 
           // v0.22.0 — link the tool_calls captured during this skill_run.
@@ -2795,7 +2834,16 @@ async function dispatchToolCall(
               outcomeKind,
               signalSource:     "manual",
               confidence:       1.0,
-              evidence:         { fixture_id: fixture_id ?? null, failure_trace: failure_trace ?? null, status },
+              evidence:         {
+                fixture_id: fixture_id ?? null,
+                failure_trace: failure_trace ?? null,
+                status,
+                // v0.30.8 — the structured WHY, so the mutator's outcome row
+                // carries the agent's own diagnosis + concrete fix suggestion.
+                what_worked: what_worked?.trim() || null,
+                what_didnt: what_didnt?.trim() || null,
+                recommendation_for_skill: recommendation_for_skill?.trim() || null,
+              },
               projectPath:      PROJECT_PATH,
               createdByAgentId: AGENT_ID || "worker",
             });

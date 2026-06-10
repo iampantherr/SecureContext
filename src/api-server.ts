@@ -290,6 +290,17 @@ export async function createApiServer(storeOverride?: Store) {
     reply.type("text/html").send(renderDashboardHtml());
   });
 
+  // v0.30.6 — Personal-wiki KB graph panel. Reads the wiki/graph.json
+  // produced by personal-wiki/viz/build_graph.py and renders an inline
+  // d3.js force-directed view scoped to the operator's curated content.
+  // Path is configurable via PERSONAL_WIKI_ROOT env var. When the file
+  // doesn't exist (no wiki configured, or wiki is empty), the fragment
+  // shows an actionable "how to populate" message — never an error.
+  app.get("/dashboard/wiki-graph", async (_request, reply) => {
+    const { renderWikiGraphFragment } = await import("./dashboard/render.js");
+    reply.type("text/html").send(await renderWikiGraphFragment());
+  });
+
   app.get("/dashboard/health", async (_request, _reply) => {
     const { withClient } = await import("./pg_pool.js");
     try {
@@ -1039,8 +1050,28 @@ export async function createApiServer(storeOverride?: Store) {
     try {
       const { role } = request.query as Record<string, unknown>;
       if (typeof role !== "string" || !role) throw new ApiError(400, "role query param is required");
+      // Full-catalog sentinel. The A2A hybrid menu (generate-role-skill-block.mjs)
+      // passes role="intended_roles" to mean "every skill, regardless of role tag".
+      // It used to rely on `frontmatter::text ILIKE '%intended_roles%'`, but that
+      // silently dropped any admitted skill whose frontmatter lacks the literal
+      // `intended_roles` key (e.g. minimal operator/agent-authored skills carrying
+      // only name + description). Treat the sentinel (and "*"/"__all__") as a true
+      // catalog dump of every active, non-quarantined, named skill instead, so no
+      // admitted skill is ever invisible to agents just because of how it was authored.
+      const fullCatalog = role === "intended_roles" || role === "*" || role === "__all__";
       const { withClient: wc } = await import("./pg_pool.js");
       const rows = await wc(async (c) => {
+        if (fullCatalog) {
+          const r = await c.query<{ skill_id: string; name: string; version: string; scope: string; description: string }>(
+            `SELECT skill_id, name, version, scope, description FROM skills_pg
+              WHERE archived_at IS NULL
+                AND quarantined IS NOT TRUE
+                AND scope <> 'quarantine'
+                AND name IS NOT NULL AND name <> ''
+              ORDER BY name`,
+          );
+          return r.rows;
+        }
         const r = await c.query<{ skill_id: string; name: string; version: string; scope: string; description: string }>(
           `SELECT skill_id, name, version, scope, description FROM skills_pg
             WHERE archived_at IS NULL
@@ -3370,59 +3401,53 @@ if (process.argv[1]?.endsWith("api-server.js")) {
       }
     }
 
-    // v0.20.0 — auto-import skills/*.skill.md into skills_pg before listening.
-    // Idempotent: skips files whose body_hmac is unchanged. Skip silently if
-    // PG isn't configured (the import is best-effort startup work).
-    if (process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD) {
-      try {
-        const { autoImportSkills, backfillSecurityScans, backfillIntendedRoles } = await import("./skill_auto_import.js");
-        const summary = await autoImportSkills();
-        console.log(`Skill auto-import: scanned=${summary.scanned} +${summary.inserted} ~${summary.updated} =${summary.skipped_same} ✗${summary.parse_errors + summary.validation_errors}`);
-        // v0.23.3 — also backfill security scans for any active skills that
-        // have no scan history (pre-v0.23.0 skills imported via the raw-SQL
-        // path that bypassed the gate). Idempotent: only scans skills that
-        // have zero rows in skill_security_scans_pg.
-        const backfill = await backfillSecurityScans();
-        if (backfill.scanned > 0) {
-          console.log(`Skill scan backfill: scanned=${backfill.scanned} passed=${backfill.passed} failed=${backfill.failed}`);
-        }
-        // v0.24.2 — classify intended_roles for any skill missing them
-        // (the v0.24.0 marketplace skills, mostly). Idempotent: only
-        // touches skills with frontmatter.intended_roles missing or empty.
-        const roleBack = await backfillIntendedRoles();
-        if (roleBack.scanned > 0) {
-          console.log(`Skill role backfill: scanned=${roleBack.scanned} updated=${roleBack.updated} skipped=${roleBack.skipped}`);
-        }
-        // v0.26.0 Step 2 — walk ~/.claude/skills/<name>/ (Anthropic dir layout)
-        // and mirror to skills_pg with body_hmac + script_hmacs populated.
-        // Runs after the legacy flat-file auto-import so the two coexist.
-        try {
-          const { importFilesystemSkills } = await import("./skills/filesystem_skill_import.js");
-          // v0.27.0 — also walk per-project skill dirs declared via env.
-          // Set ZC_PROJECT_SKILL_PATHS to a colon-separated list of absolute
-          // project roots (e.g. "/projects/Test_Agent_Coordination:/projects/MyApp").
-          // Each must be a project root that contains .claude/skills/<name>/
-          // subdirs. The container must be able to read the path (bind-mounted).
-          const projectPathsRaw = process.env.ZC_PROJECT_SKILL_PATHS ?? "";
-          const projectPaths = projectPathsRaw
-            ? projectPathsRaw.split(/[:;,]/).map((p) => p.trim()).filter((p) => p.length > 0)
-            : [];
-          const fsSummary = await importFilesystemSkills({ projectPaths });
-          if (fsSummary.scanned > 0) {
-            console.log(`FS skill import: scanned=${fsSummary.scanned} +${fsSummary.inserted} ~${fsSummary.updated} =${fsSummary.skipped_same} ✗${fsSummary.errors}${projectPaths.length > 0 ? ` (projects=${projectPaths.length})` : ""}`);
-          }
-        } catch (e) {
-          console.error("FS skill import failed:", (e as Error).message);
-        }
-      } catch (e) {
-        console.error("Skill auto-import failed:", (e as Error).message);
-      }
-    }
+    // v0.30.8 — LISTEN FIRST, then run boot maintenance (skill auto-import +
+    // backfills) as fire-and-forget AFTER the server is reachable. Previously the
+    // awaited backfills ran BEFORE app.listen(), so any slow or hanging maintenance
+    // step (role-classify backfill, FS skill walk) blocked the HTTP server from ever
+    // coming up — taking the whole dashboard + storage API down (degraded-mode for
+    // every agent). Maintenance is idempotent + best-effort and must NEVER gate
+    // serving. It now runs inside the listen callback, unawaited.
     app.listen({ port: API_PORT, host: API_HOST }, (err) => {
       if (err) { console.error(err); process.exit(1); }
       console.log(`SecureContext API server listening on ${API_HOST}:${API_PORT}`);
       console.log(`Store backend: ${process.env["ZC_STORE"] ?? "sqlite"}`);
       console.log(`Auth: ${API_KEY ? "enabled (ZC_API_KEY set)" : "⚠️  OPEN — set ZC_API_KEY"}`);
+      void (async () => {
+        if (!(process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD)) return;
+        try {
+          const { autoImportSkills, backfillSecurityScans, backfillIntendedRoles } = await import("./skill_auto_import.js");
+          const summary = await autoImportSkills();
+          console.log(`Skill auto-import: scanned=${summary.scanned} +${summary.inserted} ~${summary.updated} =${summary.skipped_same} ✗${summary.parse_errors + summary.validation_errors}`);
+          // Backfill security scans for active skills with no scan history. Idempotent.
+          const backfill = await backfillSecurityScans();
+          if (backfill.scanned > 0) {
+            console.log(`Skill scan backfill: scanned=${backfill.scanned} passed=${backfill.passed} failed=${backfill.failed}`);
+          }
+          // Classify intended_roles for any skill missing them. Idempotent.
+          const roleBack = await backfillIntendedRoles();
+          if (roleBack.scanned > 0) {
+            console.log(`Skill role backfill: scanned=${roleBack.scanned} updated=${roleBack.updated} skipped=${roleBack.skipped}`);
+          }
+          // Walk ~/.claude/skills/<name>/ + per-project dirs (ZC_PROJECT_SKILL_PATHS)
+          // and mirror to skills_pg with body_hmac + script_hmacs populated.
+          try {
+            const { importFilesystemSkills } = await import("./skills/filesystem_skill_import.js");
+            const projectPathsRaw = process.env.ZC_PROJECT_SKILL_PATHS ?? "";
+            const projectPaths = projectPathsRaw
+              ? projectPathsRaw.split(/[:;,]/).map((p) => p.trim()).filter((p) => p.length > 0)
+              : [];
+            const fsSummary = await importFilesystemSkills({ projectPaths });
+            if (fsSummary.scanned > 0) {
+              console.log(`FS skill import: scanned=${fsSummary.scanned} +${fsSummary.inserted} ~${fsSummary.updated} =${fsSummary.skipped_same} ✗${fsSummary.errors}${projectPaths.length > 0 ? ` (projects=${projectPaths.length})` : ""}`);
+            }
+          } catch (e) {
+            console.error("FS skill import failed:", (e as Error).message);
+          }
+        } catch (e) {
+          console.error("Skill auto-import failed:", (e as Error).message);
+        }
+      })();
     });
   }).catch(err => { console.error(err); process.exit(1); });
 }

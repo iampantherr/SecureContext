@@ -1,0 +1,10 @@
+{
+  "main_branch": "main",
+  "version_files": [
+    "package.json",
+    ".claude-plugin/plugin.json",
+    "src/config.ts"
+  ],
+  "commit_template": "v{version} — {title}",
+  "ci_timeout_seconds": 900
+}

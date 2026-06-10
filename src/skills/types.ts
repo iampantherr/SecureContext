@@ -172,6 +172,12 @@ export interface SkillRun {
   // SHOULD always populate them.
   agent_id?:     string | null;
   project_hash?: string | null;
+  // v0.30.8 — structured outcome evidence captured at zc_record_skill_outcome
+  // time: { what_worked, what_didnt, recommendation_for_skill }. This is the
+  // raw material the mutator needs to propose targeted body improvements —
+  // without it, low-scoring runs say "failed" but never say WHY. The tool
+  // layer requires it for failed/low-score runs; optional on successes.
+  evidence?:     Record<string, unknown> | null;
 }
 
 /**

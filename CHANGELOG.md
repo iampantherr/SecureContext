@@ -4,6 +4,87 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.30.8] — 2026-06-10 — Evidence-enforced outcomes, listen-first boot, catalog + resolution fixes, dashboard redesign
+
+The self-improvement loop gets its missing input: structured evidence on every
+skill outcome, enforced at the tool layer. Plus four reliability fixes found by
+running the loop end-to-end with live terminal agents, and a full operator
+dashboard redesign.
+
+### Added
+- **Structured outcome evidence (the headline).** `zc_record_skill_outcome` now
+  accepts `what_worked`, `what_didnt`, and `recommendation_for_skill`. A
+  validation gate **rejects** recordings for failed/timeout runs or
+  `outcome_score < 0.6` unless `what_didnt` + `recommendation_for_skill` are
+  provided — a bare score teaches the mutator nothing; the WHY is the learning
+  signal. Evidence persists to a new `evidence` column on both stores
+  (PG migration 27 `JSONB`, SQLite migration 29 `TEXT`) and is mirrored into the
+  outcome rows the L1 mutator consumes. Live-tested with a real terminal agent:
+  the gate rejected a no-evidence failure recording, accepted the evidenced
+  retry, and the agent's first real run voluntarily produced an actionable
+  skill-improvement recommendation.
+- `.publish-github-release-config.json` — release config (version-bearing
+  files: `package.json`, `.claude-plugin/plugin.json`, `src/config.ts`).
+- `docker-compose`: read-only `personal-wiki` mount + `PERSONAL_WIKI_ROOT` env
+  for the dashboard KB-graph panel.
+
+### Fixed
+- **API server boots listen-first.** Startup previously `await`ed skill
+  maintenance (auto-import → security-scan backfill → role backfill → FS skill
+  walk) *before* `app.listen()` — one slow/hung step took the whole HTTP API
+  down (agents fell to degraded mode). Maintenance now runs fire-and-forget
+  *after* the server is listening; it can never gate serving again.
+- **Full-catalog sentinel no longer drops skills.** `/api/v1/skills/by-role`
+  with the full-catalog sentinel relied on `frontmatter::text ILIKE
+  '%intended_roles%'`, silently hiding any admitted skill authored without an
+  `intended_roles` key (minimal `name` + `description` skills were invisible to
+  every agent). The sentinel now returns all active, non-quarantined, named
+  skills.
+- **`zc_skill_show` resilient version resolution.** A full id with a wrong or
+  stale version (e.g. `foo@1.0.0@global` when the skill is at `1.0.2`) returned
+  a spurious "not found"; the PG fallback now strips `@version@scope` and
+  resolves the bare name to the latest active version.
+- **Frontmatter parser: folded block scalars.** The filesystem-skill importer
+  only handled `|` literal block scalars; skills authored with `description: >-`
+  (what agents naturally emit) failed admission. `>`, `>-`, `>+` now fold
+  correctly.
+- Wiki KB graph: disconnected components (e.g. a single-video creator sharing no
+  topics) were flung off-canvas by the force layout and read as "missing" —
+  gentle `forceX`/`forceY` gathering + settle-then-fit keep every node in frame.
+
+### Changed
+- **Operator dashboard redesigned** ("operator's terminal, elevated"): cohesive
+  dark design system (signal-teal accent, Chakra Petch / IBM Plex Sans /
+  JetBrains Mono), SVG tab icons, masthead with live status, staggered panel
+  reveals, HTMX loading shimmer — with a `web-design-review` accessibility pass
+  (WCAG-AA contrast, `:focus-visible`, `prefers-reduced-motion`, mobile
+  overflow fixes). All HTMX fragment contracts and endpoints unchanged.
+- KB graph restyled to the dashboard palette with staggered node entrance,
+  hover focus (connected edges highlight, rest dim), and auto-fit-to-view.
+
+## [0.30.6 – 0.30.7] — 2026-06-01 — Personal-wiki KB graph panel + dashboard tab navigation
+
+- **0.30.6**: dashboard panel rendering the operator's personal-wiki knowledge
+  graph (`wiki/graph.json`, d3 force-directed: creators / videos / topics /
+  wiki-origin skills), lazy-loaded; wiki graph rebuilt by `approve.py` and the
+  twice-weekly promotion cron.
+- **0.30.7**: dashboard split into four sticky tabs (Health / Skills /
+  Authoring / Wiki & Savings) with `localStorage`-persisted selection — ends the
+  12-panel scroll.
+
+## [0.30.0 – 0.30.5] — 2026-05-21 → 2026-05-31 — Terminal-agent mutator/spotter loop + PATH A authoring
+
+Previously released in commits; consolidated changelog entry.
+
+- **0.30.0**: terminal-agent mutator/spotter loop + Anthropic-standard skill
+  pipeline (queue-based spotter β LLM filer).
+- **0.30.1**: mutators consult the canonical `writing-skills` meta-skill instead
+  of duplicating the 5.6 KB standard into every prompt.
+- **0.30.2**: dashboard PATH A authoring — admission chain-log + project scope.
+- **0.30.3**: admission scanner skips `__pycache__` + common cache dirs.
+- **0.30.4**: PATH A authoring also writes `SKILL.md` to the filesystem.
+- **0.30.5**: PATH A accepts a tags form field.
+
 ## [0.29.0] — 2026-05-20 — Skill authoring chain (meta-skill, reference skill, β LLM filer)
 
 The shift from "SecureContext can admit and verify skills" to "agents can
