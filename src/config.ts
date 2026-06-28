@@ -70,6 +70,22 @@ export const Config = {
   W_BACKLINK:        parseFloat(env["ZC_W_BACKLINK"] ?? "0.08"),
   BACKLINK_LOG_BASE: parseInt(env["ZC_BACKLINK_LOG_BASE"] ?? "10", 10),
 
+  // ── Retrieval fusion (Tier-2 #3) ─────────────────────────────────────────
+  // How the BM25 + vector (+ backlink) candidate lists are combined.
+  //   "weighted" — historical weighted-sum (W_BM25·bm25 + W_COSINE·cosine) plus the
+  //                additive log-damped backlink boost. Byte-identical to v0.31.0.
+  //   "rrf"      — Reciprocal Rank Fusion over per-list RANK positions
+  //                (Σ w/(K+rank)); rank-based, scale-free, robust to score skew.
+  // Default "rrf" (v0.31.x): A/B on a hub-recall corpus showed RRF surfaces the
+  // heavily-referenced real answer above a keyword-stuffed decoy where weighted-sum
+  // fails. Set ZC_RETRIEVAL_FUSION=weighted to roll back. Backlink folds in as a third
+  // RRF list (kept off when W_BACKLINK=0, so that flag remains the backlink kill-switch).
+  RETRIEVAL_FUSION:  (env["ZC_RETRIEVAL_FUSION"] ?? "rrf") as "weighted" | "rrf",
+  RRF_K:             parseInt(env["ZC_RRF_K"] ?? "60", 10),
+  RRF_W_BM25:        parseFloat(env["ZC_RRF_W_BM25"] ?? "1.0"),
+  RRF_W_VEC:         parseFloat(env["ZC_RRF_W_VEC"] ?? "1.0"),
+  RRF_W_BACKLINK:    parseFloat(env["ZC_RRF_W_BACKLINK"] ?? "0.25"),
+
   // ── Fetch / SSRF ──────────────────────────────────────────────────────────
   FETCH_LIMIT:       parseInt(env["ZC_FETCH_LIMIT"] ?? "50", 10),
   FETCH_TIMEOUT_MS:  15_000,

@@ -519,16 +519,47 @@ export class PostgresStore implements Store {
         const embMap = new Map(embRes.rows.map(r => [r.source, r.vector]));
         const maxBm25 = Math.max(...bm25Res.rows.map(r => r.rank), 1);
 
-        const scored = bm25Res.rows.map(row => {
-          const bm25Norm = row.rank / maxBm25;
-          let cosScore   = 0;
+        // Compute cosine for every BM25 candidate up front (needed by both fusion modes).
+        const withCos = bm25Res.rows.map(row => {
+          let cosScore = 0;
           const storedVecStr = embMap.get(row.source);
           if (storedVecStr) {
             // Parse pgvector "[x1,x2,...,xN]" string back to Float32Array
             const nums = storedVecStr.slice(1, -1).split(",").map(Number);
             cosScore   = cosineSimilarity(new Float32Array(nums), qEmbed.vector);
           }
-          const hybrid = Config.W_BM25 * bm25Norm + Config.W_COSINE * cosScore + blBoost(row.source);
+          return { row, cosScore };
+        });
+
+        // Tier-2 #3: RRF fuses per-list RANK positions (scale-free); weighted fuses
+        // normalized scores + additive backlink boost (byte-identical to v0.31.0).
+        const useRRF = Config.RETRIEVAL_FUSION === "rrf";
+        // BM25 rank = position in bm25Res.rows (already ORDER BY rank DESC).
+        const bm25RankMap = new Map(bm25Res.rows.map((r, i) => [r.source, i + 1]));
+        let cosRankMap: Map<string, number> | null = null;
+        let blRankMap:  Map<string, number> | null = null;
+        if (useRRF) {
+          cosRankMap = new Map([...withCos].sort((a, b) => b.cosScore - a.cosScore).map((x, i) => [x.row.source, i + 1]));
+          if (Config.W_BACKLINK > 0 && blMap.size > 0) {
+            blRankMap = new Map(bm25Res.rows.map(r => ({ s: r.source, w: blMap.get(r.source) ?? 0 }))
+              .filter(x => x.w > 0).sort((a, b) => b.w - a.w).map((x, i) => [x.s, i + 1]));
+          }
+        }
+
+        const scored = withCos.map(({ row, cosScore }) => {
+          let hybrid: number;
+          if (useRRF) {
+            const K   = Config.RRF_K;
+            const br  = bm25RankMap.get(row.source);
+            const cr  = cosRankMap?.get(row.source);
+            const blr = blRankMap?.get(row.source);
+            hybrid =
+              (br  ? Config.RRF_W_BM25     / (K + br)  : 0) +
+              (cr  ? Config.RRF_W_VEC      / (K + cr)  : 0) +
+              (blr ? Config.RRF_W_BACKLINK / (K + blr) : 0);
+          } else {
+            hybrid = Config.W_BM25 * (row.rank / maxBm25) + Config.W_COSINE * cosScore + blBoost(row.source);
+          }
           return { ...row, vectorScore: cosScore, hybridScore: hybrid };
         });
 

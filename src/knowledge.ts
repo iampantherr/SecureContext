@@ -403,6 +403,33 @@ function _searchDb(
     } catch { /* table absent on a pre-migration DB — leave map empty */ }
   }
 
+  // Tier-2 #3: Reciprocal Rank Fusion. Precompute per-list RANK positions (1-indexed)
+  // ONLY in RRF mode — the weighted path below is left byte-identical. Backlink is folded
+  // in as a third list, gated on W_BACKLINK>0 so that flag stays the backlink kill-switch.
+  const useRRF = Config.RETRIEVAL_FUSION === "rrf";
+  let bm25RankMap: Map<string, number> | null = null;
+  let cosRankMap:  Map<string, number> | null = null;
+  let blRankMap:   Map<string, number> | null = null;
+  if (useRRF) {
+    const entries = Array.from(candidateMap.entries());
+    // BM25: lower FTS5 rank = more relevant.
+    bm25RankMap = new Map([...entries].sort((a, b) => a[1].rank - b[1].rank).map(([s], i) => [s, i + 1]));
+    // Vector: higher cosine = more relevant (only when a query embedding exists).
+    if (queryVector) {
+      const withCos = entries.map(([s]) => {
+        const v = embeddingMap.get(s);
+        return { s, cos: v ? cosineSimilarity(queryVector, v) : -Infinity };
+      }).sort((a, b) => b.cos - a.cos);
+      cosRankMap = new Map(withCos.map((x, i) => [x.s, i + 1]));
+    }
+    // Backlink: higher weighted_in = stronger hub (only sources with inbound links).
+    if (Config.W_BACKLINK > 0 && backlinkMap.size > 0) {
+      const withBl = entries.map(([s]) => ({ s, w: backlinkMap.get(s) ?? 0 }))
+        .filter((x) => x.w > 0).sort((a, b) => b.w - a.w);
+      blRankMap = new Map(withBl.map((x, i) => [x.s, i + 1]));
+    }
+  }
+
   const ranks     = Array.from(candidateMap.values()).map((r) => r.rank);
   const minRank   = Math.min(...ranks);
   const maxRank   = Math.max(...ranks);
@@ -428,7 +455,21 @@ function _searchDb(
     const blBoost = wIn > 0
       ? Config.W_BACKLINK * (Math.log(1 + wIn) / Math.log(1 + Config.BACKLINK_LOG_BASE))
       : 0;
-    const hybridScore = baseScore + blBoost;
+    // Tier-2 #3: RRF fuses per-list RANK positions (scale-free, robust to score skew);
+    // the weighted path fuses normalized scores + additive boost (byte-identical to v0.31.0).
+    let hybridScore: number;
+    if (useRRF) {
+      const K   = Config.RRF_K;
+      const br  = bm25RankMap!.get(source);
+      const cr  = cosRankMap?.get(source);
+      const blr = blRankMap?.get(source);
+      hybridScore =
+        (br  ? Config.RRF_W_BM25     / (K + br)  : 0) +
+        (cr  ? Config.RRF_W_VEC      / (K + cr)  : 0) +
+        (blr ? Config.RRF_W_BACKLINK / (K + blr) : 0);
+    } else {
+      hybridScore = baseScore + blBoost;
+    }
 
     const firstTerm  = queries[0]?.toLowerCase().split(" ")[0] ?? "";
     const idx        = row.content.toLowerCase().indexOf(firstTerm);
