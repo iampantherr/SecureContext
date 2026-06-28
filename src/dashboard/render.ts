@@ -555,6 +555,24 @@ export function renderDashboardHtml(): string {
   .role-checkbox{display:flex;align-items:center;gap:5px;font-size:.78rem;color:#c3ccd9;cursor:pointer;}
   .response .ok{background:rgba(47,230,166,.1);color:#aef3d8;padding:10px;border-radius:8px;}
   .response .error{background:rgba(255,93,108,.1);color:#ffb3bb;padding:10px;border-radius:8px;}
+  /* v0.33.0 — suspected-contradictions review cards */
+  .contra-card{border:1px solid var(--border);border-left:3px solid var(--warn);border-radius:10px;padding:12px 14px;margin-bottom:12px;background:var(--bg-2);animation:rise .4s var(--ease-out) both;}
+  .contra-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:.86rem;}
+  .contra-reason{font-weight:600;color:var(--warn);}
+  .contra-sim{font-family:var(--mono);font-size:.78rem;color:var(--text-dim);border:1px solid var(--border);border-radius:6px;padding:1px 7px;}
+  .contra-proj{color:var(--text-dim);margin-left:auto;}
+  .contra-pair{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:start;margin-bottom:12px;}
+  .contra-side{min-width:0;}
+  .contra-side code{display:inline-block;margin-bottom:4px;color:var(--signal);font-size:.82rem;word-break:break-all;}
+  .contra-val{font-size:.84rem;color:var(--text);line-height:1.4;background:var(--surface);border:1px solid var(--hairline);border-radius:7px;padding:7px 9px;}
+  .contra-vs{align-self:center;color:var(--warn);font-size:1.1rem;font-weight:700;}
+  .contra-actions{display:flex;gap:8px;flex-wrap:wrap;}
+  .contra-actions button{font-size:.84rem;padding:6px 13px;}
+  .contra-accept:hover{border-color:var(--signal);color:var(--signal);background:rgba(47,230,166,.08);}
+  .contra-discard:hover{border-color:#9aa6b5;color:var(--text);}
+  .contra-ignore:hover{border-color:#ff7d88;color:#ffb3bb;background:rgba(255,93,108,.07);}
+  .contra-resolved{border:1px solid var(--border);border-left:3px solid var(--signal);border-radius:10px;padding:10px 14px;margin-bottom:12px;background:rgba(47,230,166,.06);color:#aef3d8;font-size:.88rem;}
+  @media (max-width:720px){.contra-pair{grid-template-columns:1fr;}.contra-vs{justify-self:start;}}
   .lint-errors{margin-top:8px;padding:7px 10px;background:rgba(255,93,108,.1);border-left:3px solid var(--alert);border-radius:0 6px 6px 0;}
   .lint-err{color:#ffb3bb;font-size:.84rem;}
   .lint-warns summary{cursor:pointer;font-size:.84rem;color:var(--warn);}
@@ -697,6 +715,21 @@ export function renderDashboardHtml(): string {
        hx-trigger="load, every 60s"
        hx-target="this" hx-swap="innerHTML">
     Loading skill-activity health…
+  </div>
+</div>
+</section>
+
+<section class="tab-content" data-tab="health">
+<!-- v0.33.0 — Suspected memory contradictions. The contradiction detector +
+     enrichment cron flag conflicting working-memory facts; this is where the
+     operator triages them (accept / discard / ignore). Polls every 60s. -->
+<div class="panel">
+  <h2>Suspected memory contradictions <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(open conflicts in working memory — accept, discard, or ignore each)</span></h2>
+  <div id="contradictions"
+       hx-get="/dashboard/contradictions"
+       hx-trigger="load, every 60s"
+       hx-target="this" hx-swap="innerHTML">
+    Loading suspected contradictions…
   </div>
 </div>
 </section>
@@ -1430,6 +1463,65 @@ export function renderSkillEditForm(row: Record<string, unknown>): string {
       <div class="skill-edit-response"></div>
     </form>
   `;
+}
+
+/**
+ * v0.33.0 — Suspected-contradictions review panel. Renders open memory contradictions
+ * (from memory_contradictions_pg, joined to the fact values for context) as cards with
+ * Accept / Discard / Ignore actions. Each card is a tiny form (hidden inputs + a named
+ * submit button per action) so special chars in keys/values can't break attribute quoting;
+ * the POST swaps the card via outerHTML. NEVER auto-applies — operator decides.
+ */
+export function renderContradictionsFragment(
+  rows: Array<Record<string, unknown>>,
+  projectNameMap: Map<string, string> = new Map(),
+): string {
+  if (rows.length === 0) {
+    return `<p class="empty">No suspected contradictions — working memory is consistent. ✓</p>`;
+  }
+  const reasonLabel: Record<string, string> = {
+    semantic_conflict:   "opposite polarity",
+    decision_reversal:   "decision reversed",
+    resolution_conflict: "resolved-vs-live",
+  };
+  return rows.map((r) => {
+    const ph    = String(r.project_hash ?? "");
+    const agent = String(r.agent_id ?? "default");
+    const ka    = String(r.key_a ?? "");
+    const kb    = String(r.key_b ?? "");
+    const reason = String(r.reason ?? "");
+    const sim   = r.similarity == null ? "" : Number(r.similarity).toFixed(2);
+    const va    = r.value_a == null ? "(fact no longer present)" : String(r.value_a);
+    const vb    = r.value_b == null ? "(fact no longer present)" : String(r.value_b);
+    const name  = projectNameMap.get(ph);
+    const projectLabel = name
+      ? `<span class="project-name" title="project_hash: ${escapeHtml(ph)}">${escapeHtml(name)}</span>`
+      : `<span class="project-name unresolved" title="hash ${escapeHtml(ph)}">project:${escapeHtml(ph.slice(0, 8))}…</span>`;
+    const hidden =
+      `<input type="hidden" name="project_hash" value="${escapeHtml(ph)}">` +
+      `<input type="hidden" name="agent_id" value="${escapeHtml(agent)}">` +
+      `<input type="hidden" name="key_a" value="${escapeHtml(ka)}">` +
+      `<input type="hidden" name="key_b" value="${escapeHtml(kb)}">`;
+    return `
+<div class="contra-card">
+  <div class="contra-head">
+    <span class="contra-reason">⚠️ ${escapeHtml(reasonLabel[reason] ?? reason)}</span>
+    ${sim ? `<span class="contra-sim">sim ${escapeHtml(sim)}</span>` : ""}
+    <span class="contra-proj">${projectLabel}${agent !== "default" ? ` · <code>${escapeHtml(agent)}</code>` : ""}</span>
+  </div>
+  <div class="contra-pair">
+    <div class="contra-side"><code>${escapeHtml(ka)}</code><div class="contra-val">${escapeHtml(va.slice(0, 240))}</div></div>
+    <div class="contra-vs">⇄</div>
+    <div class="contra-side"><code>${escapeHtml(kb)}</code><div class="contra-val">${escapeHtml(vb.slice(0, 240))}</div></div>
+  </div>
+  <form class="contra-actions" hx-post="/dashboard/contradictions/review" hx-target="closest .contra-card" hx-swap="outerHTML">
+    ${hidden}
+    <button type="submit" name="action" value="accept"  class="contra-accept"  title="Acknowledge this is a real conflict">✓ Accept</button>
+    <button type="submit" name="action" value="discard" class="contra-discard" title="Resolved / no longer relevant">🗑 Discard</button>
+    <button type="submit" name="action" value="ignore"  class="contra-ignore"  title="Not a real conflict — dismiss">✕ Ignore</button>
+  </form>
+</div>`;
+  }).join("\n");
 }
 
 export function renderPendingFragment(

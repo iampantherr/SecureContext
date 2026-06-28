@@ -739,6 +739,70 @@ export async function createApiServer(storeOverride?: Store) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
+  // ─── v0.33.0 — Suspected-contradictions review (dashboard) ──────────────────
+  app.get("/dashboard/contradictions", async (_request, reply) => {
+    const { renderContradictionsFragment, loadProjectNameMap } = await import("./dashboard/render.js");
+    const { withClient } = await import("./pg_pool.js");
+    try {
+      const rows = await withClient(async (c) => {
+        // Join each flagged key to its fact value for context (prefer the agent's own
+        // value, else the shared 'default' pool). Correlated subqueries avoid row fan-out.
+        const res = await c.query<Record<string, unknown>>(
+          `SELECT mc.project_hash, mc.agent_id, mc.key_a, mc.key_b, mc.reason, mc.similarity, mc.surfaced_at,
+             (SELECT value FROM working_memory w WHERE w.project_hash = mc.project_hash AND w.key = mc.key_a
+                AND (w.agent_id = mc.agent_id OR w.agent_id = 'default')
+              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS value_a,
+             (SELECT value FROM working_memory w WHERE w.project_hash = mc.project_hash AND w.key = mc.key_b
+                AND (w.agent_id = mc.agent_id OR w.agent_id = 'default')
+              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS value_b
+           FROM memory_contradictions_pg mc
+           WHERE mc.status = 'open'
+           ORDER BY mc.surfaced_at DESC LIMIT 100`,
+        );
+        return res.rows;
+      });
+      const nameMap = await loadProjectNameMap();
+      reply.type("text/html").send(renderContradictionsFragment(rows, nameMap));
+    } catch (e) {
+      reply.type("text/html").send(`<p class="empty">Suspected contradictions unavailable: ${escapeHtml((e as Error).message)}</p>`);
+    }
+  });
+
+  app.post("/dashboard/contradictions/review", async (request, reply) => {
+    const body = request.body as Record<string, unknown>;
+    const project_hash = String(body.project_hash ?? "").trim();
+    const agent_id     = String(body.agent_id ?? "default").trim();
+    const key_a        = String(body.key_a ?? "").trim();
+    const key_b        = String(body.key_b ?? "").trim();
+    const action       = String(body.action ?? "").trim();
+    // accept = acknowledge a real conflict · discard = resolved/removed · ignore = false positive
+    const statusMap: Record<string, string> = { accept: "acknowledged", discard: "resolved", ignore: "dismissed" };
+    const status = statusMap[action];
+    if (!project_hash || !key_a || !key_b || !status) {
+      reply.type("text/html").send(`<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">❌ Invalid review request.</div>`);
+      return;
+    }
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const changed = await withClient(async (c) => {
+        const r = await c.query(
+          `UPDATE memory_contradictions_pg SET status = $1, reviewed_at = NOW()
+            WHERE project_hash = $2 AND agent_id = $3 AND key_a = $4 AND key_b = $5 AND status = 'open'`,
+          [status, project_hash, agent_id, key_a, key_b],
+        );
+        return r.rowCount ?? 0;
+      });
+      const label = action === "accept" ? "accepted" : action === "discard" ? "discarded" : "ignored";
+      reply.type("text/html").send(
+        changed > 0
+          ? `<div class="contra-resolved">✓ ${escapeHtml(label)} — <code>${escapeHtml(key_a)}</code> ⇄ <code>${escapeHtml(key_b)}</code></div>`
+          : `<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">Already reviewed elsewhere.</div>`,
+      );
+    } catch (e) {
+      reply.type("text/html").send(`<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">❌ ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   // ─── v0.18.5 Sprint 2.7 — Skill frontmatter editor ──────────────────────
   // Lists active skills + provides an inline edit form per skill. Body is
   // preserved verbatim; only frontmatter fields the operator owns are

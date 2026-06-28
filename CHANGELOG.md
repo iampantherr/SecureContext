@@ -4,6 +4,26 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.34.0] — 2026-06-28 — Operator dashboard: suspected-contradiction triage
+
+### Added
+- **Suspected-contradictions panel** on the operator dashboard (Health tab). Lists every open
+  memory contradiction — flagged by the recall-time scan + the enrichment cron — with both
+  conflicting keys, their fact values for context, the reason + cosine similarity, and the
+  resolving project name. Each card has three actions:
+  - **✓ Accept** → `acknowledged` (a real conflict, noted),
+  - **🗑 Discard** → `resolved` (handled / no longer relevant),
+  - **✕ Ignore** → `dismissed` (false positive).
+  HTMX form per card (hidden inputs + named submit buttons, robust to special chars); the action
+  POSTs to `/dashboard/contradictions/review` and swaps the card to a confirmation. Never
+  auto-applies — the operator decides. Polls every 60s. Endpoints: `GET /dashboard/contradictions`,
+  `POST /dashboard/contradictions/review`.
+
+### Verified
+- Live browser E2E (Playwright): panel rendered 14 cards; clicking Accept / Discard / Ignore
+  persisted `acknowledged` / `resolved` / `dismissed` to `memory_contradictions_pg` respectively
+  and swapped each card to its confirmation. Tests 865/868 (3 pre-existing fixtures).
+
 ## [0.33.0] — 2026-06-28 — Tier-2: background memory-enrichment cron
 
 Completes Tier-2 with a scheduled maintenance cycle — and, notably, **actually wires the
