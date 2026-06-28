@@ -18,6 +18,7 @@
 
 import type { KnowledgeEntry } from "./knowledge.js";
 import { logger } from "./logger.js";
+import { Config } from "./config.js";
 
 // v0.20.0 — strip any /api/* suffix from ZC_OLLAMA_URL so we can build
 // path-specific URLs. Reranker uses /api/embeddings; HyDE uses /api/generate.
@@ -26,25 +27,26 @@ function ollamaBase(): string {
   return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
 }
 const OLLAMA_URL     = ollamaBase();
-const RERANKER_MODEL = process.env.ZC_RERANKER_MODEL ?? "bge-reranker-v2-m3";
+// Fallback (bi-encoder) reranker model. Defaults to the active embedding model so the
+// cosine fallback works out of the box; set ZC_RERANKER_MODEL to a dedicated reranker if pulled.
+const RERANKER_MODEL = process.env.ZC_RERANKER_MODEL ?? Config.OLLAMA_MODEL;
 const HYDE_MODEL     = process.env.ZC_HYDE_MODEL ?? "qwen2.5-coder:14b";
+// Tier-2 #3: LLM used as a cross-encoder reranker (joint query+doc relevance scoring).
+const RERANK_LLM_MODEL = process.env.ZC_RERANK_LLM_MODEL ?? HYDE_MODEL;
 
 // ─── Reranker (Sprint 4 #10) ──────────────────────────────────────────────
 
 /**
- * Rerank candidates using a cross-encoder via Ollama. Falls back to original
- * order on failure (e.g. model not pulled). Returns top N.
+ * Rerank candidates with a real cross-encoder pass: an LLM jointly scores each
+ * (query, document) pair for relevance — the cross-encoder property a bi-encoder
+ * cosine fundamentally can't capture (it judges the pair together, not two
+ * independent embeddings). One batched /api/generate call (format:"json") scores
+ * every candidate 0-10. Falls back to the embedding-cosine stand-in, then to the
+ * original order, on any failure (model not pulled, bad JSON, Ollama down).
  *
- * Uses the Ollama embeddings API as a stand-in: we get pairwise embeddings
- * for (query, candidate) and score by cosine. For native cross-encoder
- * reranking, the operator can pull bge-reranker-v2-m3 and the model will
- * return rerank scores. Until then, we approximate with embedding cosine —
- * still a quality improvement over pure BM25 for ambiguous queries.
- *
- * Note: Ollama doesn't yet have a unified reranker API across all models
- * (as of late 2025). We use the embeddings approach because it works with
- * any embedding model. When bge-reranker-v2-m3 ships proper API support
- * via Ollama, swap in the call.
+ * Opt-in via zc_search({ rerank: true }); never on the default search path.
+ * Returns top N. A native cross-encoder (e.g. bge-reranker-v2-m3) can be swapped
+ * into llmRerankScores if/when Ollama ships a unified rerank API.
  */
 export async function rerankCandidates(
   query:      string,
@@ -52,12 +54,23 @@ export async function rerankCandidates(
   topN:       number = 10,
 ): Promise<KnowledgeEntry[]> {
   if (candidates.length <= topN) return candidates;
+
+  // 1) Real cross-encoder: LLM joint relevance scoring (batched, JSON-forced).
   try {
-    // Pull query embedding once
+    const scores = await llmRerankScores(query, candidates);
+    if (scores && scores.size > 0) {
+      const scored = candidates.map((c, i) => ({ ent: c, s: scores.get(i) ?? 0 }));
+      scored.sort((a, b) => b.s - a.s);
+      return scored.slice(0, topN).map((x) => ({ ...x.ent, vectorScore: x.s / 10 }));
+    }
+  } catch (e) {
+    logger.warn("retrieval", "llm_rerank_failed", { error: (e as Error).message });
+  }
+
+  // 2) Fallback: embedding-cosine stand-in (bi-encoder approximation).
+  try {
     const qEmbed = await ollamaEmbed(query, RERANKER_MODEL);
     if (!qEmbed) return candidates.slice(0, topN);
-
-    // Score each candidate against the query
     const scored: Array<{ ent: KnowledgeEntry; rerank_score: number }> = [];
     for (const c of candidates) {
       const text = `${c.source}\n${c.snippet ?? ""}`.slice(0, 1500);
@@ -66,15 +79,80 @@ export async function rerankCandidates(
       scored.push({ ent: c, rerank_score: cosine(qEmbed, cEmbed) });
     }
     scored.sort((a, b) => b.rerank_score - a.rerank_score);
-    return scored.slice(0, topN).map(s => ({
-      ...s.ent,
-      // Override vectorScore with rerank score for downstream sorting
-      vectorScore: s.rerank_score,
-    }));
+    return scored.slice(0, topN).map(s => ({ ...s.ent, vectorScore: s.rerank_score }));
   } catch (e) {
     logger.warn("retrieval", "rerank_failed", { error: (e as Error).message });
     return candidates.slice(0, topN);
   }
+}
+
+/**
+ * Cross-encoder scoring via a single batched LLM call. Returns a Map of
+ * candidate-index → 0-10 relevance, or null on failure. `format:"json"` forces
+ * parseable output; temperature 0 for determinism.
+ */
+async function llmRerankScores(
+  query:      string,
+  candidates: KnowledgeEntry[],
+): Promise<Map<number, number> | null> {
+  const docs = candidates
+    .map((c, i) => `[${i}] ${c.source}\n${(c.snippet ?? "").replace(/\s+/g, " ").slice(0, 400)}`)
+    .join("\n\n");
+  const prompt =
+    `You are a search reranker. For each numbered document, score how well it answers the QUERY ` +
+    `on a 0-10 scale (10 = directly and specifically answers it; 0 = irrelevant). Judge relevance ` +
+    `to the query's intent, not keyword overlap.\n\nQUERY: ${query}\n\nDOCUMENTS:\n${docs}\n\n` +
+    `Return ONLY a JSON object mapping each document number to its score, e.g. {"0": 7, "1": 2, "2": 9}.`;
+  const r = await fetch(`${OLLAMA_URL.replace(/\/$/, "")}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: RERANK_LLM_MODEL,
+      prompt,
+      stream: false,
+      format: "json",
+      options: { temperature: 0, num_predict: 600 },
+    }),
+  });
+  if (!r.ok) return null;
+  const j = await r.json() as { response: string };
+  let parsed: unknown;
+  try { parsed = JSON.parse(j.response ?? ""); } catch { return null; }
+  return coerceScoreMap(parsed);
+}
+
+/**
+ * Coerce assorted LLM JSON shapes into an index→score Map. Handles the index→score
+ * object map ({"0":7}), nested ({"0":{"score":7}}), arrays ([{i,score}] or bare [7,2]),
+ * a single {i,score} object, and {scores|results:[...]} wrappers — because models vary
+ * even under format:"json". Returns null if nothing usable was found.
+ */
+function coerceScoreMap(parsed: unknown): Map<number, number> | null {
+  const map = new Map<number, number>();
+  const add = (i: unknown, s: unknown): void => {
+    const idx = typeof i === "number" ? i : typeof i === "string" ? Number(i) : NaN;
+    const sc  = typeof s === "number" ? s : typeof s === "string" ? Number(s) : NaN;
+    if (Number.isFinite(idx) && Number.isFinite(sc)) map.set(idx, Math.max(0, Math.min(10, sc)));
+  };
+  const fromArray = (arr: unknown[]): void => {
+    arr.forEach((e, k) => {
+      if (e && typeof e === "object") {
+        const o = e as { i?: unknown; index?: unknown; score?: unknown; s?: unknown };
+        add(o.i ?? o.index ?? k, o.score ?? o.s);
+      } else add(k, e);
+    });
+  };
+  if (Array.isArray(parsed)) fromArray(parsed);
+  else if (parsed && typeof parsed === "object") {
+    const o = parsed as Record<string, unknown>;
+    if (Array.isArray(o.scores)) fromArray(o.scores);
+    else if (Array.isArray(o.results)) fromArray(o.results);
+    else if ("i" in o || "index" in o) add(o.i ?? o.index, o.score ?? o.s); // single object
+    else for (const [k, v] of Object.entries(o)) {                          // index→score map
+      add(k, v && typeof v === "object" ? (v as { score?: unknown }).score : v);
+    }
+  }
+  return map.size > 0 ? map : null;
 }
 
 // ─── HyDE (Sprint 4 #11a) ─────────────────────────────────────────────────
