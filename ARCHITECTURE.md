@@ -57,6 +57,18 @@ Every new column defaults to plain `fact`, every new table is `CREATE … IF NOT
 `W_BACKLINK=0` + no epistemic params the search/recall output is byte-identical to pre-Tier-1.
 Migrations are idempotent and re-runnable; absent tables degrade silently to baseline behaviour.
 
+### Tier-2 retrieval (v0.32.0)
+
+- **Reciprocal Rank Fusion** (`RETRIEVAL_FUSION=rrf`, default) fuses BM25 + vector + backlink as
+  per-list rank positions (`Σ w/(K+rank)`) in both stores; `=weighted` restores the v0.31.0
+  weighted-sum. A/B-confirmed to beat weighted-sum on hub recall.
+- **Cross-encoder rerank** (opt-in `zc_search{rerank:true}`): an LLM jointly scores (query, doc)
+  pairs — a real cross-encoder, replacing the bi-encoder cosine stand-in; falls back gracefully.
+- **Recency-decay/salience**: `access_count` + `last_retrieved_at` on `working_memory` feed a
+  secondary recall key under importance (`W_SALIENCE=0` = kill-switch).
+- **Prefix-cache** (plan #5): already realized — recall fires once per session and the host
+  harness's conversation cache keeps it as a stable prefix; no SC-side change needed.
+
 ---
 
 ## Deployment Modes

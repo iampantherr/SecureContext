@@ -4,6 +4,39 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.32.0] — 2026-06-28 — Tier-2: rank-fusion retrieval, cross-encoder rerank, recency-decay
+
+Retrieval-quality Tier-2: how candidates are fused and reranked, plus a recency/frequency
+signal on recall. All A/B-measured and gated with byte-identical kill-switches.
+
+### Added
+- **Reciprocal Rank Fusion (default-on).** Search now fuses BM25 + vector + backlink as
+  per-list RANK positions (`Σ w/(K+rank)`) instead of a weighted score sum, in both the
+  SQLite and PG paths. Rank-based fusion lets the backlink signal surface a heavily-referenced
+  real answer above a keyword-stuffed decoy: an A/B on a hub-recall corpus had weighted-sum
+  rank the decoy #1 / the real answer #2, while RRF flips them. `ZC_RETRIEVAL_FUSION=weighted`
+  rolls back; `ZC_RRF_K` (60) + per-list weights are tunable. Backlink list stays gated on
+  `W_BACKLINK>0`.
+- **Real cross-encoder reranker.** The opt-in `zc_search({rerank:true})` pass is upgraded from
+  a bi-encoder cosine STAND-IN to a true cross-encoder: one batched LLM call jointly scores each
+  (query, doc) pair 0-10 — the pairwise judgment a bi-encoder can't make. Verified to rank an
+  implementation above a keyword-stuffed decoy and drop an unrelated file where cosine just echoed
+  input order. Falls back to embedding-cosine (now using the active embedding model), then original
+  order. `ZC_RERANK_LLM_MODEL` configurable.
+- **Recency-decay / salience.** `working_memory` gains `access_count` + `last_retrieved_at`
+  (SQLite mig 33 / PG mig 31). Recall folds a salience term (log-damped access frequency +
+  exponential recency decay) in as a SECONDARY key under importance, and best-effort bumps the
+  retrieved facts. `ZC_W_SALIENCE=0` is the byte-identical kill-switch (no re-sort, no writes);
+  `ZC_SALIENCE_HALFLIFE_H` (168h) tunable. Shared `salience.ts` keeps SQLite + PG identical.
+
+### Notes
+- **Prefix-cache injection (plan Tier-2 #5) needs no SC change.** `zc_recall_context` already
+  fires once at session start (SessionStart hook) and the host harness's conversation prompt-cache
+  keeps that result as a stable cached prefix for the rest of the session — SC does not emit the
+  agent's prompt, so there is no separate `cache_control` lever to add. The benefit is already realized.
+- Backward-compatible: every new column defaults safely, every fusion/salience change has a kill-switch
+  that restores v0.31.0 behaviour exactly. Tests 865/868 (3 pre-existing `storage_dual` fixtures).
+
 ## [0.31.0] — 2026-06-28 — Tier-1: self-wiring knowledge graph + epistemology & contradiction detection
 
 Two retrieval-quality layers borrowed from the best community memory builds (gbrain's
