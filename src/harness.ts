@@ -270,6 +270,17 @@ export async function indexProject(
     }
   } catch { /* graphify integration optional */ }
 
+  // Tier-1 A: build the backlink graph ONCE, synchronously, at the end of the
+  // bulk index. The per-file indexContent only SCHEDULES a debounced (unref'd)
+  // rebuild that a short-lived bulk-index process (background-index.mjs) kills on
+  // process.exit — leaving every auto-onboarded project with an empty backlink
+  // graph and the W_BACKLINK boost permanently dormant. An awaited flush here
+  // guarantees the graph is built (SQLite + PG mirror) before the process exits.
+  try {
+    const { flushBacklinkRebuild } = await import("./indexing/backlinks.js");
+    await flushBacklinkRebuild(projectPath);
+  } catch { /* best-effort — never fail the index on a backlink-rebuild error */ }
+
   return {
     filesScanned,
     filesIndexed,

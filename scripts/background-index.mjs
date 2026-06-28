@@ -50,6 +50,7 @@ const distDir   = resolve(__dirname, "..", "dist");
 
 const { runMigrations }           = await import(`file://${distDir.replace(/\\/g, "/")}/migrations.js`);
 const { indexProject, getIndexingStatus } = await import(`file://${distDir.replace(/\\/g, "/")}/harness.js`);
+const { shutdownPgPool }                   = await import(`file://${distDir.replace(/\\/g, "/")}/pg_pool.js`);
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 
@@ -138,11 +139,16 @@ try {
     model:           res.semanticModel,
   });
   cleanup();
+  // Close PG sockets gracefully BEFORE process.exit so we don't trip the libuv
+  // UV_HANDLE_CLOSING assertion on Windows (the end-of-index backlink flush awaits a
+  // PG transaction, leaving a pool socket mid-close when a hard process.exit fires).
+  await shutdownPgPool().catch(() => {});
   process.exit(0);
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   console.error(`[bg-index] FAILED: ${msg}`);
   writeStatus({ error: msg, finished_at: new Date().toISOString() });
   // Don't cleanup on error — leave the file so the status is inspectable
+  await shutdownPgPool().catch(() => {});
   process.exit(1);
 }

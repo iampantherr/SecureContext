@@ -863,6 +863,78 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 28,
+    description: "v0.31.0: kb_edges_pg + kb_backlinks_pg — persistent typed knowledge graph + backlink in-degree, project_hash-scoped (mirrors SQLite migration 30)",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS kb_edges_pg (
+          project_hash  TEXT    NOT NULL,
+          from_source   TEXT    NOT NULL,
+          to_source     TEXT    NOT NULL,
+          relation_type TEXT    NOT NULL DEFAULT 'code_ref',
+          match_kind    TEXT    NOT NULL DEFAULT 'full_key',
+          weight        INTEGER NOT NULL DEFAULT 1,
+          computed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (project_hash, from_source, to_source, relation_type)
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_kbe_pg_to ON kb_edges_pg(project_hash, to_source)`);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS kb_backlinks_pg (
+          project_hash TEXT    NOT NULL,
+          source       TEXT    NOT NULL,
+          in_degree    INTEGER NOT NULL DEFAULT 0,
+          weighted_in  INTEGER NOT NULL DEFAULT 0,
+          computed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (project_hash, source)
+        )
+      `);
+    },
+  },
+
+  {
+    id: 29,
+    description: "v0.31.0: working_memory epistemology layer (kind|confidence|resolution_status|resolved_at) + provenance parity backfill (mirrors SQLite migrations 31 + 16)",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS provenance TEXT NOT NULL DEFAULT 'UNKNOWN'`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fact'`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS confidence REAL`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS resolution_status TEXT`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ`);
+      // CHECK constraints added separately + guarded (ADD CONSTRAINT has no IF NOT EXISTS pre-PG15)
+      await client.query(`DO $$ BEGIN ALTER TABLE working_memory ADD CONSTRAINT chk_wm_provenance CHECK (provenance IN ('EXTRACTED','INFERRED','AMBIGUOUS','UNKNOWN')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`);
+      await client.query(`DO $$ BEGIN ALTER TABLE working_memory ADD CONSTRAINT chk_wm_kind CHECK (kind IN ('fact','decision','hypothesis','prediction')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`);
+      await client.query(`DO $$ BEGIN ALTER TABLE working_memory ADD CONSTRAINT chk_wm_resolution CHECK (resolution_status IN ('open','resolved_correct','resolved_incorrect','resolved_partial')); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_wm_kind ON working_memory(project_hash, agent_id, kind, resolution_status)`);
+    },
+  },
+
+  {
+    id: 30,
+    description: "v0.31.0: memory_contradictions_pg — suspected-contradiction signals over working memory, project_hash-scoped (mirrors SQLite migration 32)",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS memory_contradictions_pg (
+          id            BIGSERIAL PRIMARY KEY,
+          project_hash  TEXT NOT NULL,
+          agent_id      TEXT NOT NULL,
+          key_a         TEXT NOT NULL,
+          key_b         TEXT NOT NULL,
+          similarity    REAL NOT NULL,
+          reason        TEXT NOT NULL,
+          detail        TEXT,
+          status        TEXT NOT NULL DEFAULT 'open',
+          surfaced_by   TEXT NOT NULL,
+          surfaced_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          reviewed_at   TIMESTAMPTZ,
+          UNIQUE(project_hash, agent_id, key_a, key_b)
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_mc_pg_status ON memory_contradictions_pg(project_hash, agent_id, status, surfaced_at DESC)`);
+    },
+  },
+
 ];
 
 /**

@@ -35,6 +35,9 @@ import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from
 import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
 import { getEmbedding, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
+import { classifyFactKind, type EpistemicOpts } from "./memory.js";
+import { extractCoReferences, classifyRelation } from "./indexing/community.js";
+import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict } from "./contradiction_heuristics.js";
 import { ROLE_PERMISSIONS, type AgentRole } from "./access-control.js";
 import type {
   Store,
@@ -171,7 +174,7 @@ export class PostgresStore implements Store {
 
   // ── Working Memory ────────────────────────────────────────────────────────
 
-  async remember(projectPath: string, key: string, value: string, importance: number, agentId: string): Promise<void> {
+  async remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi: EpistemicOpts = {}): Promise<void> {
     const projectHash = ph(projectPath);
     const safeKey    = sanitize(key,     100);
     const safeValue  = sanitize(value,   500);
@@ -179,14 +182,26 @@ export class PostgresStore implements Store {
     const safeAgent  = sanitize(agentId,  64);
     const now        = new Date().toISOString();
 
+    // v0.31.0 epistemology — explicit kind wins, else auto-classify (parity with rememberFact).
+    const KINDS = ["fact", "decision", "hypothesis", "prediction"];
+    const RES   = ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"];
+    const safeKind = epi.kind && KINDS.includes(epi.kind) ? epi.kind : classifyFactKind(safeValue);
+    const safeConf = (typeof epi.confidence === "number" && isFinite(epi.confidence)) ? Math.max(0, Math.min(1, epi.confidence)) : null;
+    const safeRes  = epi.resolution && RES.includes(epi.resolution) ? epi.resolution : null;
+    const resolvedAt = (safeRes && safeRes !== "open") ? now : null;
+
     await this.pool.query(`
-      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       ON CONFLICT(project_hash, key, agent_id) DO UPDATE SET
-        value      = EXCLUDED.value,
-        importance = EXCLUDED.importance,
-        created_at = EXCLUDED.created_at
-    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now]);
+        value             = EXCLUDED.value,
+        importance        = EXCLUDED.importance,
+        created_at        = EXCLUDED.created_at,
+        kind              = EXCLUDED.kind,
+        confidence        = EXCLUDED.confidence,
+        resolution_status = EXCLUDED.resolution_status,
+        resolved_at       = EXCLUDED.resolved_at
+    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt]);
 
     // Evict if over the dynamic limit
     const limits = await this.getWorkingMemoryLimits(projectPath);
@@ -198,15 +213,35 @@ export class PostgresStore implements Store {
 
     if (count > limits.max) {
       const toEvictCount = count - limits.evictTo;
-      const victims = await this.pool.query<{ key: string; value: string }>(
+      // v0.31.0: protect explicitly-tracked OPEN predictions/hypotheses + high-confidence decisions
+      // (additive — plain facts match neither clause and evict exactly as before).
+      const PROTECT = `NOT (
+          (kind IN ('prediction','hypothesis') AND resolution_status = 'open')
+       OR (kind = 'decision' AND confidence IS NOT NULL AND confidence >= 0.8)
+      )`;
+      const victims = (await this.pool.query<{ key: string; value: string }>(
         `SELECT key, value FROM working_memory
-         WHERE project_hash = $1 AND agent_id = $2
+         WHERE project_hash = $1 AND agent_id = $2 AND ${PROTECT}
          ORDER BY importance ASC, created_at ASC
          LIMIT $3`,
         [projectHash, safeAgent, toEvictCount]
-      );
+      )).rows;
 
-      for (const row of victims.rows) {
+      // Safety valve: if protected facts leave us short, fall back to unfiltered eviction
+      // for the remainder so the hard `max` bound always holds.
+      if (victims.length < toEvictCount) {
+        const have = new Set(victims.map((v) => v.key));
+        const extra = (await this.pool.query<{ key: string; value: string }>(
+          `SELECT key, value FROM working_memory
+           WHERE project_hash = $1 AND agent_id = $2
+           ORDER BY importance ASC, created_at ASC
+           LIMIT $3`,
+          [projectHash, safeAgent, toEvictCount]
+        )).rows;
+        for (const r of extra) { if (victims.length >= toEvictCount) break; if (!have.has(r.key)) { victims.push(r); have.add(r.key); } }
+      }
+
+      for (const row of victims) {
         await this.pool.query(
           "DELETE FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3",
           [projectHash, row.key, safeAgent]
@@ -245,7 +280,7 @@ export class PostgresStore implements Store {
     // (avoids redundant self-join).
     if (safeAgent === "default") {
       const res = await this.pool.query<MemoryFact>(
-        `SELECT key, value, importance, agent_id, created_at
+        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
          FROM working_memory WHERE project_hash = $1 AND agent_id = 'default'
          ORDER BY importance DESC, created_at DESC`,
         [projectHash]
@@ -254,7 +289,7 @@ export class PostgresStore implements Store {
     }
     // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
     const res = await this.pool.query<MemoryFact>(
-      `SELECT key, value, importance, agent_id, created_at
+      `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
        FROM working_memory
        WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default')
        ORDER BY
@@ -396,6 +431,11 @@ export class PostgresStore implements Store {
 
     // Fire-and-forget embedding computation
     void this._storeEmbedding(projectHash, safeContent, safeSource);
+
+    // Tier-1 A: schedule a debounced backlink-graph rebuild over PG (fire-and-forget).
+    // THIS is what makes the backlink boost actually fire in the live PG deployment —
+    // PostgresStore.index does not route through indexContent's SQLite trigger.
+    this._scheduleBacklinkRebuild(projectPath);
   }
 
   private async _storeEmbedding(projectHash: string, content: string, source: string): Promise<void> {
@@ -443,6 +483,24 @@ export class PostgresStore implements Store {
 
     if (bm25Res.rows.length === 0) return [];
 
+    // Tier-1 A: backlink in-degree boost (PG mirror). ONE batched lookup, shared by the
+    // vector path AND the BM25 fallback. Empty when W_BACKLINK=0 / no rows / pre-migration
+    // ⇒ blBoost()=0 ⇒ ranking byte-identical to pre-backlink behaviour.
+    const blMap = new Map<string, number>();
+    if (Config.W_BACKLINK > 0) {
+      try {
+        const blRes = await this.pool.query<{ source: string; weighted_in: number }>(
+          `SELECT source, weighted_in FROM kb_backlinks_pg WHERE project_hash = $1 AND source = ANY($2)`,
+          [projectHash, bm25Res.rows.map(r => r.source)]
+        );
+        for (const r of blRes.rows) blMap.set(r.source, r.weighted_in);
+      } catch { /* kb_backlinks_pg absent (pre-migration) — leave map empty */ }
+    }
+    const blBoost = (src: string): number => {
+      const wIn = blMap.get(src) ?? 0;
+      return wIn > 0 ? Config.W_BACKLINK * (Math.log(1 + wIn) / Math.log(1 + Config.BACKLINK_LOG_BASE)) : 0;
+    };
+
     // Try vector reranking
     let results: KnowledgeEntry[] = [];
     try {
@@ -470,7 +528,7 @@ export class PostgresStore implements Store {
             const nums = storedVecStr.slice(1, -1).split(",").map(Number);
             cosScore   = cosineSimilarity(new Float32Array(nums), qEmbed.vector);
           }
-          const hybrid = Config.W_BM25 * bm25Norm + Config.W_COSINE * cosScore;
+          const hybrid = Config.W_BM25 * bm25Norm + Config.W_COSINE * cosScore + blBoost(row.source);
           return { ...row, vectorScore: cosScore, hybridScore: hybrid };
         });
 
@@ -482,6 +540,7 @@ export class PostgresStore implements Store {
           snippet:        r.content.slice(0, 200),
           rank:           r.hybridScore,
           vectorScore:    r.vectorScore,
+          backlinkScore:  blBoost(r.source) || undefined,
           sourceType:     r.source_type,
           nonAsciiSource: /[^\x00-\x7F]/.test(r.source),
         }));
@@ -491,11 +550,21 @@ export class PostgresStore implements Store {
     }
 
     if (results.length === 0) {
-      results = bm25Res.rows.slice(0, limit).map(r => ({
+      // BM25-only fallback (Ollama down). Tier-1 A: same backlink boost. W_BACKLINK=0
+      // ⇒ boost=0 ⇒ re-sort the already-rank-sorted rows by raw ts_rank ⇒ byte-identical.
+      const maxBm25Fb = Math.max(...bm25Res.rows.map(r => r.rank), 1);
+      const fb = bm25Res.rows.map(r => {
+        const boost = blBoost(r.source);
+        const rank  = Config.W_BACKLINK > 0 ? (r.rank / maxBm25Fb) + boost : r.rank;
+        return { r, rank, boost };
+      });
+      fb.sort((a, b) => b.rank - a.rank);
+      results = fb.slice(0, limit).map(({ r, rank, boost }) => ({
         source:         r.source,
         content:        r.content,
         snippet:        r.content.slice(0, 200),
-        rank:           r.rank,
+        rank,
+        backlinkScore:  boost || undefined,
         sourceType:     r.source_type,
         nonAsciiSource: /[^\x00-\x7F]/.test(r.source),
       }));
@@ -528,17 +597,20 @@ export class PostgresStore implements Store {
       source_type: string; project_hash: string; project_label: string;
     }>(`
       SELECT ke.source, ke.content,
-             ts_rank(to_tsvector('english', ke.content), plainto_tsquery('english', $1)) AS rank,
+             ts_rank(to_tsvector('english', ke.content), plainto_tsquery('english', $1))
+               + (CASE WHEN $3 > 0 AND bl.weighted_in IS NOT NULL
+                       THEN $3 * (ln(1 + bl.weighted_in) / ln(1 + $4)) ELSE 0 END) AS rank,
              COALESCE(sm.source_type, 'internal') as source_type,
              ke.project_hash,
              COALESCE(pm.value, ke.project_hash) as project_label
       FROM   knowledge_entries ke
       LEFT JOIN source_meta sm ON sm.project_hash = ke.project_hash AND sm.source = ke.source
       LEFT JOIN project_meta pm ON pm.project_hash = ke.project_hash AND pm.key = 'project_label'
+      LEFT JOIN kb_backlinks_pg bl ON bl.project_hash = ke.project_hash AND bl.source = ke.source
       WHERE  to_tsvector('english', ke.content) @@ plainto_tsquery('english', $1)
       ORDER  BY rank DESC
       LIMIT  $2
-    `, [queryText, limit]);
+    `, [queryText, limit, Config.W_BACKLINK, Config.BACKLINK_LOG_BASE]);
 
     return res.rows.map(r => ({
       source:         r.source,
@@ -602,6 +674,185 @@ export class PostgresStore implements Store {
       model:      ACTIVE_MODEL,
       searchMode: "hybrid-bm25-cosine",
     };
+  }
+
+  // ── Knowledge graph + backlinks (Tier-1 A, PG-native) ─────────────────────
+  private static _blTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private _scheduleBacklinkRebuild(projectPath: string): void {
+    const existing = PostgresStore._blTimers.get(projectPath);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(() => {
+      PostgresStore._blTimers.delete(projectPath);
+      this.rebuildBacklinks(projectPath).catch(() => undefined);
+    }, 5_000);
+    if (typeof (t as { unref?: () => void }).unref === "function") (t as { unref: () => void }).unref();
+    PostgresStore._blTimers.set(projectPath, t);
+  }
+
+  async rebuildBacklinks(projectPath: string): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }> {
+    return this._rebuildBacklinksByHash(ph(projectPath));
+  }
+
+  /**
+   * Boot backfill: rebuild the backlink graph for every project that has
+   * knowledge_entries but NO kb_backlinks_pg yet — i.e. projects indexed before
+   * the rebuild trigger existed, or whose short-lived bulk-index process exited
+   * before the debounced rebuild fired. Idempotent and safe: the NOT EXISTS
+   * filter means it only ever touches projects with an EMPTY graph, so it can
+   * never clobber a populated one. This is what makes the W_BACKLINK boost
+   * actually active for the body of already-indexed projects in a live deployment.
+   */
+  async backfillBacklinks(): Promise<{ projects: number; edges: number }> {
+    const rows = (await this.pool.query<{ project_hash: string }>(`
+      SELECT DISTINCT ke.project_hash FROM knowledge_entries ke
+      WHERE NOT EXISTS (SELECT 1 FROM kb_backlinks_pg b WHERE b.project_hash = ke.project_hash)
+    `)).rows;
+    let edges = 0;
+    for (const r of rows) {
+      try { edges += (await this._rebuildBacklinksByHash(r.project_hash)).edges; }
+      catch { /* best-effort per project — one bad project must not abort the backfill */ }
+    }
+    return { projects: rows.length, edges };
+  }
+
+  private async _rebuildBacklinksByHash(projectHash: string): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }> {
+    const rows = (await this.pool.query<{ source: string; content: string }>(
+      "SELECT source, content FROM knowledge_entries WHERE project_hash = $1", [projectHash]
+    )).rows;
+    const typed = extractCoReferences(rows).map((e) => ({
+      from: e.from, to: e.to, relation: classifyRelation(e.from, e.to, e.matchKind), matchKind: e.matchKind, weight: e.weight,
+    }));
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM kb_edges_pg     WHERE project_hash = $1", [projectHash]);
+      await client.query("DELETE FROM kb_backlinks_pg WHERE project_hash = $1", [projectHash]);
+      const CHUNK = 100;
+      for (let i = 0; i < typed.length; i += CHUNK) {
+        const chunk = typed.slice(i, i + CHUNK);
+        const vals: string[] = []; const params: unknown[] = []; let p = 1;
+        for (const e of chunk) {
+          vals.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`);
+          params.push(projectHash, e.from, e.to, e.relation, e.matchKind, e.weight);
+        }
+        await client.query(
+          `INSERT INTO kb_edges_pg(project_hash, from_source, to_source, relation_type, match_kind, weight)
+           VALUES ${vals.join(",")}
+           ON CONFLICT (project_hash, from_source, to_source, relation_type) DO UPDATE SET
+             match_kind = EXCLUDED.match_kind, weight = EXCLUDED.weight, computed_at = NOW()`, params);
+      }
+      await client.query(
+        `INSERT INTO kb_backlinks_pg(project_hash, source, in_degree, weighted_in)
+         SELECT $1, to_source, COUNT(DISTINCT from_source), SUM(weight)
+         FROM kb_edges_pg WHERE project_hash = $1 GROUP BY to_source
+         ON CONFLICT (project_hash, source) DO UPDATE SET
+           in_degree = EXCLUDED.in_degree, weighted_in = EXCLUDED.weighted_in, computed_at = NOW()`, [projectHash]);
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK"); throw e;
+    } finally {
+      client.release();
+    }
+    const hub = (await this.pool.query<{ source: string; weighted_in: number }>(
+      "SELECT source, weighted_in FROM kb_backlinks_pg WHERE project_hash = $1 ORDER BY weighted_in DESC LIMIT 1", [projectHash]
+    )).rows[0];
+    return { edges: typed.length, nodes: rows.length, topHub: hub ? { source: hub.source, weightedIn: hub.weighted_in } : null };
+  }
+
+  async graphData(projectPath: string): Promise<{ nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> }> {
+    const projectHash = ph(projectPath);
+    try {
+      const er = (await this.pool.query<{ from_source: string; to_source: string; relation_type: string; weight: number }>(
+        "SELECT from_source, to_source, relation_type, weight FROM kb_edges_pg WHERE project_hash = $1 LIMIT 2000", [projectHash])).rows;
+      const br = (await this.pool.query<{ source: string; in_degree: number; weighted_in: number }>(
+        "SELECT source, in_degree, weighted_in FROM kb_backlinks_pg WHERE project_hash = $1", [projectHash])).rows;
+      const blMap = new Map(br.map((b) => [b.source, { inDegree: b.in_degree, weightedIn: b.weighted_in }]));
+      const edges = er.map((e) => ({ from: e.from_source, to: e.to_source, relation: e.relation_type, weight: e.weight }));
+      // Nodes = every source that participates in an edge (so referencing docs render too),
+      // sized by their backlink weight (0 when never referenced).
+      const ids = new Set<string>();
+      for (const e of edges) { ids.add(e.from); ids.add(e.to); }
+      const nodes = [...ids].map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
+      return { nodes, edges };
+    } catch { return { nodes: [], edges: [] }; }
+  }
+
+  async backlinksFor(projectPath: string, source: string, limit: number): Promise<{ inDegree: number; weightedIn: number; inbound: Array<{ from: string; relation: string; weight: number }> } | null> {
+    const projectHash = ph(projectPath);
+    try {
+      const bl = (await this.pool.query<{ in_degree: number; weighted_in: number }>(
+        "SELECT in_degree, weighted_in FROM kb_backlinks_pg WHERE project_hash = $1 AND source = $2", [projectHash, source])).rows[0];
+      if (!bl) return null;
+      const er = (await this.pool.query<{ from_source: string; relation_type: string; weight: number }>(
+        "SELECT from_source, relation_type, weight FROM kb_edges_pg WHERE project_hash = $1 AND to_source = $2 ORDER BY weight DESC LIMIT $3",
+        [projectHash, source, Math.min(Math.max(limit, 1), 100)])).rows;
+      return { inDegree: bl.in_degree, weightedIn: bl.weighted_in, inbound: er.map((e) => ({ from: e.from_source, relation: e.relation_type, weight: e.weight })) };
+    } catch { return null; }
+  }
+
+  // ── Memory contradictions (Tier-1 B, PG-native) ───────────────────────────
+  async scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
+    const projectHash = ph(projectPath);
+    const safeAgent = sanitize(agentId, 64);
+    const facts = (await this.pool.query<{ key: string; value: string; kind: string | null; resolution_status: string | null }>(
+      `SELECT key, value, kind, resolution_status FROM working_memory
+       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND importance >= 3
+       ORDER BY importance DESC, created_at DESC LIMIT $3`, [projectHash, safeAgent, MAX_SCAN_FACTS])).rows;
+    if (facts.length < 2) return { scanned: facts.length, flagged: 0, ollamaAvailable: true };
+
+    const vectors = new Map<string, Float32Array>();
+    for (const f of facts) {
+      const emb = await getEmbedding(f.value);
+      if (!emb) return { scanned: facts.length, flagged: 0, ollamaAvailable: false };
+      vectors.set(f.key, emb.vector);
+    }
+    const found: Array<{ ka: string; kb: string; sim: number; reason: string; detail: string }> = [];
+    for (let i = 0; i < facts.length; i++) {
+      for (let j = i + 1; j < facts.length; j++) {
+        const a = facts[i]!, b = facts[j]!;
+        const va = vectors.get(a.key), vb = vectors.get(b.key);
+        if (!va || !vb) continue;
+        const sim = cosineSimilarity(va, vb);
+        if (sim < SIM_HIGH) continue;
+        const conflict = detectConflict(a, b);
+        if (!conflict) continue;
+        const [ka, kb] = a.key < b.key ? [a.key, b.key] : [b.key, a.key];
+        found.push({ ka, kb, sim, reason: conflict.reason, detail: conflict.detail });
+      }
+    }
+    for (const f of found) {
+      await this.pool.query(
+        `INSERT INTO memory_contradictions_pg(project_hash, agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'open','cron')
+         ON CONFLICT (project_hash, agent_id, key_a, key_b) DO UPDATE SET
+           similarity = EXCLUDED.similarity, reason = EXCLUDED.reason, detail = EXCLUDED.detail, surfaced_at = NOW()`,
+        [projectHash, safeAgent, f.ka, f.kb, f.sim, f.reason, f.detail]);
+    }
+    return { scanned: facts.length, flagged: found.length, ollamaAvailable: true };
+  }
+
+  async listContradictions(projectPath: string, agentId: string): Promise<Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>> {
+    const projectHash = ph(projectPath);
+    const safeAgent = sanitize(agentId, 64);
+    try {
+      return (await this.pool.query<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>(
+        `SELECT key_a, key_b, similarity, reason, detail FROM memory_contradictions_pg
+         WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND status = 'open'
+         ORDER BY surfaced_at DESC LIMIT 20`, [projectHash, safeAgent])).rows;
+    } catch { return []; }
+  }
+
+  async reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved"): Promise<number> {
+    const projectHash = ph(projectPath);
+    const safeAgent = sanitize(agentId, 64);
+    const [ka, kb] = keyA < keyB ? [keyA, keyB] : [keyB, keyA];
+    try {
+      const r = await this.pool.query(
+        `UPDATE memory_contradictions_pg SET status = $1, reviewed_at = NOW()
+         WHERE project_hash = $2 AND agent_id = $3 AND key_a = $4 AND key_b = $5`,
+        [status, projectHash, safeAgent, ka, kb]);
+      return r.rowCount ?? 0;
+    } catch { return 0; }
   }
 
   // ── Broadcasts ────────────────────────────────────────────────────────────
@@ -1007,10 +1258,17 @@ CREATE TABLE IF NOT EXISTS working_memory (
   importance   INTEGER NOT NULL DEFAULT 3,
   agent_id     TEXT    NOT NULL DEFAULT 'default',
   created_at   TIMESTAMPTZ NOT NULL,
+  -- v0.31.0 epistemology layer (+ provenance parity with SQLite migration 16)
+  provenance        TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK (provenance IN ('EXTRACTED','INFERRED','AMBIGUOUS','UNKNOWN')),
+  kind              TEXT NOT NULL DEFAULT 'fact' CHECK (kind IN ('fact','decision','hypothesis','prediction')),
+  confidence        REAL,
+  resolution_status TEXT CHECK (resolution_status IN ('open','resolved_correct','resolved_incorrect','resolved_partial')),
+  resolved_at       TIMESTAMPTZ,
   UNIQUE(project_hash, key, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_wm_project_agent ON working_memory(project_hash, agent_id);
 CREATE INDEX IF NOT EXISTS idx_wm_evict ON working_memory(project_hash, agent_id, importance ASC, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_wm_kind ON working_memory(project_hash, agent_id, kind, resolution_status);
 
 -- Knowledge base (full-text search via tsvector/GIN)
 CREATE TABLE IF NOT EXISTS knowledge_entries (

@@ -298,8 +298,8 @@ const TOOLS: Tool[] = [
     description:
       "Store a key-value fact in working memory (MemGPT-style). " +
       "Working memory is bounded (100 facts base, scales up to 250 by project complexity) — lowest-importance facts auto-evict to archival KB. " +
-      "Use importance 5 for critical facts, 1 for ephemeral notes. " +
-      "Use agent_id to namespace facts for parallel agent use.",
+      "Use importance 5 for critical facts, 1 for ephemeral notes. Use agent_id to namespace facts for parallel agent use. " +
+      "EPISTEMOLOGY (v0.31.0) — TYPE YOUR CLAIMS: recording a falsifiable claim about the FUTURE? set kind='prediction' + confidence (0–1) + resolution='open', then later re-remember the SAME key with resolution='resolved_correct'/'resolved_incorrect' to close it. Recording a CHOSEN approach? set kind='decision'. A tentative/unverified claim? kind='hypothesis'. Plain observed facts need nothing (kind defaults to 'fact'; the system also auto-classifies from the text). Typed claims power contradiction detection + self-calibration.",
     inputSchema: {
       type: "object",
       properties: {
@@ -307,8 +307,30 @@ const TOOLS: Tool[] = [
         value:      { type: "string", description: "The fact to remember (max 500 chars)" },
         importance: { type: "integer", minimum: 1, maximum: 5, description: "1=ephemeral, 3=normal, 5=critical" },
         agent_id:   { type: "string", description: "Agent namespace for parallel use (default: 'default')" },
+        kind:       { type: "string", enum: ["fact", "decision", "hypothesis", "prediction"], description: "Epistemic kind. fact=observed; decision=chosen approach; hypothesis=tentative; prediction=falsifiable future claim. Default 'fact' (auto-classified from text if omitted)." },
+        confidence: { type: "number", minimum: 0, maximum: 1, description: "0.0–1.0 subjective probability for predictions/hypotheses. Omit for plain facts." },
+        resolution: { type: "string", enum: ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"], description: "Set 'open' when recording a prediction; later re-remember the same key with a resolved_* value to close it." },
       },
       required: ["key", "value"],
+    },
+  },
+  {
+    name: "zc_memory_contradictions",
+    description:
+      "List suspected contradictions in working memory — pairs of facts that look like they conflict " +
+      "(a falsified claim still asserted as live, two disagreeing decisions, or opposite-polarity claims). " +
+      "Surfaced for review; NEVER auto-applied. Pass run:true to run a fresh scan first (embeds facts; needs Ollama). " +
+      "Manage a pair with action ('dismiss'|'acknowledge'|'resolve') + key_a + key_b.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        run:      { type: "boolean", description: "Run a fresh scan before listing (default: just list existing)" },
+        action:   { type: "string", enum: ["dismiss", "acknowledge", "resolve"], description: "Mark a specific pair reviewed" },
+        key_a:    { type: "string", description: "First key of the pair (use with action)" },
+        key_b:    { type: "string", description: "Second key of the pair (use with action)" },
+        agent_id: { type: "string", description: "Agent namespace (default: this agent)" },
+      },
+      required: [],
     },
   },
   {
@@ -738,6 +760,34 @@ const TOOLS: Tool[] = [
         source: { type: "string", description: "KB source identifier (e.g. 'file:src/auth.ts')" },
       },
       required: ["source"],
+    },
+  },
+  // ── v0.31.0 backlink graph (Tier-1 A) ────────────────────────────────
+  {
+    name: "zc_graph_backlinks",
+    description:
+      "Show the backlink in-degree of a KB source: how many other sources reference it (weighted), " +
+      "plus the inbound sources + relation types. Highly-referenced 'hub' sources rank higher in " +
+      "zc_search (backlink boost). Run zc_graph_rebuild or zc_kb_cluster first to populate the graph.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "KB source identifier (e.g. 'file:src/config.ts')" },
+        limit:  { type: "integer", minimum: 1, maximum: 100, description: "Max inbound sources to list (default 20)" },
+      },
+      required: ["source"],
+    },
+  },
+  {
+    name: "zc_graph_rebuild",
+    description:
+      "Force a rebuild of the persistent knowledge graph (kb_edges) + backlink in-degree (kb_backlinks) " +
+      "for this project, mirrored to Postgres. Normally rebuilt automatically (debounced) after indexing; " +
+      "use this to force it — e.g. before an A/B of backlink ranking, or after a bulk import.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
     },
   },
   {
@@ -1193,6 +1243,62 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
+// v0.31.0 — contradiction tool handler. Reads/writes LOCAL SQLite via the module, so it
+// works in BOTH proxy and in-process modes (the MCP server always runs locally with
+// filesystem access to PROJECT_PATH). Shared by both dispatch switches below.
+type ContraRow = { key_a: string; key_b: string; similarity: number; reason: string; detail: string };
+function _fmtContradictionsList(open: ContraRow[]): string {
+  if (open.length === 0) return "No suspected contradictions in working memory. ✓";
+  const lines: string[] = [`## Suspected Contradictions (${open.length})`, ""];
+  for (const c of open) lines.push(`• \`${c.key_a}\` ⇄ \`${c.key_b}\`  [${c.reason}, sim=${Number(c.similarity).toFixed(2)}]\n    ${c.detail}`);
+  lines.push("");
+  lines.push("Resolve: `zc_forget` one key, OR re-`zc_remember` with a resolution, OR `zc_memory_contradictions({action:\"dismiss\", key_a, key_b})`.");
+  return lines.join("\n");
+}
+
+async function _handleMemoryContradictions(
+  args: Record<string, unknown>
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  const agentId = String(args["agent_id"] ?? AGENT_ID ?? "default");
+  const action = args["action"];
+  const isReview = typeof action === "string" && typeof args["key_a"] === "string" && typeof args["key_b"] === "string";
+
+  // Proxy mode → the store (PG in prod) runs the scan/list/review where the data lives.
+  if (ZC_API_URL) {
+    const r = await apiCall("POST", "/api/v1/contradictions", {
+      projectPath: PROJECT_PATH, agentId,
+      run:    !!args["run"],
+      action: isReview ? action : undefined,
+      key_a:  isReview ? args["key_a"] : undefined,
+      key_b:  isReview ? args["key_b"] : undefined,
+    });
+    if (isReview) {
+      const n = (r["reviewed"] as number) ?? 0;
+      return { content: [{ type: "text", text: n > 0 ? `Marked ${args["key_a"]} ⇄ ${args["key_b"]} as ${action}.` : "No matching open contradiction found." }] };
+    }
+    const scan = r["scan"] as { ollamaAvailable: boolean } | null;
+    if (args["run"] && scan && !scan.ollamaAvailable) {
+      return { content: [{ type: "text", text: "Contradiction scan skipped — Ollama embeddings unavailable." }] };
+    }
+    return { content: [{ type: "text", text: _fmtContradictionsList((r["contradictions"] as ContraRow[]) ?? []) }] };
+  }
+
+  // In-process mode → local SQLite.
+  const { listOpenContradictions, detectContradictions, reviewContradiction } = await import("./memory_contradictions.js");
+  if (isReview) {
+    const st = action === "dismiss" ? "dismissed" : action === "acknowledge" ? "acknowledged" : "resolved";
+    const n = reviewContradiction(PROJECT_PATH, agentId, String(args["key_a"]), String(args["key_b"]), st as "dismissed" | "acknowledged" | "resolved");
+    return { content: [{ type: "text", text: n > 0 ? `Marked ${args["key_a"]} ⇄ ${args["key_b"]} as ${st}.` : "No matching open contradiction found." }] };
+  }
+  if (args["run"]) {
+    const res = await detectContradictions(PROJECT_PATH, agentId, "manual");
+    if (!res.ollamaAvailable) {
+      return { content: [{ type: "text", text: "Contradiction scan skipped — Ollama embeddings unavailable. Start Ollama (`ollama serve`) and retry." }] };
+    }
+  }
+  return { content: [{ type: "text", text: _fmtContradictionsList(listOpenContradictions(PROJECT_PATH, agentId)) }] };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Remote tool handler — routes tool calls to the SecureContext API server
 // when ZC_API_URL is set. Maps each tool name to its REST endpoint.
@@ -1221,8 +1327,34 @@ async function _handleRemoteTool(
           value:       body["value"],
           importance:  body["importance"] ?? 3,
           agentId:     body["agent_id"] ?? AGENT_ID,
+          // v0.31.0 epistemology — forwarded; the API coerces/validates.
+          kind:        body["kind"],
+          confidence:  body["confidence"],
+          resolution:  body["resolution"],
         });
         return { content: [{ type: "text", text: `Remembered under agent_id='${body["agent_id"] ?? AGENT_ID}'. Working memory: ${result["count"]}/${result["max"]} facts` }] };
+
+      case "zc_memory_contradictions":
+        return await _handleMemoryContradictions(args);
+
+      case "zc_graph_rebuild": {
+        const r = await apiCall("POST", "/api/v1/graph/rebuild", { projectPath: PROJECT_PATH });
+        const lines = [`## Knowledge graph rebuilt`, `Edges: ${r["edges"]}  Nodes: ${r["nodes"]}`];
+        const hub = r["topHub"] as { source: string; weightedIn: number } | null;
+        if (hub) lines.push(`Top hub: ${hub.source} (weighted_in=${hub.weightedIn})`);
+        lines.push(``, `Backlink boost is ${Config.W_BACKLINK > 0 ? `ON (W_BACKLINK=${Config.W_BACKLINK})` : "OFF"} for zc_search.`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_graph_backlinks": {
+        const q = `?projectPath=${encodeURIComponent(PROJECT_PATH)}&source=${encodeURIComponent(String(body["source"] ?? ""))}&limit=${encodeURIComponent(String(body["limit"] ?? 20))}`;
+        const r = await apiCall("GET", `/api/v1/graph/backlinks${q}`);
+        const found = r["found"] as { inDegree: number; weightedIn: number; inbound: Array<{ from: string; relation: string; weight: number }> } | null;
+        if (!found) return { content: [{ type: "text", text: `Source '${body["source"]}' has no recorded backlinks. Run \`zc_graph_rebuild\` first.` }] };
+        const lines = [`## Backlinks for: ${body["source"]}`, `in_degree: ${found.inDegree} distinct sources  |  weighted_in: ${found.weightedIn}`];
+        if (found.inbound.length) { lines.push(``, `### Inbound references (top ${found.inbound.length})`); for (const e of found.inbound) lines.push(`- ${e.from}  [${e.relation}, w=${e.weight}]`); }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
 
       case "zc_forget":
         result = await apiCall("POST", "/api/v1/forget", {
@@ -1244,13 +1376,25 @@ async function _handleRemoteTool(
         // the agent sees their own notes AND project-wide coordination notes.
         const recallAgentId = String(body["agent_id"] ?? AGENT_ID);
         const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}`);
-        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number }> ?? [];
+        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null }> ?? [];
         const skills    = recallRes["skills"] as Array<{ skill_id: string; name: string; description: string }> ?? [];
         const max       = recallRes["max"] as number ?? 50;
         const lines     = [`## Working Memory (${facts.length}/${max} facts)`];
-        for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
-        for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
-        for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+        // v0.31.0 — plain facts render byte-identical; typed/resolved claims get an inline badge.
+        const epiBadge = (f: { kind?: string; confidence?: number | null; resolution_status?: string | null }): string => {
+          if ((!f.kind || f.kind === "fact") && !f.resolution_status) return "";
+          const t: string[] = [];
+          if (f.kind && f.kind !== "fact") t.push(f.kind);
+          if (f.confidence != null) t.push(`p=${Number(f.confidence).toFixed(2)}`);
+          if (f.resolution_status === "open") t.push("⏳ open");
+          else if (f.resolution_status === "resolved_correct") t.push("✓ correct");
+          else if (f.resolution_status === "resolved_incorrect") t.push("✗ incorrect");
+          else if (f.resolution_status === "resolved_partial") t.push("~ partial");
+          return t.length ? `  ⟨${t.join(" · ")}⟩` : "";
+        };
+        for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}`);
+        for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}`);
+        for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}`);
         // v0.21.0 — append skill inventory so the agent sees what's available
         // every time they recall context. Skip the section if no skills match
         // the role (avoids noise for projects that haven't authored any skills).
@@ -1272,6 +1416,15 @@ async function _handleRemoteTool(
             lines.push(`## Skills (${skills.length} available for role '${agentRole}' — unchanged from earlier in session)`);
             lines.push("`zc_skill_show({name:\"<id>\"})` for any skill body. Set ZC_SKILLS_FORCE_FULL=1 to re-emit full inventory.");
           }
+        }
+        // v0.31.0 — surface suspected contradictions returned by the API (PG-backed scan,
+        // kicked server-side once/session in /recall). Omitted when there are none.
+        const contras = (recallRes["contradictions"] as Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>) ?? [];
+        if (contras.length > 0) {
+          lines.push("");
+          lines.push(`## ⚠️ Suspected Contradictions (${contras.length})`);
+          lines.push(`These memory pairs look like they conflict — review and resolve (zc_forget one, re-zc_remember with a resolution, or zc_memory_contradictions). NEVER auto-applied.`);
+          for (const c of contras) lines.push(`  • \`${c.key_a}\` ⇄ \`${c.key_b}\`  [${c.reason}, sim=${Number(c.similarity).toFixed(2)}] — ${c.detail}`);
         }
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
@@ -1429,6 +1582,9 @@ async function dispatchToolCall(
     "zc_index", "zc_search", "zc_search_global", "zc_status",
     "zc_broadcast", "zc_replay", "zc_ack", "zc_explain",
     "zc_issue_token", "zc_revoke_token",
+    // v0.31.0 Tier-1 — graph + contradictions are store-backed (PG in prod), so they
+    // MUST proxy to the API; otherwise they'd run in-process against empty local SQLite.
+    "zc_graph_rebuild", "zc_graph_backlinks", "zc_memory_contradictions",
   ]);
 
   if (ZC_API_URL && REMOTE_TOOLS.has(name)) {
@@ -1568,18 +1724,28 @@ async function dispatchToolCall(
       }
 
       case "zc_remember": {
-        const { key, value, importance, agent_id } = args as {
+        const { key, value, importance, agent_id, kind, confidence, resolution } = args as {
           key: string; value: string; importance?: number; agent_id?: string;
+          kind?: "fact" | "decision" | "hypothesis" | "prediction";
+          confidence?: number;
+          resolution?: "open" | "resolved_correct" | "resolved_incorrect" | "resolved_partial";
         };
-        rememberFact(PROJECT_PATH, key, value, importance, agent_id);
+        rememberFact(PROJECT_PATH, key, value, importance, agent_id, undefined, { kind, confidence, resolution });
+        // v0.31.0 — re-arm the in-process contradiction scan so the next recall re-scans
+        // a newly-recorded fact (in-process parity with the daemon's write-time re-arm).
+        void import("./memory_contradictions.js").then((m) => m.rearmContradictionScan(PROJECT_PATH, agent_id)).catch(() => undefined);
         const stats = getMemoryStats(PROJECT_PATH, agent_id);
+        const epiTag = kind && kind !== "fact" ? ` · ${kind}${typeof confidence === "number" ? ` p=${confidence}` : ""}${resolution ? ` [${resolution}]` : ""}` : "";
         return {
           content: [{
             type: "text",
-            text: `Remembered: [★${importance ?? 3}] ${key}\nWorking memory: ${stats.count}/${stats.max} facts`,
+            text: `Remembered: [★${importance ?? 3}] ${key}${epiTag}\nWorking memory: ${stats.count}/${stats.max} facts`,
           }],
         };
       }
+
+      case "zc_memory_contradictions":
+        return await _handleMemoryContradictions(args ?? {});
 
       case "zc_forget": {
         const { key, agent_id } = args as { key: string; agent_id?: string };
@@ -1642,6 +1808,11 @@ async function dispatchToolCall(
 
         // Section 1: Working Memory (structured by priority — limit is project-aware)
         parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit));
+
+        // Section 1b (v0.31.0): suspected contradictions (background scan once/session; local SQLite).
+        const { formatContradictionsSection: fmtContraInproc } = await import("./memory_contradictions.js");
+        const inprocContra = fmtContraInproc(PROJECT_PATH, String(agent_id ?? "default"));
+        if (inprocContra) parts.push(inprocContra);
 
         // Section 2: Shared Broadcast Channel (A2A coordination)
         parts.push("\n" + formatSharedChannelForContext(broadcasts));
@@ -2276,7 +2447,20 @@ async function dispatchToolCall(
         cdb.exec("PRAGMA journal_mode = WAL");
         const result = detectCommunities(cdb);
         if (result.totalSources > 0) storeCommunities(cdb, result);
+        // Tier-1 A: (re)build the persistent backlink graph on the same KB scan.
+        const { rebuildBacklinks: rebuildBL } = await import("./indexing/backlinks.js");
+        let blResult: ReturnType<typeof rebuildBL> | null = null;
+        try { blResult = rebuildBL(cdb); } catch { /* non-fatal — community result still returned */ }
         cdb.close();
+        // Tier-1 A: mirror to PG ONLY when this scan actually produced edges AND we are not
+        // in proxy mode. Under ZC_API_URL the local SQLite is empty, so blResult.edges is 0
+        // here — pushing that would DELETE the real PG backlink graph (built by the API /
+        // zc_graph_rebuild) and repopulate nothing. The edges>0 guard also prevents ever
+        // clobbering a populated PG graph with an empty local scan.
+        if (blResult && blResult.edges > 0 && !ZC_API_URL) {
+          const { rebuildBacklinksPgAsync: rebuildBLPg } = await import("./indexing/backlinks.js");
+          rebuildBLPg(PROJECT_PATH, blResult.typedEdges).catch(() => undefined);
+        }
 
         const lines: string[] = [];
         lines.push(`## KB Community Detection (Louvain) — v0.14.0`);
@@ -2287,6 +2471,11 @@ async function dispatchToolCall(
         lines.push(`### Top communities`);
         for (const c of result.communities.slice(0, 8)) {
           lines.push(`- **community ${c.id}** (${c.size} sources): ${c.sampleSources.slice(0, 3).join(", ")}${c.sampleSources.length > 3 ? ", ..." : ""}`);
+        }
+        if (blResult?.topHub) {
+          lines.push(``);
+          lines.push(`### Backlink graph`);
+          lines.push(`${blResult.edges} directed edges. Top hub: ${blResult.topHub.source} (weighted_in=${blResult.topHub.weightedIn}). Backlink boost ${Config.W_BACKLINK > 0 ? `ON (W_BACKLINK=${Config.W_BACKLINK})` : "OFF (W_BACKLINK=0)"} for zc_search.`);
         }
         lines.push(``);
         lines.push(`Use \`zc_kb_community_for(source)\` to look up a specific source's community-mates.`);
@@ -2319,6 +2508,58 @@ async function dispatchToolCall(
           if (info.mates.length > 30) lines.push(`... and ${info.mates.length - 30} more`);
         } else {
           lines.push(`This source is in a singleton community.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      // ── v0.31.0 backlink graph (Tier-1 A) ───────────────────────────
+      case "zc_graph_rebuild": {
+        const { rebuildBacklinks: rebuildBLR, rebuildBacklinksPgAsync: rebuildBLRPg } = await import("./indexing/backlinks.js");
+        const { openDb: openDbR } = await import("./knowledge.js");
+        const rdb = openDbR(PROJECT_PATH);
+        const res = rebuildBLR(rdb);
+        rdb.close();
+        rebuildBLRPg(PROJECT_PATH, res.typedEdges).catch(() => undefined);
+        const lines: string[] = [];
+        lines.push(`## Knowledge graph rebuilt`);
+        lines.push(`Edges: ${res.edges}  Nodes: ${res.nodes}  (${res.elapsedMs}ms)`);
+        if (res.topHub) lines.push(`Top hub: ${res.topHub.source} (weighted_in=${res.topHub.weightedIn})`);
+        lines.push(``);
+        lines.push(`Backlink boost is ${Config.W_BACKLINK > 0 ? `ON (W_BACKLINK=${Config.W_BACKLINK})` : "OFF (W_BACKLINK=0)"} for zc_search ranking.`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_graph_backlinks": {
+        const { source, limit } = args as { source: string; limit?: number };
+        const { DatabaseSync: DSB } = await import("node:sqlite");
+        const { mkdirSync: mkdB } = await import("node:fs");
+        const { join: pjoinB } = await import("node:path");
+        const { createHash: chB } = await import("node:crypto");
+        mkdB(Config.DB_DIR, { recursive: true });
+        const dbFileB = pjoinB(Config.DB_DIR, `${chB("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const bdb = new DSB(dbFileB);
+        let bl: { in_degree: number; weighted_in: number } | undefined;
+        let inbound: Array<{ from_source: string; relation_type: string; weight: number }> = [];
+        try {
+          bl = bdb.prepare("SELECT in_degree, weighted_in FROM kb_backlinks WHERE source = ?").get(source) as { in_degree: number; weighted_in: number } | undefined;
+          inbound = bdb.prepare(
+            "SELECT from_source, relation_type, weight FROM kb_edges WHERE to_source = ? ORDER BY weight DESC LIMIT ?"
+          ).all(source, Math.min(Math.max(limit ?? 20, 1), 100)) as Array<{ from_source: string; relation_type: string; weight: number }>;
+        } catch {
+          bdb.close();
+          return { content: [{ type: "text", text: "Knowledge graph not built yet. Run `zc_graph_rebuild` (or `zc_kb_cluster`) first." }] };
+        }
+        bdb.close();
+        if (!bl) {
+          return { content: [{ type: "text", text: `Source '${source}' has no recorded backlinks (in_degree=0), or the graph hasn't been rebuilt since it was indexed. Run \`zc_graph_rebuild\`.` }] };
+        }
+        const lines: string[] = [];
+        lines.push(`## Backlinks for: ${source}`);
+        lines.push(`in_degree: ${bl.in_degree} distinct sources  |  weighted_in: ${bl.weighted_in}`);
+        if (inbound.length > 0) {
+          lines.push(``);
+          lines.push(`### Inbound references (top ${inbound.length})`);
+          for (const e of inbound) lines.push(`- ${e.from_source}  [${e.relation_type}, w=${e.weight}]`);
         }
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }

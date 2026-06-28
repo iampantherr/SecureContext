@@ -42,6 +42,7 @@ import { join, basename } from "node:path";
 import { Config } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { getEmbedding, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
+import { rebuildBacklinksAsync } from "./indexing/backlinks.js";
 
 export type RetentionTier = "external" | "internal" | "summary";
 
@@ -51,6 +52,8 @@ export interface KnowledgeEntry {
   snippet: string;
   rank:    number;
   vectorScore?: number;
+  /** Tier-1 A: the log-damped backlink contribution folded into `rank` (omitted when 0). */
+  backlinkScore?: number;
   sourceType: string;
   nonAsciiSource: boolean;
 }
@@ -260,6 +263,10 @@ export function indexContent(
   // the agent's own reads; PG is the cross-machine view.
   storeSourceMetaPgAsync(projectPath, source, sourceType, retentionTier, l0, l1, now)
     .catch(() => undefined);
+
+  // Tier-1 A: schedule a debounced backlink-graph rebuild (fire-and-forget). A bulk
+  // index triggers exactly ONE rebuild 5s after it settles; never blocks this call.
+  rebuildBacklinksAsync(projectPath);
 }
 
 /**
@@ -384,6 +391,18 @@ function _searchDb(
   const embeddingMap = new Map<string, Float32Array>();
   for (const row of embedRows) embeddingMap.set(row.source, deserializeVector(row.vector));
 
+  // Tier-1 A: backlink in-degree boost. ONE batched lookup; absent table (pre-migration)
+  // OR W_BACKLINK=0 ⇒ empty map ⇒ +0 ⇒ ranking byte-identical to pre-backlink behaviour.
+  const backlinkMap = new Map<string, number>();
+  if (Config.W_BACKLINK > 0) {
+    try {
+      const blRows = db.prepare(
+        `SELECT source, weighted_in FROM kb_backlinks WHERE source IN (${placeholders})`
+      ).all(...sources) as Array<{ source: string; weighted_in: number }>;
+      for (const r of blRows) backlinkMap.set(r.source, r.weighted_in);
+    } catch { /* table absent on a pre-migration DB — leave map empty */ }
+  }
+
   const ranks     = Array.from(candidateMap.values()).map((r) => r.rank);
   const minRank   = Math.min(...ranks);
   const maxRank   = Math.max(...ranks);
@@ -400,9 +419,16 @@ function _searchDb(
     const storedVec = embeddingMap.get(source);
     if (queryVector && storedVec) cosine = cosineSimilarity(queryVector, storedVec);
 
-    const hybridScore = queryVector && storedVec
+    const baseScore = queryVector && storedVec
       ? Config.W_BM25 * bm25Norm + Config.W_COSINE * cosine
       : bm25Norm;
+
+    // Tier-1 A: additive, log-damped backlink boost. wIn=0 (no inbound / disabled) ⇒ +0.
+    const wIn     = backlinkMap.get(source) ?? 0;
+    const blBoost = wIn > 0
+      ? Config.W_BACKLINK * (Math.log(1 + wIn) / Math.log(1 + Config.BACKLINK_LOG_BASE))
+      : 0;
+    const hybridScore = baseScore + blBoost;
 
     const firstTerm  = queries[0]?.toLowerCase().split(" ")[0] ?? "";
     const idx        = row.content.toLowerCase().indexOf(firstTerm);
@@ -428,6 +454,7 @@ function _searchDb(
       snippet,
       rank:          hybridScore,
       vectorScore:   queryVector && storedVec ? cosine : undefined,
+      backlinkScore: blBoost || undefined,
       sourceType:    entrySourceType,
       nonAsciiSource,
       _hybrid:       hybridScore,
@@ -506,6 +533,7 @@ export async function explainRetrieval(
     bm25Normalized:  number;
     vectorScore:     number | null;
     hybridScore:     number;
+    backlinkScore:   number;
     contentLength:   number;
     tieredContent:   string;
     sourceType:      string;
@@ -561,6 +589,17 @@ export async function explainRetrieval(
   const embeddingMap = new Map<string, Float32Array>();
   for (const row of embedRows) embeddingMap.set(row.source, deserializeVector(row.vector));
 
+  // Tier-1 A: backlink in-degree for observability (base vs boost per result).
+  const backlinkMap = new Map<string, number>();
+  if (Config.W_BACKLINK > 0) {
+    try {
+      const blRows = db.prepare(
+        `SELECT source, weighted_in FROM kb_backlinks WHERE source IN (${placeholders})`
+      ).all(...sources) as Array<{ source: string; weighted_in: number }>;
+      for (const r of blRows) backlinkMap.set(r.source, r.weighted_in);
+    } catch { /* table absent on a pre-migration DB */ }
+  }
+
   const metaMap = new Map<string, MetaRow>();
   for (const row of metaRows) metaMap.set(row.source, row);
 
@@ -571,7 +610,7 @@ export async function explainRetrieval(
 
   const detailed: Array<{
     rank: number; source: string; bm25Score: number; bm25Normalized: number;
-    vectorScore: number | null; hybridScore: number; contentLength: number;
+    vectorScore: number | null; hybridScore: number; backlinkScore: number; contentLength: number;
     tieredContent: string; sourceType: string;
   }> = [];
 
@@ -580,9 +619,14 @@ export async function explainRetrieval(
     const bm25Normalized = 1 - (row.rank - minRank) / rankRange;
     const storedVec = embeddingMap.get(source);
     const cosine    = (queryVector && storedVec) ? cosineSimilarity(queryVector, storedVec) : null;
-    const hybridScore = (queryVector && storedVec)
+    const baseScore = (queryVector && storedVec)
       ? Config.W_BM25 * bm25Normalized + Config.W_COSINE * cosine!
       : bm25Normalized;
+    const wIn         = backlinkMap.get(source) ?? 0;
+    const blBoost     = wIn > 0
+      ? Config.W_BACKLINK * (Math.log(1 + wIn) / Math.log(1 + Config.BACKLINK_LOG_BASE))
+      : 0;
+    const hybridScore = baseScore + blBoost;
 
     const meta = metaMap.get(source);
     const tieredContent = getContentAtDepth(
@@ -599,6 +643,7 @@ export async function explainRetrieval(
       bm25Normalized,
       vectorScore:    cosine,
       hybridScore,
+      backlinkScore:  blBoost,
       contentLength:  row.content.length,
       tieredContent,
       sourceType:     meta?.source_type ?? "internal",

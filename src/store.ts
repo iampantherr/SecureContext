@@ -27,7 +27,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { MemoryFact, BroadcastType, BroadcastMessage, BroadcastResult, ComplexityProfile } from "./memory.js";
+import type { MemoryFact, BroadcastType, BroadcastMessage, BroadcastResult, ComplexityProfile, EpistemicOpts } from "./memory.js";
 import type { KnowledgeEntry, CrossProjectEntry, RetentionTier } from "./knowledge.js";
 import type { AgentRole } from "./access-control.js";
 
@@ -140,7 +140,7 @@ export interface FetchStats {
 
 export interface Store {
   // ── Working Memory ──────────────────────────────────────────────────────────
-  remember(projectPath: string, key: string, value: string, importance: number, agentId: string): Promise<void>;
+  remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi?: EpistemicOpts): Promise<void>;
   forget(projectPath: string, key: string, agentId: string): Promise<boolean>;
   recall(projectPath: string, agentId: string): Promise<MemoryFact[]>;
   archiveSummary(projectPath: string, summary: string): Promise<void>;
@@ -153,6 +153,19 @@ export interface Store {
   searchGlobal(queries: string[], limit?: number): Promise<CrossProjectEntry[]>;
   getKbStats(projectPath: string): Promise<KbStats>;
   explain(projectPath: string, query: string, depth?: string): Promise<ExplainResult>;
+
+  // ── Knowledge graph + backlinks (Tier-1 A) ───────────────────────────────────
+  rebuildBacklinks(projectPath: string): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }>;
+  /** Optional boot heal: rebuild backlinks for every project with knowledge but an empty graph.
+   *  PG-native (one DB, many project_hashes); the SQLite path is healed by indexProject's flush. */
+  backfillBacklinks?(): Promise<{ projects: number; edges: number }>;
+  graphData(projectPath: string): Promise<{ nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> }>;
+  backlinksFor(projectPath: string, source: string, limit: number): Promise<{ inDegree: number; weightedIn: number; inbound: Array<{ from: string; relation: string; weight: number }> } | null>;
+
+  // ── Memory contradictions (Tier-1 B) ─────────────────────────────────────────
+  scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }>;
+  listContradictions(projectPath: string, agentId: string): Promise<Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>>;
+  reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved"): Promise<number>;
 
   // ── Broadcasts ──────────────────────────────────────────────────────────────
   broadcast(projectPath: string, type: BroadcastType, agentId: string, opts: BroadcastOptions): Promise<BroadcastMessage>;

@@ -46,12 +46,23 @@ import {
 } from "./access-control.js";
 import { computeRowHash, getLastHash, verifyChain } from "./chain.js";
 
+/** v0.31.0 epistemology layer — WHAT kind of claim a fact is. */
+export type MemoryKind = "fact" | "decision" | "hypothesis" | "prediction";
+/** Resolution state of a prediction/hypothesis (whether it came true). */
+export type ResolutionStatus = "open" | "resolved_correct" | "resolved_incorrect" | "resolved_partial";
+
 export interface MemoryFact {
   key:        string;
   value:      string;
   importance: number;
   created_at: string;
   agent_id?:  string;
+  // v0.31.0 epistemology layer (all optional — absent ⇒ plain observed fact, byte-identical):
+  provenance?:        Provenance;               // HOW we know it (orthogonal axis, declared below)
+  kind?:              MemoryKind;               // WHAT kind of claim
+  confidence?:        number | null;            // HOW sure (0–1; predictions/hypotheses)
+  resolution_status?: ResolutionStatus | null;  // did it come true
+  resolved_at?:       string | null;
 }
 
 // SECURITY: Strip control chars and limit length to prevent log injection / DB bloat
@@ -231,6 +242,21 @@ function ensureAgentIdColumn(db: DatabaseSync): void {
 }
 
 /**
+ * v0.31.0 — defensive idempotent ALTERs for the epistemology columns (mirrors
+ * ensureAgentIdColumn). Migration 31 normally adds these; this guarantees they exist
+ * even on a mid-session-healed DB, so the extended INSERT/SELECT never fails.
+ */
+function ensureEpistemologyColumns(db: DatabaseSync): void {
+  const add = (col: string, ddl: string) => {
+    try { db.exec(`ALTER TABLE working_memory ADD COLUMN ${col} ${ddl}`); } catch {}
+  };
+  add("kind",              `TEXT NOT NULL DEFAULT 'fact'`);
+  add("confidence",        `REAL`);
+  add("resolution_status", `TEXT`);
+  add("resolved_at",       `TEXT`);
+}
+
+/**
  * MemGPT operation: WRITE to working memory.
  * If the key already exists for this agent, it is updated in place.
  * Triggers eviction to archival if working memory is full.
@@ -239,13 +265,41 @@ function ensureAgentIdColumn(db: DatabaseSync): void {
  */
 export type Provenance = "EXTRACTED" | "INFERRED" | "AMBIGUOUS" | "UNKNOWN";
 
+/** v0.31.0 — optional epistemic metadata accepted by zc_remember / rememberFact. */
+export interface EpistemicOpts {
+  kind?:       MemoryKind;
+  confidence?: number | null;
+  resolution?: ResolutionStatus | null;
+}
+
+/**
+ * Zero-LLM auto-classifier (Tier-1 B adoption). Infers an epistemic `kind` from the
+ * fact text so claims get typed even when the agent passes nothing. CONSERVATIVE:
+ * only upgrades from 'fact' on a clear signal; an explicit `kind` always wins; never
+ * fabricates confidence. Precedence: prediction > decision > hypothesis > fact.
+ */
+export function classifyFactKind(value: string): MemoryKind {
+  const v = ` ${value.toLowerCase()} `;
+  if (/\b(will|won'?t|going to|gonna|expects?|expected|predicts?|predicted|prediction|by (next|tomorrow|monday|tuesday|wednesday|thursday|friday|q[1-4]|end of)|should (pass|fail|work|break|ship|land|succeed))\b/.test(v)) {
+    return "prediction";
+  }
+  if (/\b(decided|decision|chose|chosen|choosing|going with|opted for|opting for|settled on|we'?ll use|let'?s use|approach is to|plan is to)\b/.test(v)) {
+    return "decision";
+  }
+  if (/\b(might|maybe|perhaps|possibly|suspect|suspected|hypothesis|hypothesi[sz]e|i think|probably|seems? (to|like)|could be)\b/.test(v)) {
+    return "hypothesis";
+  }
+  return "fact";
+}
+
 export function rememberFact(
   projectPath: string,
   key: string,
   value: string,
   importance: number = 3,
   agentId: string = "default",
-  provenance: Provenance = "EXTRACTED"
+  provenance: Provenance = "EXTRACTED",
+  epi: EpistemicOpts = {}
 ): void {
   const safeKey   = sanitize(key,     100);
   const safeValue = sanitize(value,   500);
@@ -256,22 +310,43 @@ export function rememberFact(
   // (the agent typed it deliberately = high trust).
   const safeProv: Provenance = (["EXTRACTED", "INFERRED", "AMBIGUOUS", "UNKNOWN"] as const).includes(provenance)
     ? provenance : "UNKNOWN";
+
+  // v0.31.0 epistemology layer. Explicit kind wins; otherwise auto-classify from the
+  // text (zero-LLM, conservative). confidence/resolution are set ONLY when the caller
+  // explicitly provides them — the auto-classifier never fabricates them, which keeps
+  // auto-typed facts OUT of the eviction-protection guard below (that needs explicit intent).
+  const KINDS = ["fact", "decision", "hypothesis", "prediction"] as const;
+  const RES   = ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"] as const;
+  const safeKind: MemoryKind = epi.kind && (KINDS as readonly string[]).includes(epi.kind)
+    ? epi.kind : classifyFactKind(safeValue);
+  const safeConf: number | null = (typeof epi.confidence === "number" && isFinite(epi.confidence))
+    ? Math.max(0, Math.min(1, epi.confidence)) : null;
+  const safeRes: ResolutionStatus | null = epi.resolution && (RES as readonly string[]).includes(epi.resolution)
+    ? epi.resolution : null;
+  const resolvedAt: string | null = (safeRes && safeRes !== "open") ? new Date().toISOString() : null;
+
   const now       = new Date().toISOString();
 
   const db = openDb(projectPath);
   ensureAgentIdColumn(db);
+  ensureEpistemologyColumns(db);
 
-  // ON CONFLICT path: also update provenance (caller may be re-asserting
-  // a fact with different epistemic status, e.g. promoting INFERRED → EXTRACTED).
+  // ON CONFLICT path: also update provenance + epistemic columns. Re-asserting a
+  // prediction's key with resolution='resolved_incorrect' RESOLVES it in place —
+  // this is the resolution mechanism (no separate tool needed).
   db.prepare(`
-    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key, agent_id) DO UPDATE SET
-      value      = excluded.value,
-      importance = excluded.importance,
-      created_at = excluded.created_at,
-      provenance = excluded.provenance
-  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv);
+      value             = excluded.value,
+      importance        = excluded.importance,
+      created_at        = excluded.created_at,
+      provenance        = excluded.provenance,
+      kind              = excluded.kind,
+      confidence        = excluded.confidence,
+      resolution_status = excluded.resolution_status,
+      resolved_at       = excluded.resolved_at
+  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt);
 
   // Evict if over limit — evict lowest importance + oldest first (MemGPT eviction policy)
   // Limit is dynamically sized based on project complexity (see getWorkingMemoryLimits)
@@ -283,12 +358,36 @@ export function rememberFact(
 
   if (count > wmMax) {
     type Row = { key: string; value: string };
+    const need = count - wmEvictTo;
+    // v0.31.0: protect explicitly-tracked OPEN predictions/hypotheses and high-confidence
+    // decisions from eviction (additive — plain facts match neither clause and evict exactly
+    // as before; auto-classified facts have no resolution/confidence so they evict normally too).
+    const PROTECT = `NOT (
+        (kind IN ('prediction','hypothesis') AND resolution_status = 'open')
+     OR (kind = 'decision' AND confidence IS NOT NULL AND confidence >= 0.8)
+    )`;
     const toEvict = db.prepare(`
       SELECT key, value FROM working_memory
-      WHERE agent_id = ?
+      WHERE agent_id = ? AND ${PROTECT}
       ORDER BY importance ASC, created_at ASC
       LIMIT ?
-    `).all(safeAgent, count - wmEvictTo) as Row[];
+    `).all(safeAgent, need) as Row[];
+
+    // Safety valve: if protected facts leave us short of the eviction target, fall back to
+    // the original unfiltered eviction for the remainder so the hard `max` bound always holds.
+    if (toEvict.length < need) {
+      const have = new Set(toEvict.map((r) => r.key));
+      const extra = db.prepare(`
+        SELECT key, value FROM working_memory
+        WHERE agent_id = ?
+        ORDER BY importance ASC, created_at ASC
+        LIMIT ?
+      `).all(safeAgent, need) as Row[];
+      for (const r of extra) {
+        if (toEvict.length >= need) break;
+        if (!have.has(r.key)) { toEvict.push(r); have.add(r.key); }
+      }
+    }
 
     for (const row of toEvict) {
       db.prepare("DELETE FROM working_memory WHERE key = ? AND agent_id = ?").run(row.key, safeAgent);
@@ -312,6 +411,7 @@ export function recallWorkingMemory(
 ): MemoryFact[] {
   const db        = openDb(projectPath);
   ensureAgentIdColumn(db);
+  ensureEpistemologyColumns(db);
   const safeAgent = sanitize(agentId, 64);
 
   // v0.22.2 — per-agent namespacing with shared pool. Mirrors the PG path
@@ -319,14 +419,14 @@ export function recallWorkingMemory(
   let rows: MemoryFact[];
   if (safeAgent === "default") {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
       FROM working_memory
       WHERE agent_id = 'default'
       ORDER BY importance DESC, created_at DESC
     `).all() as unknown as MemoryFact[];
   } else {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
       FROM working_memory
       WHERE agent_id = ? OR agent_id = 'default'
       ORDER BY
@@ -400,17 +500,31 @@ export function formatWorkingMemoryForContext(
     `## Working Memory (${facts.length}/${max} facts${agentId !== "default" ? ` · agent: ${agentId}` : ""})`,
   ];
 
+  // v0.31.0: plain facts render byte-identical; non-fact / resolved claims get an inline badge.
+  const fmtFact = (f: MemoryFact): string => {
+    const base = `  [★${f.importance}] ${f.key}: ${f.value}`;
+    if ((!f.kind || f.kind === "fact") && !f.resolution_status) return base;
+    const tags: string[] = [];
+    if (f.kind && f.kind !== "fact") tags.push(f.kind);
+    if (f.confidence != null) tags.push(`p=${f.confidence.toFixed(2)}`);
+    if (f.resolution_status === "open") tags.push("⏳ open");
+    else if (f.resolution_status === "resolved_correct")   tags.push("✓ correct");
+    else if (f.resolution_status === "resolved_incorrect") tags.push("✗ incorrect");
+    else if (f.resolution_status === "resolved_partial")   tags.push("~ partial");
+    return tags.length ? `${base}  ⟨${tags.join(" · ")}⟩` : base;
+  };
+
   if (critical.length > 0) {
     lines.push("\n**Critical [★4-5]**");
-    for (const f of critical) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+    for (const f of critical) lines.push(fmtFact(f));
   }
   if (normal.length > 0) {
     lines.push("\n**Normal [★3]**");
-    for (const f of normal) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+    for (const f of normal) lines.push(fmtFact(f));
   }
   if (ephemeral.length > 0) {
     lines.push("\n**Ephemeral [★1-2]**");
-    for (const f of ephemeral) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}`);
+    for (const f of ephemeral) lines.push(fmtFact(f));
   }
 
   return lines.join("\n");

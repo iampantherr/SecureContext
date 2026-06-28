@@ -4,6 +4,74 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.31.0] — 2026-06-28 — Tier-1: self-wiring knowledge graph + epistemology & contradiction detection
+
+Two retrieval-quality layers borrowed from the best community memory builds (gbrain's
+backlink-boosted graph + epistemic "takes"), made a **strict superset** of what they offer
+by keeping SecureContext's verifiable, isolated, PG-first memory underneath. Both layers are
+**on by default** — not opt-in flags an agent can quietly skip — and both were verified with
+real terminal agents (auto-classification + mid-session contradiction detection observed with
+no nudging) and an adversarial multi-agent audit of every write/read path.
+
+### Added
+- **Self-wiring knowledge graph + backlink-boosted ranking (Tier-1 A).** Two persistent,
+  directed, typed tables (`kb_edges` / `kb_backlinks`, SQLite migration 30 / PG migration 28,
+  both `project_hash`-scoped) built by the same zero-LLM co-reference engine the community
+  detector already uses (`extractCoReferences`). A log-damped, additive in-degree boost
+  (`W_BACKLINK`, default **0.08**) lets a highly-referenced "hub" source rank higher on the
+  search hot path. `W_BACKLINK=0` is a byte-identical kill-switch. New tools: `zc_graph_rebuild`,
+  `zc_graph_backlinks`; `zc_kb_cluster` reports the top hub.
+- **Epistemology layer (Tier-1 B).** `working_memory` gains `kind`
+  (`fact`/`decision`/`hypothesis`/`prediction`), `confidence`, `resolution_status`, `resolved_at`
+  (SQLite migration 31 / PG migration 29, defaulting to plain `fact` so every existing row reads
+  back unchanged). `zc_remember` gains optional `kind`/`confidence`/`resolution`, and a **zero-LLM
+  auto-classifier** types a fact from its text even when the agent passes nothing — so the typed
+  model is the default, not an opt-in. Recall badges non-fact/unresolved rows; plain facts render
+  byte-identical. Re-asserting a prediction's key with a `resolution` resolves it in place
+  (self-calibration). Eviction now protects open predictions/high-confidence decisions.
+- **Suspected-contradiction detection.** A background pass (SQLite migration 32 / PG migration 30)
+  flags a fact pair only when it is BOTH semantically similar (cosine ≥ `ZC_CONTRADICTION_SIM`,
+  default 0.70) AND carries a conflict signal (resolution conflict, decision reversal, or an
+  action-reversal polarity flip). Surfaced in a `## ⚠️ Suspected Contradictions` recall section
+  and via `zc_memory_contradictions` — **never auto-applied**, omitted entirely when count is 0,
+  and skipped cleanly when Ollama is down.
+- **PG-native parity for the whole Tier-1 surface** (the operator's PG-first rule): store-driven
+  `rebuildBacklinks`/`graphData`/`backlinksFor`/`scanContradictions`/`listContradictions`/
+  `reviewContradiction`, API endpoints (`/api/v1/graph/{rebuild,data,backlinks}`,
+  `/api/v1/contradictions`), and the 3 new tools proxied through `REMOTE_TOOLS` so live (Docker)
+  agents get every feature. Closes the pre-existing PG `working_memory.provenance` parity gap.
+- **Operator dashboard:** a second code/memory KB graph (`/dashboard/kb-graph`), node size ∝
+  backlink in-degree, separate from the wiki graph.
+
+### Fixed
+- **Backlink boost was dormant by default (the headline fix).** The only rebuild trigger was a
+  5s *unref'd* debounce, which `process.exit()` kills in the short-lived bulk indexer
+  (`background-index.mjs`) — so auto-onboarded projects were indexed with an empty backlink graph
+  and the boost silently contributed nothing. Fixed three ways: an awaited synchronous
+  `flushBacklinkRebuild` at the end of `indexProject` (SQLite + PG mirror), a `backfillBacklinks`
+  boot pass on the API server that rebuilds any project with knowledge but an empty graph
+  (idempotent; only touches empty ones), and graceful PG-pool shutdown before the indexer exits.
+- **Root-level files produced zero backlink edges.** The basename index didn't strip the scheme
+  prefix, so a root source like `file:config.js` indexed as `file:config` and never matched the
+  bare `config.js` referenced in other files (sub-pathed files were unaffected). Now the scheme
+  is stripped before computing the basename.
+- **Contradiction detection ran at most once per daemon process.** The once-per-(project,agent)
+  scan guard was never cleared, so a contradiction formed *after* the first recall went undetected
+  until restart. `/remember` and `/forget` now re-arm the guard (in-process path too) so the next
+  recall re-scans, and the guard is only kept when the scan actually succeeds — an Ollama outage
+  no longer permanently disables auto-scan.
+- **`zc_kb_cluster` could wipe the PG backlink graph under proxy.** In Docker mode its local
+  SQLite is empty, so it would push an empty graph and delete the real PG backlinks; it now skips
+  the PG mirror when proxied or when the local scan produced no edges.
+- Two system-side `working_memory` writers (rolling compaction, reject-resolver) now set `kind`
+  explicitly instead of relying on the column default, keeping every write consistent with the
+  typed model.
+
+### Changed
+- Backward-compatible by construction: every new column defaults to plain `fact`, every new table
+  is `CREATE … IF NOT EXISTS`, and with `W_BACKLINK=0` + no epistemic params the search/recall
+  output is byte-identical to v0.30.8. Migrations are idempotent and re-runnable.
+
 ## [0.30.8] — 2026-06-10 — Evidence-enforced outcomes, listen-first boot, catalog + resolution fixes, dashboard redesign
 
 The self-improvement loop gets its missing input: structured evidence on every

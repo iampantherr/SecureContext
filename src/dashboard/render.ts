@@ -843,6 +843,22 @@ export function renderDashboardHtml(): string {
     </div>
   </details>
 </div>
+<!-- v0.31.0 — Code/Memory Knowledge Graph (Tier-1 A). SecureContext's OWN reference
+     graph (kb_edges/kb_backlinks) over file:/memory:/session: sources, PER PROJECT.
+     SEPARATE from the personal-wiki graph above. Node size ∝ backlink in-degree;
+     hubs rank higher in zc_search. Lazy-loaded inside a <details>. -->
+<div class="panel" id="kb-graph-panel">
+  <h2>Knowledge graph — code &amp; memory <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(SecureContext KB references: file/memory/session sources, per project — distinct from the wiki graph)</span></h2>
+  <details class="wiki-graph-details">
+    <summary><strong>Show graph</strong> <small>(loads on first open — per-project; node size ∝ backlinks)</small></summary>
+    <div id="kb-graph"
+         hx-get="/dashboard/kb-graph"
+         hx-trigger="click from:previous summary once"
+         hx-target="this" hx-swap="innerHTML">
+      <em style="color:#94a3b8; font-size:0.85rem">Click the heading above to load the graph.</em>
+    </div>
+  </details>
+</div>
 </section>
 
 <section class="tab-content" data-tab="authoring">
@@ -2520,6 +2536,106 @@ export function renderSecurityScansFragment(skillId: string, rows: SecurityScanR
 // dashboard page already has d3 loaded (e.g. from another panel) the
 // fragment reuses it; otherwise it injects a one-shot <script> tag.
 // ─────────────────────────────────────────────────────────────────────
+
+/**
+ * v0.31.0 — Code/Memory Knowledge Graph panel (Tier-1 A). DISTINCT from the wiki KB graph:
+ * this is SecureContext's OWN reference graph (kb_edges/kb_backlinks) over file:/memory:/session:
+ * sources, PER PROJECT. Node size ∝ backlink weighted-in (hubs are visually largest — they also
+ * rank higher in zc_search). Data is fetched server-side via store.graphData() and passed in by
+ * the /dashboard/kb-graph endpoint. Never reads the personal-wiki graph.json.
+ */
+export function renderKbGraphFragment(
+  data: { nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> },
+  projectPath: string,
+): string {
+  const form = `
+    <form hx-get="/dashboard/kb-graph" hx-target="#kb-graph" hx-swap="innerHTML"
+          style="display:flex; gap:8px; margin:0 0 12px 0; flex-wrap:wrap">
+      <input name="projectPath" value="${escapeHtml(projectPath)}" placeholder="absolute project path"
+             style="flex:1; min-width:280px; padding:7px 10px; background:#0a0e16; border:1px solid #1d2634; border-radius:8px; color:#c3ccd9; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.8rem">
+      <button type="submit" style="padding:7px 14px; background:#16241c; border:1px solid #2fe6a6; color:#2fe6a6; border-radius:8px; cursor:pointer; font-size:0.82rem">Load graph</button>
+    </form>`;
+
+  if (!projectPath) {
+    return `${form}<div style="padding:14px; color:#94a3b8; font-size:0.88rem; line-height:1.55">
+      Enter an <strong>absolute project path</strong> to view its code/memory knowledge graph —
+      SecureContext's own reference graph over <code>file:</code>/<code>memory:</code>/<code>session:</code> sources,
+      <strong>separate from the personal-wiki graph</strong>. It builds automatically as the project's KB is indexed;
+      run <code>zc_graph_rebuild</code> to force it.
+    </div>`;
+  }
+  if (!data.nodes.length) {
+    return `${form}<div style="padding:14px; color:#94a3b8; font-size:0.88rem; line-height:1.55">
+      <strong>No backlink graph yet for this project.</strong> It builds automatically when content is indexed
+      (debounced), or run <code>zc_graph_rebuild</code>. Path: <code>${escapeHtml(projectPath)}</code>
+    </div>`;
+  }
+
+  const topHub = data.nodes.slice().sort((a, b) => b.weightedIn - a.weightedIn)[0];
+  const safeJson = JSON.stringify(data).replace(/<\/script>/gi, "<\\/script>").replace(/<!--/g, "<\\!--");
+
+  return `${form}
+  <div style="display:flex; gap:14px; flex-wrap:wrap; padding:2px 2px 10px 2px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.76rem; color:#8b99ad">
+    <span><b style="color:#2fe6a6">${data.nodes.length}</b> sources</span>
+    <span><b style="color:#5aa2ff">${data.edges.length}</b> references</span>
+    ${topHub ? `<span>top hub: <b style="color:#f1b84c">${escapeHtml(topHub.id)}</b> (weighted_in=${topHub.weightedIn})</span>` : ""}
+    <span style="color:#7a8799; margin-left:auto">node size ∝ backlinks · hubs rank higher in zc_search</span>
+  </div>
+  <div id="kb-graph-canvas" style="width:100%; height:520px; background:radial-gradient(620px 420px at 50% 45%, rgba(90,162,255,.05), transparent 70%), #080b11; border:1px solid #1d2634; border-radius:12px; position:relative; overflow:hidden">
+    <div id="kb-graph-loading" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#7a8799; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.82rem">rendering graph&hellip;</div>
+  </div>
+  <div id="kb-graph-sel" style="margin-top:10px; padding:10px 12px; background:#0a0e16; border:1px solid #1d2634; border-radius:10px; font-size:0.82rem; color:#c3ccd9; min-height:40px">
+    <em style="color:#7a8799">Hover a node for its references. Bigger = more inbound references (a "hub").</em>
+  </div>
+  <script>
+  (function bootstrapKbGraph() {
+    var data = ${safeJson};
+    function render() {
+      var canvas = document.getElementById("kb-graph-canvas");
+      var loading = document.getElementById("kb-graph-loading");
+      var selBox = document.getElementById("kb-graph-sel");
+      if (!canvas || typeof d3 === "undefined") return;
+      if (loading && loading.parentNode) loading.parentNode.removeChild(loading);
+      while (canvas.firstChild) canvas.removeChild(canvas.firstChild);
+      var W = canvas.clientWidth || 800, H = canvas.clientHeight || 520;
+      var svg = d3.select(canvas).append("svg").attr("width", W).attr("height", H);
+      var g = svg.append("g");
+      svg.call(d3.zoom().scaleExtent([0.15, 4]).on("zoom", function(e){ g.attr("transform", e.transform); }));
+      var defs = svg.append("defs");
+      var marker = defs.append("marker").attr("id","kb-arrow").attr("viewBox","0 -5 10 10").attr("refX",18).attr("refY",0).attr("markerWidth",5).attr("markerHeight",5).attr("orient","auto");
+      marker.append("path").attr("d","M0,-4L8,0L0,4").attr("fill","#33415a");
+      var maxW = d3.max(data.nodes, function(n){ return n.weightedIn; }) || 1;
+      var rOf = function(n){ return 5 + 16 * Math.sqrt((n.weightedIn||0)/maxW); };
+      var REL = { code_ref:"#5aa2ff", mentions_file:"#2fe6a6", mentions_memory:"#a98bff", cross_ref:"#7a8799", weak_ref:"#2a3548" };
+      var idset = {}; data.nodes.forEach(function(n){ idset[n.id]=1; });
+      var edges = data.edges.filter(function(e){ return idset[e.from] && idset[e.to]; }).map(function(e){ return { source:e.from, target:e.to, relation:e.relation, weight:e.weight }; });
+      var sim = d3.forceSimulation(data.nodes)
+        .force("link", d3.forceLink(edges).id(function(d){ return d.id; }).distance(70).strength(0.4))
+        .force("charge", d3.forceManyBody().strength(-180))
+        .force("center", d3.forceCenter(W/2, H/2))
+        .force("collide", d3.forceCollide().radius(function(d){ return rOf(d)+4; }));
+      var link = g.append("g").selectAll("line").data(edges).enter().append("line")
+        .attr("stroke", function(d){ return REL[d.relation] || "#33415a"; }).attr("stroke-opacity",0.5).attr("stroke-width",1).attr("marker-end","url(#kb-arrow)");
+      var node = g.append("g").selectAll("circle").data(data.nodes).enter().append("circle")
+        .attr("r", rOf).attr("fill","#2fe6a6").attr("fill-opacity", function(d){ return 0.32 + 0.55*Math.sqrt((d.weightedIn||0)/maxW); }).attr("stroke","#080b11").attr("stroke-width",1.2).style("cursor","pointer")
+        .call(d3.drag().on("start",function(e,d){ if(!e.active)sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }).on("drag",function(e,d){ d.fx=e.x; d.fy=e.y; }).on("end",function(e,d){ if(!e.active)sim.alphaTarget(0); d.fx=null; d.fy=null; }));
+      node.append("title").text(function(d){ return d.id + "  (in_degree=" + d.inDegree + ", weighted_in=" + d.weightedIn + ")"; });
+      function show(d){ if(selBox) selBox.innerHTML = '<b style="color:#2fe6a6">'+d.id+'</b> &mdash; '+d.inDegree+' inbound source(s), weighted_in '+d.weightedIn; }
+      node.on("mouseover", function(e,d){ show(d); }).on("click", function(e,d){ show(d); });
+      sim.on("tick", function(){
+        link.attr("x1",function(d){return d.source.x;}).attr("y1",function(d){return d.source.y;}).attr("x2",function(d){return d.target.x;}).attr("y2",function(d){return d.target.y;});
+        node.attr("cx",function(d){return d.x;}).attr("cy",function(d){return d.y;});
+      });
+    }
+    if (typeof d3 !== "undefined") { render(); return; }
+    var s = document.createElement("script");
+    s.src = "https://d3js.org/d3.v7.min.js";
+    s.onload = render;
+    s.onerror = function(){ var l = document.getElementById("kb-graph-loading"); if (l) l.textContent = "d3.js failed to load from CDN."; };
+    document.head.appendChild(s);
+  })();
+  </script>`;
+}
 
 export async function renderWikiGraphFragment(): Promise<string> {
   const fs = await import("node:fs/promises");

@@ -64,43 +64,78 @@ export interface CommunityDetectionResult {
  *
  * Edge weights = mention count (deterministic).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildKnowledgeGraph(db: DatabaseSync): any {
-  const graph = new Graph({ type: "undirected", multi: false, allowSelfLoops: false });
+// ─── Co-reference extraction (shared by community detection + backlinks) ────
 
-  type Row = { source: string; content: string };
-  const rows = db.prepare("SELECT source, content FROM knowledge").all() as Row[];
+/** A directed co-reference: `from` source's content mentions `to` source. */
+export interface RawEdge {
+  from:      string;
+  to:        string;
+  matchKind: "full_key" | "basename";
+  weight:    number;  // mention count
+}
 
-  // Add all nodes first (so edges can reference them)
+/** Scheme prefix of a source key: file:/memory:/session:/graphify:// → "file" etc. */
+function prefixOf(s: string): string {
+  const i = s.indexOf(":");
+  return i > 0 ? s.slice(0, i) : "other";
+}
+
+/**
+ * Derive a cheap, zero-LLM typed relation from the source prefixes + match kind.
+ * basename-only matches are the noise-prone path → tagged `weak_ref` so they can be
+ * down-weighted later without re-extraction.
+ */
+export function classifyRelation(from: string, to: string, matchKind: "full_key" | "basename"): string {
+  if (matchKind === "basename") return "weak_ref";
+  const fp = prefixOf(from);
+  const tp = prefixOf(to);
+  if (tp === "memory" || tp === "session") return "mentions_memory";
+  if (tp === "file" && (fp === "memory" || fp === "session")) return "mentions_file";
+  if (fp === "file" && tp === "file") return "code_ref";
+  return "cross_ref";
+}
+
+/**
+ * Extract directed co-reference edges from the knowledge rows. Each edge `from → to`
+ * means "`from`'s content mentions `to`". This is the single zero-LLM self-wiring
+ * engine shared by both community detection (folded to undirected) and backlink
+ * in-degree (kept directed). The counting logic is identical to the historical
+ * buildKnowledgeGraph scan: full-source-key match + conservative basename match,
+ * weight = mention count, self-references excluded.
+ */
+export function extractCoReferences(rows: Array<{ source: string; content: string }>): RawEdge[] {
   const sources = new Set<string>();
-  for (const r of rows) {
-    if (!r.source) continue;
-    graph.addNode(r.source);
-    sources.add(r.source);
-  }
+  for (const r of rows) { if (r.source) sources.add(r.source); }
 
-  // Build a normalized mention index: stripped basename → source
-  // (so "file:src/foo.ts" can be referenced as just "foo.ts" in another file)
+  // Normalized basename index: "file:src/foo.ts" referenceable as just "foo".
+  // Strip the scheme prefix (file:/memory:/…) FIRST, then take the last path segment,
+  // then drop the extension. Without stripping the scheme, a ROOT-LEVEL source like
+  // "file:config.js" yields the basename "file:config" (':' is not a path separator),
+  // which never matches the bare "config.js" that appears in other files' content — so
+  // every root-level file silently gets zero backlink edges. Pathed sources were already
+  // correct (the '/' bounded the match); this also fixes the un-pathed case.
   const basenameIndex = new Map<string, string>();
   for (const s of sources) {
-    // file:src/foo.ts → foo.ts ; foo.ts → foo.ts
-    const m = s.match(/([^/\\]+?)(\.\w+)?$/);
-    if (m) {
-      const key = m[1];
-      if (!basenameIndex.has(key)) basenameIndex.set(key, s);
-    }
+    const afterScheme = s.includes(":") ? s.slice(s.indexOf(":") + 1) : s;
+    const lastSeg = afterScheme.split(/[/\\]/).pop() ?? afterScheme;
+    const m = lastSeg.match(/^(.+?)(\.\w+)?$/);
+    const key = m ? m[1] : lastSeg;
+    if (key && !basenameIndex.has(key)) basenameIndex.set(key, s);
   }
 
-  // Scan each source's content for references to other sources
+  const edges: RawEdge[] = [];
   for (const r of rows) {
     if (!r.content || !r.source) continue;
-    const localCounts = new Map<string, number>();
+    // per-other: total mention count + whether the (stronger) full-key form matched
+    const local = new Map<string, { count: number; full: boolean }>();
 
     // Reference type 1: full source key (e.g. "file:src/utils.ts")
     for (const other of sources) {
       if (other === r.source) continue;
       if (r.content.includes(other)) {
-        localCounts.set(other, (localCounts.get(other) ?? 0) + 1);
+        const e = local.get(other) ?? { count: 0, full: false };
+        e.count += 1; e.full = true;
+        local.set(other, e);
       }
     }
 
@@ -111,18 +146,42 @@ function buildKnowledgeGraph(db: DatabaseSync): any {
       // Be deliberately conservative: word-boundary or path-suffix match
       const re = new RegExp(`(^|[\\s/\\\\"'\`(])${basename.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}([\\s/\\\\"'\`).,]|$)`);
       if (re.test(r.content)) {
-        localCounts.set(otherSource, (localCounts.get(otherSource) ?? 0) + 1);
+        const e = local.get(otherSource) ?? { count: 0, full: false };
+        e.count += 1;
+        local.set(otherSource, e);
       }
     }
 
-    // Add edges with weight = count
-    for (const [other, count] of localCounts) {
-      if (graph.hasEdge(r.source, other)) {
-        const w = (graph.getEdgeAttribute(r.source, other, "weight") as number) ?? 1;
-        graph.setEdgeAttribute(r.source, other, "weight", w + count);
-      } else {
-        graph.addEdge(r.source, other, { weight: count });
-      }
+    for (const [other, e] of local) {
+      edges.push({ from: r.source, to: other, matchKind: e.full ? "full_key" : "basename", weight: e.count });
+    }
+  }
+  return edges;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildKnowledgeGraph(db: DatabaseSync): any {
+  const graph = new Graph({ type: "undirected", multi: false, allowSelfLoops: false });
+
+  type Row = { source: string; content: string };
+  const rows = db.prepare("SELECT source, content FROM knowledge").all() as Row[];
+
+  // Add all nodes first (so edges can reference them)
+  for (const r of rows) {
+    if (!r.source) continue;
+    if (!graph.hasNode(r.source)) graph.addNode(r.source);
+  }
+
+  // Fold the shared directed co-references into the undirected community graph:
+  // A→B and B→A accumulate into one undirected A–B weight — identical to the
+  // historical per-source scan.
+  for (const e of extractCoReferences(rows)) {
+    if (!graph.hasNode(e.from) || !graph.hasNode(e.to)) continue;
+    if (graph.hasEdge(e.from, e.to)) {
+      const w = (graph.getEdgeAttribute(e.from, e.to, "weight") as number) ?? 1;
+      graph.setEdgeAttribute(e.from, e.to, "weight", w + e.weight);
+    } else {
+      graph.addEdge(e.from, e.to, { weight: e.weight });
     }
   }
 

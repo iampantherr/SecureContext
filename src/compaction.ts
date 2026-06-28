@@ -121,8 +121,12 @@ async function persistCompactionFact(projectHash: string, sessionId: string | nu
   const value = `[Rolling compaction of ${turnsCount} turns]\n${summary.slice(0, 480)}`;
   await withClient(async (c) => {
     await c.query(
-      `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, created_at)
-       VALUES ($1, $2, $3, 4, 'system', now())
+      // v0.31.0 — kind='fact' explicit: a compaction summary is a factual RECORD of past
+      // turns, not the agent's own claim, so it must NOT be auto-classified by its text (a
+      // summary that mentions "we decided X" is still a fact, not a decision). Setting the
+      // typed column explicitly also removes the reliance on the DB default.
+      `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, kind, created_at)
+       VALUES ($1, $2, $3, 4, 'system', 'fact', now())
        ON CONFLICT (project_hash, key, agent_id) DO UPDATE
          SET value = EXCLUDED.value, created_at = EXCLUDED.created_at`,
       [projectHash, key.slice(0, 100), value.slice(0, 500)],

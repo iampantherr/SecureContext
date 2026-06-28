@@ -1,15 +1,61 @@
-# SecureContext — Architecture Reference (v0.28.0)
+# SecureContext — Architecture Reference (v0.31.0)
 
 ## Overview
 
 SecureContext is a Claude Code MCP (Model Context Protocol) plugin with four layered concerns:
 
-1. **Persistent memory** — working-memory facts, session summaries, semantic file summaries that survive Claude Code restarts.
+1. **Persistent memory** — working-memory facts, session summaries, semantic file summaries that survive Claude Code restarts. As of v0.31.0 (Tier-1) this layer also carries a **self-wiring knowledge graph** (backlink-boosted retrieval) and an **epistemology layer** (typed claims + suspected-contradiction detection) — see [Knowledge Graph & Epistemology](#knowledge-graph--epistemology-tier-1-v0310) below.
 2. **Cryptographic audit trail** — HMAC-chained `tool_calls_pg`, `outcomes_pg`, and (v0.26.0) `skill_admission_log_pg` keyed with a per-machine `machine_secret` (mode 0600, never leaves disk).
 3. **Anthropic-style filesystem skill admission gate** (v0.26.0+) — AST-based script scanning, HMAC verify-before-execute via a `PreToolUse` hook, chained audit log, marketplace bundled-script support with operator opt-ins.
 4. **Multi-agent coordination primitives** — atomic work-stealing queue, typed broadcast channel, per-agent identity tokens. These are the building blocks a dispatcher/orchestrator script needs; SecureContext does not ship the dispatcher itself.
 
 This document is the deep dive. For the value-prop summary see [README.md](README.md). For release-by-release detail see [CHANGELOG.md](CHANGELOG.md). For the SafeSkill PR #2 refutation see [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md).
+
+---
+
+## Knowledge Graph & Epistemology (Tier-1, v0.31.0)
+
+Two retrieval-quality layers sit on top of the persistent-memory store. Both are **on by
+default** (resting state ON; kill-switches are env levers, not feature gates) and both are
+**store-driven** so they work identically on the live PG (Docker) deployment and local SQLite.
+
+### A — Self-wiring knowledge graph + backlink-boosted ranking
+
+- **Tables** (`project_hash`-scoped, mirrored SQLite↔PG): `kb_edges` (directed, typed
+  `from → to`, weighted) and `kb_backlinks` (materialized in-degree + weighted-in, read on the
+  search hot path). SQLite migration 30 / PG migration 28.
+- **Extraction** reuses the single zero-LLM `extractCoReferences` engine (also folded into Louvain
+  community detection) — full-source-key matches plus a conservative, scheme-stripped basename
+  match. No second scanner, no LLM cost.
+- **Ranking**: `hybridScore = W_BM25·bm25 + W_COSINE·cosine + W_BACKLINK·ln(1+weighted_in)/ln(11)`.
+  `W_BACKLINK` defaults to **0.08**; `=0` is a byte-identical kill-switch. A keyword-sparse "hub"
+  doc referenced by many files climbs without any agent changing how it calls `zc_search`.
+- **Always-populated wiring** (the part that makes it real, not dormant): a bulk index ends with
+  an *awaited synchronous* rebuild (`flushBacklinkRebuild`, SQLite + PG mirror) so a short-lived
+  indexer process can't exit before the graph is built; `PostgresStore.index` schedules a debounced
+  rebuild for incremental writes; and the API server runs an idempotent `backfillBacklinks` on boot
+  that rebuilds any project that has knowledge but an empty graph.
+
+### B — Epistemology + suspected-contradiction detection
+
+- **Typed claims**: `working_memory` carries `kind` (`fact`/`decision`/`hypothesis`/`prediction`),
+  `confidence`, `resolution_status`, `resolved_at` (SQLite migration 31 / PG migration 29; default
+  `fact`, so legacy rows are unchanged). A zero-LLM auto-classifier types a fact from its text when
+  the agent passes nothing — typed memory is the default outcome, not an opt-in. Eviction protects
+  open predictions and high-confidence decisions.
+- **Contradiction pass** (SQLite migration 32 / PG migration 30): flags a pair only when it is BOTH
+  semantically similar (cosine ≥ `ZC_CONTRADICTION_SIM`, default 0.70) AND carries a conflict signal
+  (resolution conflict / decision reversal / action-reversal polarity flip). Surfaced in a
+  `## ⚠️ Suspected Contradictions` recall section and via `zc_memory_contradictions` — never
+  auto-applied, omitted when empty, skipped cleanly when Ollama is unavailable. The recall-triggered
+  scan **re-arms on every write** (and releases its guard if the embed step fails), so a contradiction
+  formed mid-session is detected on the next recall rather than only after a process restart.
+
+### Backward compatibility
+
+Every new column defaults to plain `fact`, every new table is `CREATE … IF NOT EXISTS`, and with
+`W_BACKLINK=0` + no epistemic params the search/recall output is byte-identical to pre-Tier-1.
+Migrations are idempotent and re-runnable; absent tables degrade silently to baseline behaviour.
 
 ---
 

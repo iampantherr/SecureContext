@@ -41,6 +41,7 @@ import { isAbsolute as posixIsAbsolute } from "node:path/posix";
 import { isAbsolute as win32IsAbsolute } from "node:path/win32";
 import { createStore } from "./store.js";
 import type { Store, RetentionTier } from "./store.js";
+import type { EpistemicOpts } from "./memory.js";
 import { checkOllamaAvailable } from "./embedder.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -299,6 +300,23 @@ export async function createApiServer(storeOverride?: Store) {
   app.get("/dashboard/wiki-graph", async (_request, reply) => {
     const { renderWikiGraphFragment } = await import("./dashboard/render.js");
     reply.type("text/html").send(await renderWikiGraphFragment());
+  });
+
+  // v0.31.0 — Code/Memory knowledge graph (Tier-1 A). SecureContext's OWN reference
+  // graph (kb_edges/kb_backlinks), PER PROJECT — distinct from the wiki graph above.
+  // Data fetched server-side via the store so the browser needs no API key.
+  app.get("/dashboard/kb-graph", async (request, reply) => {
+    const { renderKbGraphFragment } = await import("./dashboard/render.js");
+    const { projectPath } = request.query as Record<string, unknown>;
+    let pp = "";
+    let data: { nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> } = { nodes: [], edges: [] };
+    if (typeof projectPath === "string" && projectPath.trim()) {
+      try {
+        pp = validateProjectPath(projectPath);   // normalizes C:/ → C:\ so the hash matches how content was indexed
+        data = await store.graphData(pp);
+      } catch { pp = projectPath.trim(); /* invalid path → empty state showing what they typed */ }
+    }
+    reply.type("text/html").send(renderKbGraphFragment(data, pp));
   });
 
   app.get("/dashboard/health", async (_request, _reply) => {
@@ -2630,13 +2648,28 @@ export async function createApiServer(storeOverride?: Store) {
   // Working Memory
   // ─────────────────────────────────────────────────────────────────────────
 
+  // v0.31.0 — once-per-(project,agent)-per-process guard for the background
+  // contradiction scan kicked from /recall (keeps recall latency-free).
+  const contraScanned = new Set<string>();
+
   app.post("/api/v1/remember", async (request, reply) => {
     try {
-      const { projectPath, key, value, importance = 3, agentId = "default" } = request.body as Record<string, unknown>;
+      const { projectPath, key, value, importance = 3, agentId = "default", kind, confidence, resolution } = request.body as Record<string, unknown>;
       const pp = validateProjectPath(projectPath);
       if (typeof key   !== "string") throw new ApiError(400, "key must be a string");
       if (typeof value !== "string") throw new ApiError(400, "value must be a string");
-      await store.remember(pp, key, value, Number(importance), String(agentId));
+      // v0.31.0 epistemology — optional; invalid values are coerced/dropped downstream.
+      const epi: EpistemicOpts = {};
+      if (typeof kind       === "string") epi.kind       = kind as EpistemicOpts["kind"];
+      if (typeof confidence === "number") epi.confidence = confidence;
+      if (typeof resolution === "string") epi.resolution = resolution as EpistemicOpts["resolution"];
+      await store.remember(pp, key, value, Number(importance), String(agentId), epi);
+      // v0.31.0 — re-arm the contradiction scan for this project. A new fact can form
+      // a contradiction with an existing one, so the next recall must re-scan. Without
+      // this the guard is once-per-PROCESS and mid-run contradictions go undetected
+      // until daemon restart. Evict every (project,*) key so any agent's next recall
+      // re-scans (contradictions are cross-namespace via the shared 'default' pool).
+      for (const k of contraScanned) if (k.startsWith(pp + "::")) contraScanned.delete(k);
       const stats = await store.getMemoryStats(pp, String(agentId));
       return { ok: true, count: stats.count, max: stats.max };
     } catch (e) {
@@ -2651,6 +2684,9 @@ export async function createApiServer(storeOverride?: Store) {
       const pp = validateProjectPath(projectPath);
       if (typeof key !== "string") throw new ApiError(400, "key must be a string");
       const deleted = await store.forget(pp, key, String(agentId));
+      // v0.31.0 — re-arm the contradiction scan (a forget can resolve/remove one side
+      // of a flagged pair); the next recall re-scans. See /remember for rationale.
+      for (const k of contraScanned) if (k.startsWith(pp + "::")) contraScanned.delete(k);
       return { ok: true, deleted };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
@@ -2664,6 +2700,21 @@ export async function createApiServer(storeOverride?: Store) {
       const pp    = validateProjectPath(projectPath);
       const facts = await store.recall(pp, String(agentId));
       const lims  = await store.getWorkingMemoryLimits(pp, true);
+
+      // v0.31.0 — kick a BACKGROUND contradiction scan once per (project,agent) per process,
+      // and include any already-open contradictions so recall surfaces them with no added latency.
+      const _scanKey = `${pp}::${String(agentId)}`;
+      if (!contraScanned.has(_scanKey)) {
+        contraScanned.add(_scanKey); // optimistic — prevents a double-kick within one recall burst
+        // v0.31.0 — the guard must mean "scanned SUCCESSFULLY", not "scan attempted":
+        // if Ollama is down the scan can't embed, so release the guard to retry on a
+        // later recall (otherwise one outage permanently disables auto-scan for the process).
+        void store.scanContradictions(pp, String(agentId))
+          .then((r) => { if (!r || r.ollamaAvailable === false) contraScanned.delete(_scanKey); })
+          .catch(() => { contraScanned.delete(_scanKey); });
+      }
+      let contradictions: Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }> = [];
+      try { contradictions = await store.listContradictions(pp, String(agentId)); } catch { /* non-fatal */ }
 
       // v0.21.0 lever #2 — auto-inject applicable skills for this agent's role.
       // The MCP server passes ?role=<role> (defaulting to ZC_AGENT_ROLE env).
@@ -2692,7 +2743,65 @@ export async function createApiServer(storeOverride?: Store) {
         } catch { /* best-effort; never fail the recall on skill-injection error */ }
       }
 
-      return { ok: true, facts, max: lims.max, complexity: lims.profile, skills, role: targetRole };
+      return { ok: true, facts, max: lims.max, complexity: lims.profile, skills, role: targetRole, contradictions };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  // ── Knowledge graph (Tier-1 A) ───────────────────────────────────────────
+  app.post("/api/v1/graph/rebuild", async (request, reply) => {
+    try {
+      const { projectPath } = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      const r = await store.rebuildBacklinks(pp);
+      return { ok: true, ...r };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  app.get("/api/v1/graph/data", async (request, reply) => {
+    try {
+      const { projectPath } = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      const data = await store.graphData(pp);
+      return { ok: true, ...data };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  app.get("/api/v1/graph/backlinks", async (request, reply) => {
+    try {
+      const { projectPath, source, limit } = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      if (typeof source !== "string") throw new ApiError(400, "source must be a string");
+      const found = await store.backlinksFor(pp, source, Number(limit ?? 20));
+      return { ok: true, found };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  // ── Memory contradictions (Tier-1 B) ─────────────────────────────────────
+  app.post("/api/v1/contradictions", async (request, reply) => {
+    try {
+      const { projectPath, agentId = "default", run, action, key_a, key_b } = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      if (typeof action === "string" && typeof key_a === "string" && typeof key_b === "string") {
+        const st = action === "dismiss" ? "dismissed" : action === "acknowledge" ? "acknowledged" : "resolved";
+        const n = await store.reviewContradiction(pp, String(agentId), key_a, key_b, st as "dismissed" | "acknowledged" | "resolved");
+        return { ok: true, reviewed: n };
+      }
+      let scan: { scanned: number; flagged: number; ollamaAvailable: boolean } | null = null;
+      if (run) scan = await store.scanContradictions(pp, String(agentId));
+      const open = await store.listContradictions(pp, String(agentId));
+      return { ok: true, scan, contradictions: open };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });
@@ -3385,7 +3494,7 @@ export async function createApiServer(storeOverride?: Store) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 if (process.argv[1]?.endsWith("api-server.js")) {
-  createApiServer().then(async ({ app }) => {
+  createApiServer().then(async ({ app, store }) => {
     // v0.22.0 — run PG migrations on API startup. Previously migrations
     // only ran when an agent's MCP server made the first PG-backed telemetry
     // write — meaning new schema (added in a release) wouldn't apply until
@@ -3415,6 +3524,18 @@ if (process.argv[1]?.endsWith("api-server.js")) {
       console.log(`Auth: ${API_KEY ? "enabled (ZC_API_KEY set)" : "⚠️  OPEN — set ZC_API_KEY"}`);
       void (async () => {
         if (!(process.env.ZC_POSTGRES_HOST || process.env.ZC_POSTGRES_PASSWORD)) return;
+        // Tier-1 A: heal backlink graphs for projects indexed before the rebuild
+        // trigger existed (or whose short-lived bulk-index process died before the
+        // debounced rebuild fired). Idempotent — only rebuilds projects with an
+        // EMPTY graph. Without this the W_BACKLINK boost stays dormant for the body
+        // of already-indexed projects in a live deployment.
+        try {
+          const bf = (store as { backfillBacklinks?: () => Promise<{ projects: number; edges: number }> }).backfillBacklinks;
+          if (typeof bf === "function") {
+            const r = await bf.call(store);
+            if (r.projects > 0) console.log(`Backlink backfill: rebuilt ${r.projects} project(s), ${r.edges} edges`);
+          }
+        } catch (e) { console.error("Backlink backfill failed:", (e as Error).message); }
         try {
           const { autoImportSkills, backfillSecurityScans, backfillIntendedRoles } = await import("./skill_auto_import.js");
           const summary = await autoImportSkills();

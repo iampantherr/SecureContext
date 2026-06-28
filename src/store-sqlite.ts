@@ -40,6 +40,7 @@ import {
   setChannelKey as _setChannelKey,
   isChannelKeyConfigured as _isChannelKeyConfigured,
 } from "./memory.js";
+import type { EpistemicOpts } from "./memory.js";
 import {
   indexContent,
   searchKnowledge,
@@ -48,6 +49,8 @@ import {
   explainRetrieval,
   openDb as openKbDb,
 } from "./knowledge.js";
+import { rebuildBacklinks as rebuildBacklinksSqlite } from "./indexing/backlinks.js";
+import { detectContradictions, listOpenContradictions, reviewContradiction as reviewContradictionSqlite } from "./memory_contradictions.js";
 import {
   issueToken as _issueToken,
   revokeAllAgentTokens,
@@ -116,8 +119,8 @@ export class SqliteStore implements Store {
 
   // ── Working Memory ────────────────────────────────────────────────────────
 
-  async remember(projectPath: string, key: string, value: string, importance: number, agentId: string): Promise<void> {
-    rememberFact(projectPath, key, value, importance, agentId);
+  async remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi?: EpistemicOpts): Promise<void> {
+    rememberFact(projectPath, key, value, importance, agentId, undefined, epi);
   }
 
   async forget(projectPath: string, key: string, agentId: string): Promise<boolean> {
@@ -173,6 +176,67 @@ export class SqliteStore implements Store {
 
   async explain(projectPath: string, query: string, depth = "L1"): Promise<ExplainResult> {
     return explainRetrieval(projectPath, query, depth as "L0" | "L1" | "L2") as unknown as ExplainResult;
+  }
+
+  // ── Knowledge graph + backlinks (Tier-1 A) ────────────────────────────────
+  async rebuildBacklinks(projectPath: string): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }> {
+    const db = openProjectDb(projectPath);
+    try {
+      const r = rebuildBacklinksSqlite(db);
+      return { edges: r.edges, nodes: r.nodes, topHub: r.topHub };
+    } finally {
+      db.close();
+    }
+  }
+
+  async graphData(projectPath: string): Promise<{ nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> }> {
+    const db = openProjectDb(projectPath);
+    try {
+      let edges: Array<{ from: string; to: string; relation: string; weight: number }> = [];
+      const blMap = new Map<string, { inDegree: number; weightedIn: number }>();
+      try {
+        const br = db.prepare("SELECT source, in_degree, weighted_in FROM kb_backlinks").all() as Array<{ source: string; in_degree: number; weighted_in: number }>;
+        for (const b of br) blMap.set(b.source, { inDegree: b.in_degree, weightedIn: b.weighted_in });
+        const er = db.prepare("SELECT from_source, to_source, relation_type, weight FROM kb_edges LIMIT 2000").all() as Array<{ from_source: string; to_source: string; relation_type: string; weight: number }>;
+        edges = er.map((e) => ({ from: e.from_source, to: e.to_source, relation: e.relation_type, weight: e.weight }));
+      } catch { /* tables absent (pre-migration / never rebuilt) */ }
+      const ids = new Set<string>();
+      for (const e of edges) { ids.add(e.from); ids.add(e.to); }
+      const nodes = [...ids].map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
+      return { nodes, edges };
+    } finally {
+      db.close();
+    }
+  }
+
+  async backlinksFor(projectPath: string, source: string, limit: number): Promise<{ inDegree: number; weightedIn: number; inbound: Array<{ from: string; relation: string; weight: number }> } | null> {
+    const db = openProjectDb(projectPath);
+    try {
+      let bl: { in_degree: number; weighted_in: number } | undefined;
+      let inbound: Array<{ from: string; relation: string; weight: number }> = [];
+      try {
+        bl = db.prepare("SELECT in_degree, weighted_in FROM kb_backlinks WHERE source = ?").get(source) as { in_degree: number; weighted_in: number } | undefined;
+        const er = db.prepare("SELECT from_source, relation_type, weight FROM kb_edges WHERE to_source = ? ORDER BY weight DESC LIMIT ?").all(source, Math.min(Math.max(limit, 1), 100)) as Array<{ from_source: string; relation_type: string; weight: number }>;
+        inbound = er.map((e) => ({ from: e.from_source, relation: e.relation_type, weight: e.weight }));
+      } catch { return null; }
+      if (!bl) return null;
+      return { inDegree: bl.in_degree, weightedIn: bl.weighted_in, inbound };
+    } finally {
+      db.close();
+    }
+  }
+
+  // ── Memory contradictions (Tier-1 B) ──────────────────────────────────────
+  async scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
+    return detectContradictions(projectPath, agentId, "manual");
+  }
+
+  async listContradictions(projectPath: string, agentId: string): Promise<Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>> {
+    return listOpenContradictions(projectPath, agentId);
+  }
+
+  async reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved"): Promise<number> {
+    return reviewContradictionSqlite(projectPath, agentId, keyA, keyB, status);
   }
 
   // ── Broadcasts ────────────────────────────────────────────────────────────

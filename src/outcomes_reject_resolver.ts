@@ -388,8 +388,12 @@ async function rememberRejection(
       `Before retrying, address the rejection criteria explicitly in your MERGE summary.`;
     await withClient(async (c) => {
       await c.query(
-        `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, now())
+        // v0.31.0 — kind='fact' explicit: a rejection notice is a factual RECORD of a past
+        // rejection, not a prediction — even when the orchestrator's reason text contains
+        // words like "should"/"will". Set it explicitly rather than relying on the column
+        // default, and never auto-classify by the interpolated reason text.
+        `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, kind, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'fact', now())
          ON CONFLICT (project_hash, key, agent_id) DO UPDATE
            SET value = EXCLUDED.value, importance = EXCLUDED.importance, created_at = EXCLUDED.created_at`,
         [projectHash, key.slice(0, 100), value.slice(0, 500), 4, rejectedAgent],

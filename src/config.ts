@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.30.8",
+  VERSION: "0.31.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -61,6 +61,14 @@ export const Config = {
   BM25_CANDIDATES:  20,  // over-fetch for reranking
   W_COSINE:         0.65,
   W_BM25:           0.35,
+
+  // ── Knowledge-graph backlink ranking (Tier-1 A) ──────────────────────────
+  // Additive, log-damped boost on the hybrid search score for highly-referenced
+  // "hub" sources (in-degree from kb_backlinks). W_BACKLINK=0 ⇒ ranking is
+  // byte-identical to pre-backlink behaviour (rollback / A-B kill-switch).
+  // Default 0.08 keeps it a tiebreaker, never an override of BM25+cosine.
+  W_BACKLINK:        parseFloat(env["ZC_W_BACKLINK"] ?? "0.08"),
+  BACKLINK_LOG_BASE: parseInt(env["ZC_BACKLINK_LOG_BASE"] ?? "10", 10),
 
   // ── Fetch / SSRF ──────────────────────────────────────────────────────────
   FETCH_LIMIT:       parseInt(env["ZC_FETCH_LIMIT"] ?? "50", 10),

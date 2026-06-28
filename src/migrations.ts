@@ -970,6 +970,76 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 30,
+    description: "v0.31.0: persistent typed knowledge graph — kb_edges (directed co-references) + kb_backlinks (materialized in-degree) for backlink-boosted search ranking (mirrors PG migration 28)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS kb_edges (
+          from_source   TEXT    NOT NULL,
+          to_source     TEXT    NOT NULL,
+          relation_type TEXT    NOT NULL DEFAULT 'code_ref',
+          match_kind    TEXT    NOT NULL DEFAULT 'full_key',
+          weight        INTEGER NOT NULL DEFAULT 1,
+          computed_at   TEXT    NOT NULL,
+          PRIMARY KEY (from_source, to_source, relation_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_kbe_to   ON kb_edges(to_source);
+        CREATE INDEX IF NOT EXISTS idx_kbe_from ON kb_edges(from_source);
+        CREATE TABLE IF NOT EXISTS kb_backlinks (
+          source       TEXT    PRIMARY KEY,
+          in_degree    INTEGER NOT NULL DEFAULT 0,
+          weighted_in  INTEGER NOT NULL DEFAULT 0,
+          computed_at  TEXT    NOT NULL
+        );
+      `);
+    },
+  },
+
+  {
+    id: 31,
+    description: "v0.31.0: epistemology layer on working_memory (kind|confidence|resolution_status|resolved_at) — fact/decision/hypothesis/prediction + confidence + resolution tracking (mirrors PG migration 29)",
+    up: (db) => {
+      const tbl = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='working_memory'`).get();
+      if (!tbl) return;
+      const cols = new Set(
+        (db.prepare(`PRAGMA table_info(working_memory)`).all() as Array<{ name: string }>).map((c) => c.name)
+      );
+      const safeAdd = (col: string, ddl: string) => {
+        if (!cols.has(col)) { try { db.exec(`ALTER TABLE working_memory ADD COLUMN ${col} ${ddl}`); } catch { /* exists */ } }
+      };
+      safeAdd("kind",              `TEXT NOT NULL DEFAULT 'fact' CHECK (kind IN ('fact','decision','hypothesis','prediction'))`);
+      safeAdd("confidence",        `REAL`);
+      safeAdd("resolution_status", `TEXT CHECK (resolution_status IN ('open','resolved_correct','resolved_incorrect','resolved_partial'))`);
+      safeAdd("resolved_at",       `TEXT`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_wm_kind ON working_memory(agent_id, kind, resolution_status);`);
+    },
+  },
+
+  {
+    id: 32,
+    description: "v0.31.0: memory_contradictions — background suspected-contradiction signals over working memory (mirrors PG migration 30)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memory_contradictions (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_id      TEXT NOT NULL,
+          key_a         TEXT NOT NULL,
+          key_b         TEXT NOT NULL,
+          similarity    REAL NOT NULL,
+          reason        TEXT NOT NULL,
+          detail        TEXT,
+          status        TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','dismissed','acknowledged','resolved')),
+          surfaced_by   TEXT NOT NULL CHECK (surfaced_by IN ('cron','manual')),
+          surfaced_at   TEXT NOT NULL,
+          reviewed_at   TEXT,
+          UNIQUE(agent_id, key_a, key_b)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mc_status ON memory_contradictions(agent_id, status, surfaced_at DESC);
+      `);
+    },
+  },
+
 ];
 
 /**
