@@ -3536,6 +3536,31 @@ if (process.argv[1]?.endsWith("api-server.js")) {
             if (r.projects > 0) console.log(`Backlink backfill: rebuilt ${r.projects} project(s), ${r.edges} edges`);
           }
         } catch (e) { console.error("Backlink backfill failed:", (e as Error).message); }
+        // Tier-2 #6 — background memory-enrichment cron (ON by default; ZC_ENRICHMENT_CRON=0 disables).
+        // Every interval it (a) heals empty backlink graphs and (b) re-scans each project's shared
+        // 'default' pool for contradictions over RECENT facts only (ZC_ENRICHMENT_SCAN_DAYS, default 14)
+        // — so it surfaces fresh conflicts without re-flagging years of history. Stored under 'default'
+        // (one row per conflict, visible to every agent). First run is one interval after boot.
+        try {
+          const enrich = (store as { runEnrichment?: () => Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean }> }).runEnrichment;
+          if (typeof enrich === "function" && process.env.ZC_ENRICHMENT_CRON !== "0") {
+            const { Scheduler } = await import("./cron/scheduler.js");
+            const intervalMin = Math.max(5, parseInt(process.env.ZC_ENRICHMENT_INTERVAL_MIN ?? "30", 10) || 30);
+            const sched = new Scheduler();
+            sched.register({
+              id: "memory-enrichment",
+              description: "Tier-2: contradiction re-scan ('default' pool) + backlink backfill per project",
+              interval_ms: intervalMin * 60_000,
+              next_run_ms: Date.now() + intervalMin * 60_000, // first run one interval after boot (no boot load)
+              work: async () => {
+                const r = await enrich.call(store);
+                console.log(`Enrichment cron: projects=${r.projects} flagged=${r.flagged} backfilled=${r.backfilledProjects}${r.ollamaDown ? " (ollama down)" : ""}`);
+              },
+            });
+            sched.start(60_000); // poll every 60s; the job itself fires every intervalMin
+            console.log(`Enrichment cron: ENABLED (every ${intervalMin} min)`);
+          }
+        } catch (e) { console.error("Enrichment cron bootstrap failed:", (e as Error).message); }
         try {
           const { autoImportSkills, backfillSecurityScans, backfillIntendedRoles } = await import("./skill_auto_import.js");
           const summary = await autoImportSkills();

@@ -4,6 +4,38 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.33.0] — 2026-06-28 — Tier-2: background memory-enrichment cron
+
+Completes Tier-2 with a scheduled maintenance cycle — and, notably, **actually wires the
+`Scheduler` primitive into production for the first time** (it had shipped in v0.18.0 but was
+never instantiated, so no cron had ever run).
+
+### Added
+- **Memory-enrichment cron (on by default; `ZC_ENRICHMENT_CRON=0` disables).** Every interval
+  (`ZC_ENRICHMENT_INTERVAL_MIN`, default 30) the API server runs `store.runEnrichment()`:
+  - **Contradiction re-scan** of each project's shared `default` pool, scoped to **recent facts
+    only** (`ZC_ENRICHMENT_SCAN_DAYS`, default 14) so it surfaces fresh conflicts instead of
+    re-flagging years of history. Stored under `agent_id='default'` → one row per conflict, visible
+    to every agent on recall.
+  - **Backlink backfill** for any project with knowledge but an empty graph (idempotent).
+  - Bails cleanly if Ollama is down. First run is one interval after boot (no boot-time load).
+- Scheduler bootstrapped in `api-server` boot; config surfaced in `docker-compose`.
+
+### Fixed
+- **Enrichment scanned per-`(project,agent)` pair**, which re-flagged shared `default`-pool
+  contradictions once per agent (91 distinct conflicts inflated to 317 rows on a real project).
+  Now scans each project's `default` pool **once** — one row per conflict, surfaced to all agents
+  via recall's `agent OR default` clause. Verified the recency scope + dedup cut a real run from
+  **398 → 14** rows.
+
+### Verified
+- Real terminal-agent E2E (v0.32.0 default features): epistemology auto-classification,
+  recency-decay bump, contradiction re-arm, and RRF+backlink search all pass by default.
+- Cron proven live: `Scheduler.tick` fires the job → `runEnrichment` runs + reschedules
+  (deterministic test), and a real **in-container fire** confirmed from the daemon logs.
+- Instantiation audit: every Tier-1/Tier-2 component has a live call-site (no dormant code).
+- Tests 865/868 (3 pre-existing `storage_dual` PG-fixture failures, unrelated).
+
 ## [0.32.0] — 2026-06-28 — Tier-2: rank-fusion retrieval, cross-encoder rerank, recency-decay
 
 Retrieval-quality Tier-2: how candidates are fused and reranked, plus a recency/frequency

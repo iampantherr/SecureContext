@@ -68,6 +68,10 @@ Migrations are idempotent and re-runnable; absent tables degrade silently to bas
   secondary recall key under importance (`W_SALIENCE=0` = kill-switch).
 - **Prefix-cache** (plan #5): already realized — recall fires once per session and the host
   harness's conversation cache keeps it as a stable prefix; no SC-side change needed.
+- **Memory-enrichment cron** (plan #6, v0.33.0): the API server boots the `Scheduler` (first
+  production use of that primitive) and runs `runEnrichment` on an interval — recent-fact
+  contradiction re-scan of each project's `default` pool + empty-graph backlink backfill.
+  On by default (`ZC_ENRICHMENT_CRON=0` disables).
 
 ---
 

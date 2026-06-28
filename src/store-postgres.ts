@@ -850,12 +850,23 @@ export class PostgresStore implements Store {
 
   // ── Memory contradictions (Tier-1 B, PG-native) ───────────────────────────
   async scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
-    const projectHash = ph(projectPath);
-    const safeAgent = sanitize(agentId, 64);
+    return this._scanContradictionsByHash(ph(projectPath), sanitize(agentId, 64));
+  }
+
+  private async _scanContradictionsByHash(projectHash: string, safeAgent: string, sinceDays?: number): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
+    // sinceDays (cron only) restricts the scan to RECENT facts so the periodic sweep flags fresh
+    // conflicts rather than re-embedding + re-flagging years of accumulated history every cycle.
+    // The recall-time path passes nothing ⇒ scans all facts (unchanged).
+    const params: unknown[] = [projectHash, safeAgent, MAX_SCAN_FACTS];
+    let recencyClause = "";
+    if (typeof sinceDays === "number" && sinceDays > 0) {
+      params.push(sinceDays);
+      recencyClause = ` AND created_at > NOW() - ($${params.length}::int * INTERVAL '1 day')`;
+    }
     const facts = (await this.pool.query<{ key: string; value: string; kind: string | null; resolution_status: string | null }>(
       `SELECT key, value, kind, resolution_status FROM working_memory
-       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND importance >= 3
-       ORDER BY importance DESC, created_at DESC LIMIT $3`, [projectHash, safeAgent, MAX_SCAN_FACTS])).rows;
+       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND importance >= 3${recencyClause}
+       ORDER BY importance DESC, created_at DESC LIMIT $3`, params)).rows;
     if (facts.length < 2) return { scanned: facts.length, flagged: 0, ollamaAvailable: true };
 
     const vectors = new Map<string, Float32Array>();
@@ -887,6 +898,36 @@ export class PostgresStore implements Store {
         [projectHash, safeAgent, f.ka, f.kb, f.sim, f.reason, f.detail]);
     }
     return { scanned: facts.length, flagged: found.length, ollamaAvailable: true };
+  }
+
+  /**
+   * Tier-2 #6 — background enrichment cycle. Re-scans contradictions for EVERY active
+   * (project, agent) pair (so a contradiction is caught even with no recall to trigger the
+   * recall-time scan) and backfills any empty backlink graphs. Idempotent + best-effort per
+   * pair; bails early if Ollama is down (every scan would fail). Run on a schedule by the cron.
+   */
+  async runEnrichment(): Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean }> {
+    // Scan the SHARED 'default' pool ONCE per project (NOT per agent). Contradictions stored
+    // under agent_id='default' surface for every agent via recall's "agent OR default" clause,
+    // so there is no per-agent row duplication (scanning per pair inflated 91 distinct conflicts
+    // to 317 rows). Agent-PRIVATE conflicts are still caught by that agent's own recall-time scan
+    // (the always-on write-time re-arm), so coverage is preserved.
+    const scanDays = Math.max(1, parseInt(process.env.ZC_ENRICHMENT_SCAN_DAYS ?? "14", 10) || 14);
+    const projects = (await this.pool.query<{ project_hash: string }>(
+      `SELECT DISTINCT project_hash FROM working_memory`
+    )).rows;
+    let flagged = 0;
+    let ollamaDown = false;
+    for (const p of projects) {
+      try {
+        const r = await this._scanContradictionsByHash(p.project_hash, "default", scanDays);
+        flagged += r.flagged;
+        if (!r.ollamaAvailable) { ollamaDown = true; break; } // Ollama down ⇒ every scan fails; stop hammering
+      } catch { /* best-effort per project — one bad project must not abort the cycle */ }
+    }
+    let backfilledProjects = 0;
+    try { backfilledProjects = (await this.backfillBacklinks()).projects; } catch { /* best-effort */ }
+    return { projects: projects.length, flagged, backfilledProjects, ollamaDown };
   }
 
   async listContradictions(projectPath: string, agentId: string): Promise<Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>> {

@@ -88,6 +88,11 @@ services:
       ZC_POSTGRES_USER:       ${POSTGRES_USER:-scuser}
       ZC_POSTGRES_PASSWORD:   ${POSTGRES_PASSWORD}
       ZC_POSTGRES_DB:         ${POSTGRES_DB:-securecontext}
+      # v0.33.0 — Tier-2 #6 memory-enrichment cron (contradiction re-scan + backlink backfill).
+      # ON by default; set ZC_ENRICHMENT_CRON=0 to disable. Interval + recency window tunable.
+      ZC_ENRICHMENT_CRON:         ${ZC_ENRICHMENT_CRON:-1}
+      ZC_ENRICHMENT_INTERVAL_MIN: ${ZC_ENRICHMENT_INTERVAL_MIN:-30}
+      ZC_ENRICHMENT_SCAN_DAYS:    ${ZC_ENRICHMENT_SCAN_DAYS:-14}
     volumes:
       # v0.22.1 — persist machine_secret + logs + sessions across container rebuilds.
       # Without this, HMAC-protected data in PG (skills.body_hmac, hash chains)

@@ -159,6 +159,9 @@ export interface Store {
   /** Optional boot heal: rebuild backlinks for every project with knowledge but an empty graph.
    *  PG-native (one DB, many project_hashes); the SQLite path is healed by indexProject's flush. */
   backfillBacklinks?(): Promise<{ projects: number; edges: number }>;
+  /** Optional Tier-2 #6 enrichment cycle (run by the cron): re-scan contradictions for every
+   *  active (project,agent) pair + backfill empty backlink graphs. PG-native. */
+  runEnrichment?(): Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean }>;
   graphData(projectPath: string): Promise<{ nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> }>;
   backlinksFor(projectPath: string, source: string, limit: number): Promise<{ inDegree: number; weightedIn: number; inbound: Array<{ from: string; relation: string; weight: number }> } | null>;
 
