@@ -45,6 +45,7 @@ import {
   ROLE_PERMISSIONS,
 } from "./access-control.js";
 import { computeRowHash, getLastHash, verifyChain } from "./chain.js";
+import { computeSalience, salienceEnabled } from "./salience.js";
 
 /** v0.31.0 epistemology layer — WHAT kind of claim a fact is. */
 export type MemoryKind = "fact" | "decision" | "hypothesis" | "prediction";
@@ -63,6 +64,9 @@ export interface MemoryFact {
   confidence?:        number | null;            // HOW sure (0–1; predictions/hypotheses)
   resolution_status?: ResolutionStatus | null;  // did it come true
   resolved_at?:       string | null;
+  // v0.32.0 recency-decay/salience (optional; absent ⇒ no salience contribution):
+  access_count?:      number;
+  last_retrieved_at?: string | null;
 }
 
 // SECURITY: Strip control chars and limit length to prevent log injection / DB bloat
@@ -254,6 +258,8 @@ function ensureEpistemologyColumns(db: DatabaseSync): void {
   add("confidence",        `REAL`);
   add("resolution_status", `TEXT`);
   add("resolved_at",       `TEXT`);
+  add("access_count",      `INTEGER NOT NULL DEFAULT 0`);
+  add("last_retrieved_at", `TEXT`);
 }
 
 /**
@@ -419,14 +425,14 @@ export function recallWorkingMemory(
   let rows: MemoryFact[];
   if (safeAgent === "default") {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
       FROM working_memory
       WHERE agent_id = 'default'
       ORDER BY importance DESC, created_at DESC
     `).all() as unknown as MemoryFact[];
   } else {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
       FROM working_memory
       WHERE agent_id = ? OR agent_id = 'default'
       ORDER BY
@@ -434,6 +440,29 @@ export function recallWorkingMemory(
         importance DESC,
         created_at DESC
     `).all(safeAgent, safeAgent) as unknown as MemoryFact[];
+  }
+
+  // Tier-2 #4: fold recency/salience in as a SECONDARY key (importance stays primary),
+  // then best-effort bump access_count/last_retrieved_at for the retrieved facts. Fully
+  // inert when W_SALIENCE=0 — no re-sort, no writes (byte-identical recall + the kill-switch).
+  if (salienceEnabled() && rows.length > 0) {
+    const now = Date.now();
+    const k   = (r: MemoryFact) => `${r.key} ${r.agent_id ?? ""}`;
+    const sal = new Map(rows.map((r) => [k(r), computeSalience(r.access_count, r.last_retrieved_at, now)]));
+    const prio = (r: MemoryFact) => (safeAgent !== "default" && r.agent_id === safeAgent ? 0 : 1);
+    rows = [...rows].sort((a, b) =>
+      prio(a) - prio(b) ||
+      b.importance - a.importance ||
+      (sal.get(k(b)) ?? 0) - (sal.get(k(a)) ?? 0) ||
+      (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
+    );
+    try {
+      const nowIso = new Date().toISOString();
+      const bump = db.prepare(`UPDATE working_memory SET access_count = COALESCE(access_count,0) + 1, last_retrieved_at = ? WHERE key = ? AND agent_id = ?`);
+      db.exec("BEGIN");
+      for (const r of rows) bump.run(nowIso, r.key, r.agent_id ?? safeAgent);
+      db.exec("COMMIT");
+    } catch { try { db.exec("ROLLBACK"); } catch { /* no-op */ } /* pre-migration DB — skip */ }
   }
 
   db.close();

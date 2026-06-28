@@ -36,6 +36,7 @@ import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
 import { getEmbedding, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
 import { classifyFactKind, type EpistemicOpts } from "./memory.js";
+import { computeSalience, salienceEnabled } from "./salience.js";
 import { extractCoReferences, classifyRelation } from "./indexing/community.js";
 import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict } from "./contradiction_heuristics.js";
 import { ROLE_PERMISSIONS, type AgentRole } from "./access-control.js";
@@ -278,27 +279,53 @@ export class PostgresStore implements Store {
     //
     // When agentId="default" explicitly: return only the shared pool
     // (avoids redundant self-join).
+    let rows: MemoryFact[];
     if (safeAgent === "default") {
       const res = await this.pool.query<MemoryFact>(
-        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
+        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
          FROM working_memory WHERE project_hash = $1 AND agent_id = 'default'
          ORDER BY importance DESC, created_at DESC`,
         [projectHash]
       );
-      return res.rows;
+      rows = res.rows;
+    } else {
+      // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
+      const res = await this.pool.query<MemoryFact>(
+        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
+         FROM working_memory
+         WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default')
+         ORDER BY
+           CASE WHEN agent_id = $2 THEN 0 ELSE 1 END,
+           importance DESC,
+           created_at DESC`,
+        [projectHash, safeAgent]
+      );
+      rows = res.rows;
     }
-    // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
-    const res = await this.pool.query<MemoryFact>(
-      `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at
-       FROM working_memory
-       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default')
-       ORDER BY
-         CASE WHEN agent_id = $2 THEN 0 ELSE 1 END,
-         importance DESC,
-         created_at DESC`,
-      [projectHash, safeAgent]
-    );
-    return res.rows;
+
+    // Tier-2 #4: secondary salience re-sort (importance stays primary) + best-effort
+    // access bump (single batched UPDATE via unnest, fire-and-forget). Inert when
+    // W_SALIENCE=0 — byte-identical ordering, no writes (the kill-switch).
+    if (salienceEnabled() && rows.length > 0) {
+      const now = Date.now();
+      const k    = (r: MemoryFact) => `${r.key} ${r.agent_id ?? ""}`;
+      const sal  = new Map(rows.map((r) => [k(r), computeSalience(r.access_count, r.last_retrieved_at ?? null, now)]));
+      const prio = (r: MemoryFact) => (safeAgent !== "default" && r.agent_id === safeAgent ? 0 : 1);
+      rows = [...rows].sort((a, b) =>
+        prio(a) - prio(b) ||
+        b.importance - a.importance ||
+        (sal.get(k(b)) ?? 0) - (sal.get(k(a)) ?? 0) ||
+        (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
+      );
+      void this.pool.query(
+        `UPDATE working_memory AS w
+            SET access_count = COALESCE(w.access_count,0) + 1, last_retrieved_at = NOW()
+           FROM unnest($2::text[], $3::text[]) AS t(key, agent_id)
+          WHERE w.project_hash = $1 AND w.key = t.key AND w.agent_id = t.agent_id`,
+        [projectHash, rows.map((r) => r.key), rows.map((r) => r.agent_id ?? safeAgent)]
+      ).catch(() => undefined);
+    }
+    return rows;
   }
 
   async archiveSummary(projectPath: string, summary: string): Promise<void> {

@@ -86,6 +86,16 @@ export const Config = {
   RRF_W_VEC:         parseFloat(env["ZC_RRF_W_VEC"] ?? "1.0"),
   RRF_W_BACKLINK:    parseFloat(env["ZC_RRF_W_BACKLINK"] ?? "0.25"),
 
+  // ── Recency-decay / salience (Tier-2 #4) ─────────────────────────────────
+  // Secondary recall signal: how recently + how often a fact was retrieved. Folded
+  // in AFTER importance, which stays the PRIMARY axis. W_SALIENCE=0 ⇒ recall ordering
+  // is byte-identical (importance DESC, created_at DESC) — the kill-switch. Decay is an
+  // exponential half-life (hours) on time since last retrieval; access adds a log-damped
+  // frequency bonus. Default keeps it a tiebreaker, never an override of importance.
+  W_SALIENCE:          parseFloat(env["ZC_W_SALIENCE"] ?? "0.15"),
+  SALIENCE_HALFLIFE_H: parseFloat(env["ZC_SALIENCE_HALFLIFE_H"] ?? "168"), // 1 week
+  W_SALIENCE_ACCESS:   parseFloat(env["ZC_W_SALIENCE_ACCESS"] ?? "0.5"),
+
   // ── Fetch / SSRF ──────────────────────────────────────────────────────────
   FETCH_LIMIT:       parseInt(env["ZC_FETCH_LIMIT"] ?? "50", 10),
   FETCH_TIMEOUT_MS:  15_000,

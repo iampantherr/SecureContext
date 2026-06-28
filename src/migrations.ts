@@ -1040,6 +1040,23 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 33,
+    description: "v0.32.0: recency-decay/salience on working_memory (access_count + last_retrieved_at) — secondary recall signal under importance (mirrors PG migration 31)",
+    up: (db) => {
+      const tbl = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='working_memory'`).get();
+      if (!tbl) return;
+      const cols = new Set(
+        (db.prepare(`PRAGMA table_info(working_memory)`).all() as Array<{ name: string }>).map((c) => c.name)
+      );
+      const safeAdd = (col: string, ddl: string) => {
+        if (!cols.has(col)) { try { db.exec(`ALTER TABLE working_memory ADD COLUMN ${col} ${ddl}`); } catch { /* exists */ } }
+      };
+      safeAdd("access_count",      `INTEGER NOT NULL DEFAULT 0`);
+      safeAdd("last_retrieved_at", `TEXT`);
+    },
+  },
+
 ];
 
 /**

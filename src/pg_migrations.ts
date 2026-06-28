@@ -935,6 +935,15 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 31,
+    description: "v0.32.0: recency-decay/salience on working_memory (access_count + last_retrieved_at) — secondary recall signal under importance (mirrors SQLite migration 33)",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS access_count INTEGER NOT NULL DEFAULT 0`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS last_retrieved_at TIMESTAMPTZ`);
+    },
+  },
+
 ];
 
 /**
