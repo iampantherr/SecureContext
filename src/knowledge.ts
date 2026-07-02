@@ -198,6 +198,43 @@ async function storeEmbeddingAsync(
   } finally {
     db.close();
   }
+
+  // v0.39.1 — PG-parity: mirror the vector too, so hybrid (vector) search works in
+  // the containerized PG deployment, not just BM25. Fire-and-forget; dedup by
+  // content_hash + model like the SQLite path. Skips silently with no PG creds.
+  void storeEmbeddingPgAsync(projectPath, source, result, contentHash);
+}
+
+async function storeEmbeddingPgAsync(
+  projectPath: string,
+  source: string,
+  result: { vector: Float32Array | number[]; modelName: string; dimensions: number },
+  contentHash: string,
+): Promise<void> {
+  if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) return;
+  try {
+    const { withClient } = await import("./pg_pool.js");
+    const { createHash } = await import("node:crypto");
+    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const vectorStr = "[" + Array.from(result.vector).join(",") + "]";
+    await withClient(async (c) => {
+      const existing = (await c.query<{ content_hash: string | null; model_name: string }>(
+        `SELECT content_hash, model_name FROM embeddings WHERE project_hash = $1 AND source = $2`,
+        [projectHash, source.slice(0, 500)])).rows[0];
+      if (existing && existing.content_hash === contentHash && existing.model_name === result.modelName) return;
+      await c.query(
+        `INSERT INTO embeddings(project_hash, source, vector, model_name, dimensions, created_at, content_hash)
+         VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
+         ON CONFLICT(project_hash, source) DO UPDATE SET
+           vector = EXCLUDED.vector, model_name = EXCLUDED.model_name,
+           dimensions = EXCLUDED.dimensions, created_at = EXCLUDED.created_at,
+           content_hash = EXCLUDED.content_hash`,
+        [projectHash, source.slice(0, 500), vectorStr, result.modelName, result.dimensions, new Date().toISOString(), contentHash],
+      );
+    });
+  } catch {
+    // best-effort — SQLite embedding already stored
+  }
 }
 
 /**
@@ -284,6 +321,18 @@ export function indexContent(
   storeSourceMetaPgAsync(projectPath, source, sourceType, retentionTier, l0, l1, now)
     .catch(() => undefined);
 
+  // v0.39.1 — PG-PARITY FIX: mirror the CONTENT row too, not just the summary.
+  // Before this, in-process indexContent (used by zc_index_project) wrote full
+  // content only to local SQLite and pushed just source_meta (L0/L1) to PG — so
+  // in the containerized deployment where zc_search / zc_graph_* proxy to PG,
+  // BM25 search and the co-reference graph over PROJECT FILES were empty (search
+  // reads PG; content lived only in the agent's local SQLite). This violated the
+  // PG-first parity rule. Mirroring the content row restores full-text search and
+  // lets the PG-native graph rebuild (which reads knowledge_entries.content) build
+  // real file edges. Fire-and-forget, same shape as the source_meta mirror.
+  storeKnowledgePgAsync(projectPath, source, content, now)
+    .catch(() => undefined);
+
   // Tier-1 A: schedule a debounced backlink-graph rebuild (fire-and-forget). A bulk
   // index triggers exactly ONE rebuild 5s after it settles; never blocks this call.
   rebuildBacklinksAsync(projectPath);
@@ -323,6 +372,41 @@ async function storeSourceMetaPgAsync(
            l0_summary     = EXCLUDED.l0_summary,
            l1_summary     = EXCLUDED.l1_summary`,
         [projectHash, source, sourceType, retentionTier, ts, l0, l1],
+      );
+    });
+  } catch {
+    // best-effort — SQLite write already succeeded
+  }
+}
+
+/**
+ * v0.39.1 — Best-effort PG mirror of the knowledge CONTENT row. Companion to
+ * storeSourceMetaPgAsync (which mirrors only the L0/L1 summary). Together they make
+ * the containerized PG deployment a true parity view: full-text (BM25) search and
+ * the co-reference graph both read knowledge_entries.content, so without this the
+ * remote zc_search / zc_graph_rebuild saw project files as empty. Same fire-and-forget
+ * shape: skips with no PG creds; upsert matches PostgresStore.index exactly.
+ */
+async function storeKnowledgePgAsync(
+  projectPath: string,
+  source: string,
+  content: string,
+  ts: string,
+): Promise<void> {
+  if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) return;
+  try {
+    const { withClient } = await import("./pg_pool.js");
+    const { createHash } = await import("node:crypto");
+    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const safeContent = content.slice(0, 50_000);
+    await withClient(async (c) => {
+      await c.query(
+        `INSERT INTO knowledge_entries(project_hash, source, content, created_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT(project_hash, source) DO UPDATE SET
+           content    = EXCLUDED.content,
+           created_at = EXCLUDED.created_at`,
+        [projectHash, source.slice(0, 500), safeContent, ts],
       );
     });
   } catch {

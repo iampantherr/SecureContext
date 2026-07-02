@@ -4,6 +4,21 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.39.1] — 2026-07-02 — PG-parity fix: file content + embeddings now mirror to Postgres
+
+### Fixed
+- **Project-file search and graph were empty in the containerized PG deployment.** The
+  in-process `indexContent` (used by `zc_index_project` and every bulk indexer) wrote full
+  file content and embeddings only to the agent's local SQLite and mirrored just the L0/L1
+  summaries to Postgres — but `zc_search` / `zc_graph_*` proxy to the API and read Postgres,
+  so semantic search and the co-reference graph over file BODIES returned nothing. Found by
+  a live terminal-agent full-feature coverage test (agent indexed a project, then search → 0
+  results, graph → 0 edges). `indexContent` now fire-and-forget mirrors the knowledge
+  content row (`storeKnowledgePgAsync`) and the embedding vector (`storeEmbeddingPgAsync`,
+  with content-hash dedup) alongside the existing summary mirror. Re-verified live: fresh
+  agent's search returned 3 results, graph built 7 edges / 13 nodes, `config.js`
+  in_degree=3. Tests 865/868 (3 pre-existing fixtures).
+
 ## [0.39.0] — 2026-07-02 — Tier-3: embedding dedup + model migration, L2 progressive disclosure, mutator learned-helplessness guard, trajectory export
 
 ### Added
