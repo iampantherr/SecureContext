@@ -4,6 +4,43 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.40.0] — 2026-07-02 — Automatic background memory extraction + operator console redesign
+
+### Added
+- **Automatic background memory extraction (hands-free `zc_remember`).** Two new hooks close
+  the biggest competitive gap vs AWS AgentCore Memory / Google Memory Bank / Mem0 — while
+  staying local-first (extraction runs on YOUR Ollama, not a vendor cloud):
+  - `hooks/stop-autoextract.mjs` (Stop): at every turn end, distills the new conversation
+    content into ≤5 durable facts (decisions, constraints, gotchas, preferences) via the
+    local summarizer model and writes them through the normal memory API with
+    `origin=auto-extract:<session>` — so epistemology auto-typing, per-claim citations,
+    contradiction detection, and the temporal retirement lifecycle all apply to extracted
+    facts exactly as to hand-written ones. Per-session budget (`ZC_AUTO_EXTRACT_MAX`, 10),
+    importance clamped 2–4, secret-pattern filtering, key+value dedup against existing
+    working memory, per-session transcript-offset state. Kill-switch: `ZC_AUTO_EXTRACT=0`.
+  - `hooks/userprompt-autoextract.mjs` (UserPromptSubmit): buffers the user-prompt side of
+    the conversation per session. Needed because interactive CLI sessions may persist only a
+    title-stub transcript — the buffer guarantees extraction still sees the prompts, which
+    carry most durable constraints ("use Stripe — final", "prefer Go").
+  - `/api/v1/remember` accepts a whitelisted `origin` (auto-extract|compact|broadcast
+    prefixes only, so clients can't spoof system origins).
+- **Operator console redesign.** 4 organically-grown tabs → 5 job-oriented ones:
+  **Overview** (new landing: system line + 6 clickable stat cards — open contradictions,
+  pending reviews, quarantined skills, agents active 24h, auto-extracted facts 24h, live
+  facts — each jumping to its tab, plus the live agent feed) · **Memory** (contradiction
+  triage) · **Skills** (health → pending reviews → completed mutations → spotter → active
+  skills → marketplace → candidates) · **Security** (HMAC chain banner, quarantine,
+  admission log) · **Knowledge** (summarizer, both KB graphs — SecureContext's own graph
+  first — and token savings). New `/dashboard/overview-strip` fragment; panel headers
+  de-cluttered; default tab is Overview.
+
+### Verified
+- Live terminal-agent E2E: an agent given a prose brief (zero `zc_remember` calls) had 4
+  facts auto-extracted — including a typed `decision` — plus a follow-up message's
+  constraint; unit tests covered all four epistemic kinds, secret filtering, and idempotence
+  (second run 61 ms, no duplicates). Dashboard browser QA: all 5 tabs render, stat-card
+  navigation works. Tests 865/868 (3 pre-existing fixtures).
+
 ## [0.39.1] — 2026-07-02 — PG-parity fix: file content + embeddings now mirror to Postgres
 
 ### Fixed

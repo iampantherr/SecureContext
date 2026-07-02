@@ -664,6 +664,20 @@ export function renderDashboardHtml(): string {
     .diff-grid,.polish-grid,form .row,.form-row,.role-checkbox-grid{grid-template-columns:1fr;}
     .skill-header{flex-wrap:wrap;gap:8px;}
   }
+  /* ── v0.40.0 panel-subtitle + overview status strip ── */
+  .panel h2 .sub{font-size:.82rem;font-weight:400;color:#94a3b8;margin-left:8px;}
+  .stat-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:4px;}
+  .stat-card{background:rgba(15,20,30,.65);border:1px solid var(--border);border-radius:12px;padding:14px 16px;cursor:pointer;transition:border-color var(--fast) var(--ease),transform var(--fast) var(--ease);}
+  .stat-card:hover{border-color:var(--signal);transform:translateY(-2px);}
+  .stat-card .stat-n{font-size:1.7rem;font-weight:650;letter-spacing:-.02em;color:var(--text);line-height:1.1;}
+  .stat-card .stat-n.warn{color:#fbbf24;}
+  .stat-card .stat-n.ok{color:var(--signal);}
+  .stat-card .stat-l{font-size:.78rem;color:var(--text-dim);margin-top:4px;}
+  .stat-sys{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;background:rgba(15,20,30,.65);border:1px solid var(--border);border-radius:12px;padding:12px 16px;margin-bottom:12px;font-size:.85rem;color:var(--text-dim);}
+  .stat-sys b{color:var(--text);font-weight:550;}
+  .stat-sys .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:baseline;}
+  .stat-sys .dot.up{background:var(--signal);box-shadow:0 0 8px var(--signal-glow);}
+  .stat-sys .dot.down{background:#f87171;}
   @media (prefers-reduced-motion:reduce){
     *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;}
     .live-dot::after{display:none;}
@@ -696,20 +710,33 @@ export function renderDashboardHtml(): string {
   </div>
 </header>
 <nav class="tab-nav" id="dashboard-tabs" aria-label="Dashboard sections">
-  <button type="button" class="tab-button" data-tab="health"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>Health</button>
-  <button type="button" class="tab-button" data-tab="skills"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg>Skills</button>
-  <button type="button" class="tab-button" data-tab="authoring"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Authoring</button>
-  <button type="button" class="tab-button" data-tab="wiki"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h13v17H6a2 2 0 0 0-2 2V5Z"/><path d="M19 3v17"/></svg>Wiki &amp; Savings</button>
+  <button type="button" class="tab-button" data-tab="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>Overview</button>
+  <button type="button" class="tab-button" data-tab="memory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4a4 4 0 0 0-4 4 4 4 0 0 0-3 6.5A4 4 0 0 0 8 21h8a4 4 0 0 0 3-6.5A4 4 0 0 0 16 8a4 4 0 0 0-4-4Z"/><path d="M12 4v17"/></svg>Memory</button>
+  <button type="button" class="tab-button" data-tab="skills"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 6 4 4-9.5 9.5H4.5V15L14 6Z"/><path d="m13 7 4 4"/><path d="M17 3l4 4"/></svg>Skills</button>
+  <button type="button" class="tab-button" data-tab="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg>Security</button>
+  <button type="button" class="tab-button" data-tab="knowledge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="8" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.2 15.6 8M7.2 8.2l3.6 7.6M16.8 10.2l-3.6 5.6"/></svg>Knowledge</button>
 </nav>
 <main>
 
-<section class="tab-content" data-tab="health">
+<section class="tab-content" data-tab="overview">
+<!-- v0.40.0 — At-a-glance status strip: version/store health + the counts an
+     operator actually triages (contradictions, pending mutations, quarantine,
+     active agents, auto-extracted facts). Each count card jumps to its tab. -->
+<div id="overview-strip"
+     hx-get="/dashboard/overview-strip"
+     hx-trigger="load, every 30s"
+     hx-target="this" hx-swap="innerHTML">
+  <p class="empty">Loading system status…</p>
+</div>
+</section>
+
+<section class="tab-content" data-tab="skills">
 <!-- v0.22.6 — Skill-activity health banner. First panel so operators see
      immediately when the closed-loop self-improvement system has gone dark
      on any active project. Polls every 60s (lower frequency than other
      panels because it's a slow-moving signal). -->
 <div class="panel">
-  <h2>Skill-activity health <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(closed-loop status per active project, 24h window)</span></h2>
+  <h2>Skill-activity health <span class="sub">closed-loop status per project, 24h</span></h2>
   <div id="skill-health"
        hx-get="/dashboard/skill-health"
        hx-trigger="load, every 60s"
@@ -719,12 +746,12 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
-<section class="tab-content" data-tab="health">
+<section class="tab-content" data-tab="memory">
 <!-- v0.33.0 — Suspected memory contradictions. The contradiction detector +
      enrichment cron flag conflicting working-memory facts; this is where the
-     operator triages them (accept / discard / ignore). Polls every 60s. -->
+     operator triages them (keep left / keep right / not a conflict). -->
 <div class="panel">
-  <h2>Suspected memory contradictions <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(open conflicts in working memory — accept, discard, or ignore each)</span></h2>
+  <h2>Suspected memory contradictions <span class="sub">keep one side, or dismiss — never auto-applied</span></h2>
   <div id="contradictions"
        hx-get="/dashboard/contradictions"
        hx-trigger="load, every 60s"
@@ -734,13 +761,13 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
-<section class="tab-content" data-tab="health">
+<section class="tab-content" data-tab="knowledge">
 <!-- v0.22.7 — Summarizer activity. Operator visibility into the L0/L1
      indexer: how many summaries exist, when they were created, what failed,
      which model is being used. Without this, the operator was blind to
      summarization activity and could only "hope it was working." -->
 <div class="panel">
-  <h2>Summarizer activity <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(L0/L1 file summary index — total + last 24h)</span></h2>
+  <h2>Summarizer activity <span class="sub">L0/L1 file summary index — total + last 24h</span></h2>
   <div class="savings-controls" style="margin-bottom:10px">
     <label>Project filter:
       <select id="summarizer-project" name="project"
@@ -792,10 +819,10 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
-<section class="tab-content" data-tab="health">
+<section class="tab-content" data-tab="overview">
 <!-- v0.25.0 — Live agent activity (last 20 broadcasts, refreshes every 5s) -->
 <div class="panel">
-  <h2>Live agent activity <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(last 20 broadcasts across all projects, auto-refresh 5s)</span></h2>
+  <h2>Live agent activity <span class="sub">last 20 broadcasts, all projects</span></h2>
   <div id="live-broadcasts"
        hx-get="/dashboard/broadcasts"
        hx-trigger="load, every 5s"
@@ -808,7 +835,7 @@ export function renderDashboardHtml(): string {
 <section class="tab-content" data-tab="skills">
 <!-- v0.25.0 — Completed mutations (promotion history with score delta) -->
 <div class="panel">
-  <h2>Completed mutations <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(L1 mutation cycle outcomes — was the skill actually improved?)</span></h2>
+  <h2>Completed mutations <span class="sub">was the skill actually improved?</span></h2>
   <div id="completed-mutations"
        hx-get="/dashboard/mutations/completed"
        hx-trigger="load, every 30s"
@@ -818,13 +845,13 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
-<section class="tab-content" data-tab="authoring">
+<section class="tab-content" data-tab="security">
 <!-- v0.26.0 Step 7 — Filesystem skills security panel.
      Surfaces: chain integrity status, admission log tail, quarantined skills.
      Chain banner refreshes every 30s; quarantine list + admission tail refresh
      on a load trigger so operators see new events without a manual reload. -->
 <div class="panel" id="fs-skills-panel">
-  <h2>Filesystem skills security <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(v0.26.0 — admission gate, HMAC chain, quarantine)</span></h2>
+  <h2>Skill admission security <span class="sub">AST gate · HMAC chain · quarantine</span></h2>
 
   <div id="fs-chain-banner"
        hx-get="/dashboard/fs-skills/chain-banner"
@@ -855,35 +882,15 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
-<section class="tab-content" data-tab="wiki">
-<!-- v0.30.6 — Personal-wiki KB graph. Operator-curated knowledge base
-     (creators / videos / topics / wiki-origin skills) rendered as a d3
-     force-directed view. Reads wiki/graph.json produced by the
-     personal-wiki/viz/build_graph.py script (which runs at end of
-     approve.py and at end of the twice-weekly promotion-check cron).
-     Inlined here so the operator sees their KB shape without leaving
-     the dashboard. Lazy-loaded inside a <details> so it doesn't push
-     other panels down when not in use. -->
-<div class="panel" id="wiki-graph-panel">
-  <h2>Personal wiki — KB graph <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(operator-curated content + wiki-origin skills, d3 force-directed)</span></h2>
-  <details class="wiki-graph-details">
-    <summary><strong>Show graph</strong> <small>(loads on first open — d3 + the wiki/graph.json snapshot)</small></summary>
-    <div id="wiki-graph"
-         hx-get="/dashboard/wiki-graph"
-         hx-trigger="click from:previous summary once"
-         hx-target="this" hx-swap="innerHTML">
-      <em style="color:#94a3b8; font-size:0.85rem">Click the heading above to load the graph.</em>
-    </div>
-  </details>
-</div>
+<section class="tab-content" data-tab="knowledge">
 <!-- v0.31.0 — Code/Memory Knowledge Graph (Tier-1 A). SecureContext's OWN reference
      graph (kb_edges/kb_backlinks) over file:/memory:/session: sources, PER PROJECT.
-     SEPARATE from the personal-wiki graph above. Node size ∝ backlink in-degree;
-     hubs rank higher in zc_search. Lazy-loaded inside a <details>. -->
+     Node size ∝ backlink in-degree; hubs rank higher in zc_search. FIRST panel on
+     the Knowledge tab — it's the system's own graph. Lazy-loaded in a <details>. -->
 <div class="panel" id="kb-graph-panel">
-  <h2>Knowledge graph — code &amp; memory <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(SecureContext KB references: file/memory/session sources, per project — distinct from the wiki graph)</span></h2>
+  <h2>Knowledge graph — code &amp; memory <span class="sub">per project · file/memory/session references · node size ∝ backlinks</span></h2>
   <details class="wiki-graph-details">
-    <summary><strong>Show graph</strong> <small>(loads on first open — per-project; node size ∝ backlinks)</small></summary>
+    <summary><strong>Show graph</strong> <small>(loads on first open)</small></summary>
     <div id="kb-graph"
          hx-get="/dashboard/kb-graph"
          hx-trigger="click from:previous summary once"
@@ -892,15 +899,33 @@ export function renderDashboardHtml(): string {
     </div>
   </details>
 </div>
+<!-- v0.30.6 — Personal-wiki KB graph. Operator-curated knowledge base
+     (creators / videos / topics / wiki-origin skills) rendered as a d3
+     force-directed view. Reads wiki/graph.json produced by the
+     personal-wiki/viz/build_graph.py script (which runs at end of
+     approve.py and at end of the twice-weekly promotion-check cron).
+     SEPARATE from the code/memory graph above. Lazy-loaded in a <details>. -->
+<div class="panel" id="wiki-graph-panel">
+  <h2>Personal wiki graph <span class="sub">operator-curated content + wiki-origin skills</span></h2>
+  <details class="wiki-graph-details">
+    <summary><strong>Show graph</strong> <small>(loads on first open)</small></summary>
+    <div id="wiki-graph"
+         hx-get="/dashboard/wiki-graph"
+         hx-trigger="click from:previous summary once"
+         hx-target="this" hx-swap="innerHTML">
+      <em style="color:#94a3b8; font-size:0.85rem">Click the heading above to load the graph.</em>
+    </div>
+  </details>
+</div>
 </section>
 
-<section class="tab-content" data-tab="authoring">
+<section class="tab-content" data-tab="skills">
 <!-- v0.28.0-α — Skill spotter dry-run panel. Mines tool_calls_pg +
      pretool_events_pg for repeated patterns and surfaces them as
      signals the operator can review. No LLM yet; β adds the
      Sonnet-4.6-high-effort agent that turns signals into candidates. -->
 <div class="panel" id="skill-spotter-panel">
-  <h2>Skill spotter <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(v0.28.0-α — dry-run mode, mines activity for repeated procedural patterns)</span></h2>
+  <h2>Skill spotter <span class="sub">mines repeated activity patterns into skill candidates</span></h2>
 
   <div class="spotter-controls">
     <button class="pull-marketplace-btn"
@@ -933,7 +958,7 @@ export function renderDashboardHtml(): string {
 
 <section class="tab-content" data-tab="skills">
 <div class="panel">
-  <h2>Active skills <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(edit frontmatter — body is mutator-managed)</span></h2>
+  <h2>Active skills <span class="sub">edit frontmatter — body is mutator-managed</span></h2>
   <!-- v0.25.0: + New skill button — opens an inline form, posts to
        /dashboard/skills/new which routes through storage_dual.upsertSkill
        (lint + 8-point scan gates run; rejection = inline error). -->
@@ -955,10 +980,10 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
-<section class="tab-content" data-tab="authoring">
+<section class="tab-content" data-tab="skills">
 <!-- v0.24.0 Phase 2 — marketplace pulls panel -->
 <div class="panel">
-  <h2>Marketplace pulls <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(historic skill imports from anthropics/skills + others — see what was added vs rejected, with reasons)</span></h2>
+  <h2>Marketplace pulls <span class="sub">skill imports — what was added vs rejected, and why</span></h2>
   <div class="market-pull-actions">
     <button class="pull-marketplace-btn"
             hx-post="/dashboard/marketplace/pull"
@@ -979,9 +1004,9 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
-<section class="tab-content" data-tab="wiki">
+<section class="tab-content" data-tab="knowledge">
 <div class="panel">
-  <h2>Token savings <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(estimated, vs counterfactual native flow)</span></h2>
+  <h2>Token savings <span class="sub">estimated, vs counterfactual native flow</span></h2>
   <div class="savings-controls">
     <label>Project:
       <select id="savings-project" name="project"
@@ -1119,7 +1144,7 @@ export function renderDashboardHtml(): string {
 <section class="tab-content" data-tab="skills">
 <!-- v0.19.0 Sprint 2.10 — Skill candidates panel (REJECT clusters → propose new skill) -->
 <div class="panel">
-  <h2>Skill candidates <span style="font-size:0.85rem; font-weight:400; color:#94a3b8">(from REJECT patterns where the role has no governing skill)</span></h2>
+  <h2>Skill candidates <span class="sub">from REJECT patterns + spotter auto-filing</span></h2>
   <!-- v0.20.1 — same focus-aware filter as #pending; don't blow away an
        operator who's mid-edit on the proposed skill body or notes. -->
   <div id="skill-candidates"
@@ -1132,8 +1157,8 @@ export function renderDashboardHtml(): string {
 </section>
 
 <footer>
-  v0.20.0 — local operator console, embedded in <code>zc-ctx-api</code> at <code>:3099/dashboard</code>.
-  Notifications poll every 5s; pending list every 10s.
+  Local operator console, embedded in <code>sc-api</code> at <code>:3099/dashboard</code>.
+  Overview · Memory · Skills · Security · Knowledge.
   Browser desktop notifications: <button id="notify-btn" onclick="enableNotifications()" type="button" style="background:#1f2937;color:#cbd5e1;border-color:#2a2f37">Enable</button>
 </footer>
 
@@ -1183,7 +1208,7 @@ function enableNotifications() {
 // Default tab = 'skills' because that's where the actionable Pending
 // mutation reviews live.
 (function tabSwitcher() {
-  var KEY = 'sc-dashboard-active-tab-v1';
+  var KEY = 'sc-dashboard-active-tab-v2'; // v2: overview/memory/skills/security/knowledge
   function applyTab(name) {
     document.querySelectorAll('.tab-button').forEach(function (b) {
       b.classList.toggle('tab-active', b.dataset.tab === name);
@@ -1201,7 +1226,7 @@ function enableNotifications() {
     var saved = null;
     try { saved = localStorage.getItem(KEY); } catch (e) { /* ignore */ }
     var validTabs = Array.from(buttons).map(function (b) { return b.dataset.tab; });
-    var initialTab = (saved && validTabs.indexOf(saved) !== -1) ? saved : 'skills';
+    var initialTab = (saved && validTabs.indexOf(saved) !== -1) ? saved : 'overview';
     applyTab(initialTab);
   }
   if (document.readyState === 'loading') {

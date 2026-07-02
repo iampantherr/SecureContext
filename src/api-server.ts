@@ -358,6 +358,55 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.40.0 — Overview status strip: the console landing view. One system line
+  // (version · store · ollama · cron) + count cards for everything the operator
+  // actually triages. Each card jumps to its tab. HTML fragment for HTMX.
+  app.get("/dashboard/overview-strip", async (_request, reply) => {
+    const { withClient } = await import("./pg_pool.js");
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    let counts = { contradictions: 0, pending: 0, quarantined: 0, agents24h: 0, autoExtract24h: 0, facts: 0 };
+    try {
+      counts = await withClient(async (c) => {
+        const one = async (sql: string) => Number((await c.query<{ n: string }>(sql)).rows[0]?.n ?? 0);
+        return {
+          contradictions: await one(`SELECT COUNT(*)::text AS n FROM memory_contradictions_pg WHERE status = 'open'`),
+          pending:        await one(`SELECT COUNT(*)::text AS n FROM mutation_results_pg WHERE consumed_at IS NULL`),
+          quarantined:    await one(`SELECT COUNT(*)::text AS n FROM skills_pg WHERE quarantined = TRUE`),
+          agents24h:      await one(`SELECT COUNT(DISTINCT agent_id)::text AS n FROM tool_calls_pg WHERE ts > NOW() - INTERVAL '24 hours'`),
+          autoExtract24h: await one(`SELECT COUNT(*)::text AS n FROM working_memory WHERE origin LIKE 'auto-extract%' AND created_at > NOW() - INTERVAL '24 hours' AND valid_to IS NULL`),
+          facts:          await one(`SELECT COUNT(*)::text AS n FROM working_memory WHERE valid_to IS NULL`),
+        };
+      });
+    } catch { /* PG down — render zeros; the sys line still shows status */ }
+    let ollamaUp = false;
+    try {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 1200);
+      const r = await fetch(`${Config.OLLAMA_URL.replace(/\/api\/.*$/, "")}/api/tags`, { signal: ctl.signal });
+      clearTimeout(t); ollamaUp = r.ok;
+    } catch { ollamaUp = false; }
+    const cronOn = process.env.ZC_ENRICHMENT_CRON !== "0";
+    const card = (n: number, label: string, tab: string, warnWhenPositive: boolean) =>
+      `<div class="stat-card" onclick="document.querySelector('.tab-button[data-tab=${tab}]')?.click()" role="button" tabindex="0">` +
+      `<div class="stat-n ${n > 0 ? (warnWhenPositive ? "warn" : "ok") : ""}">${n}</div>` +
+      `<div class="stat-l">${esc(label)}</div></div>`;
+    const html =
+      `<div class="stat-sys">` +
+      `<span><span class="dot up"></span><b>SecureContext</b> v${esc(Config.VERSION)}</span>` +
+      `<span>store <b>postgres</b></span>` +
+      `<span><span class="dot ${ollamaUp ? "up" : "down"}"></span>ollama <b>${ollamaUp ? "up" : "down"}</b></span>` +
+      `<span><span class="dot ${cronOn ? "up" : "down"}"></span>enrichment cron <b>${cronOn ? "on" : "off"}</b></span>` +
+      `</div>` +
+      `<div class="stat-strip">` +
+      card(counts.contradictions, "open contradictions", "memory", true) +
+      card(counts.pending, "pending mutation reviews", "skills", true) +
+      card(counts.quarantined, "quarantined skills", "security", true) +
+      card(counts.agents24h, "agents active · 24h", "overview", false) +
+      card(counts.autoExtract24h, "auto-extracted facts · 24h", "memory", false) +
+      card(counts.facts, "live memory facts", "memory", false) +
+      `</div>`;
+    reply.type("text/html; charset=utf-8").send(html);
+  });
+
   // v0.22.9 — Generic pretool-event telemetry. Records EVERY PreRead hook
   // invocation regardless of outcome (redirect / block_unindexed /
   // bypass_force_read / bypass_partial_read / pass_through / error).
@@ -2907,7 +2956,7 @@ export async function createApiServer(storeOverride?: Store) {
 
   app.post("/api/v1/remember", async (request, reply) => {
     try {
-      const { projectPath, key, value, importance = 3, agentId = "default", kind, confidence, resolution } = request.body as Record<string, unknown>;
+      const { projectPath, key, value, importance = 3, agentId = "default", kind, confidence, resolution, origin } = request.body as Record<string, unknown>;
       const pp = validateProjectPath(projectPath);
       if (typeof key   !== "string") throw new ApiError(400, "key must be a string");
       if (typeof value !== "string") throw new ApiError(400, "value must be a string");
@@ -2916,6 +2965,11 @@ export async function createApiServer(storeOverride?: Store) {
       if (typeof kind       === "string") epi.kind       = kind as EpistemicOpts["kind"];
       if (typeof confidence === "number") epi.confidence = confidence;
       if (typeof resolution === "string") epi.resolution = resolution as EpistemicOpts["resolution"];
+      // v0.40.0 — provenance origin (e.g. "auto-extract" from the Stop-hook background
+      // extractor). Whitelisted prefixes only, so a client can't spoof system origins.
+      if (typeof origin === "string" && /^(auto-extract|compact|broadcast)[:a-zA-Z0-9_-]*$/.test(origin) && origin.length <= 80) {
+        epi.origin = origin;
+      }
       await store.remember(pp, key, value, Number(importance), String(agentId), epi);
       // v0.31.0 — re-arm the contradiction scan for this project. A new fact can form
       // a contradiction with an existing one, so the next recall must re-scan. Without
