@@ -4,6 +4,26 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.35.0] — 2026-07-02 — KB graph: project picker + memory-fact nodes
+
+### Added
+- **Project picker for the code/memory KB graph.** The absolute-path text input is replaced
+  by a dropdown of every project with KB content (from `knowledge_entries × project_paths_pg`),
+  showing resolved names + source counts, auto-loading on select. Falls back to the free-text
+  path input on a SQLite-only install (no PG project registry).
+- **Memory-only projects now render.** `graphData` (both stores) previously drew only sources
+  participating in reference edges — a research project whose knowledge is working-memory facts
+  + session summaries (no file cross-references) showed a misleading "no graph yet" despite real
+  content. Nodes are now edge endpoints ∪ ALL KB sources ∪ live working-memory facts
+  (`memory:<agent>:<key>`, same naming as eviction-archival), capped at 500; edges unchanged.
+  Stats line gains a memory-fact count; gentle `forceX/forceY` gathering keeps isolated nodes
+  in frame (same fix the wiki graph got).
+
+### Verified
+- Live browser E2E (Playwright): dropdown populated with named projects; selecting ScopeAlert
+  (17 memory facts + 1 summary, previously "no graph") rendered 18/18 nodes in-frame; the largest
+  project (293 nodes) rendered smoothly. Tests 865/868 (3 pre-existing fixtures).
+
 ## [0.34.0] — 2026-06-28 — Operator dashboard: suspected-contradiction triage
 
 ### Added

@@ -306,7 +306,7 @@ export async function createApiServer(storeOverride?: Store) {
   // graph (kb_edges/kb_backlinks), PER PROJECT — distinct from the wiki graph above.
   // Data fetched server-side via the store so the browser needs no API key.
   app.get("/dashboard/kb-graph", async (request, reply) => {
-    const { renderKbGraphFragment } = await import("./dashboard/render.js");
+    const { renderKbGraphFragment, loadProjectNameMap } = await import("./dashboard/render.js");
     const { projectPath } = request.query as Record<string, unknown>;
     let pp = "";
     let data: { nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> } = { nodes: [], edges: [] };
@@ -316,7 +316,26 @@ export async function createApiServer(storeOverride?: Store) {
         data = await store.graphData(pp);
       } catch { pp = projectPath.trim(); /* invalid path → empty state showing what they typed */ }
     }
-    reply.type("text/html").send(renderKbGraphFragment(data, pp));
+    // v0.35.0 — project picker: every project with KB content whose path is known
+    // (project_paths_pg is written on every telemetry call, so it covers all active
+    // projects). Empty on a SQLite-only install → the fragment falls back to the
+    // free-text path input, so nothing regresses without PG.
+    let projects: Array<{ path: string; label: string }> = [];
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      const rows = await withClient(async (c) => (await c.query<{ project_hash: string; n: string; project_path: string | null }>(
+        `SELECT ke.project_hash, COUNT(*)::text AS n, MAX(pp2.project_path) AS project_path
+           FROM knowledge_entries ke
+           LEFT JOIN project_paths_pg pp2 ON pp2.project_hash = ke.project_hash
+          GROUP BY ke.project_hash
+          ORDER BY COUNT(*) DESC LIMIT 40`)).rows);
+      const nameMap = await loadProjectNameMap();
+      projects = rows.filter((r) => r.project_path).map((r) => ({
+        path:  String(r.project_path),
+        label: `${nameMap.get(r.project_hash) ?? `project:${r.project_hash.slice(0, 8)}…`} (${r.n} sources)`,
+      }));
+    } catch { /* no PG (SQLite-only) → free-text input fallback */ }
+    reply.type("text/html").send(renderKbGraphFragment(data, pp, projects));
   });
 
   app.get("/dashboard/health", async (_request, _reply) => {

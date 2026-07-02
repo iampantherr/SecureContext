@@ -826,11 +826,20 @@ export class PostgresStore implements Store {
         "SELECT source, in_degree, weighted_in FROM kb_backlinks_pg WHERE project_hash = $1", [projectHash])).rows;
       const blMap = new Map(br.map((b) => [b.source, { inDegree: b.in_degree, weightedIn: b.weighted_in }]));
       const edges = er.map((e) => ({ from: e.from_source, to: e.to_source, relation: e.relation_type, weight: e.weight }));
-      // Nodes = every source that participates in an edge (so referencing docs render too),
-      // sized by their backlink weight (0 when never referenced).
+      // Nodes = edge endpoints ∪ ALL KB sources ∪ live working-memory facts.
+      // v0.35.0 — previously only edge endpoints rendered, so a research/memory-heavy
+      // project (memory facts + session summaries, no file cross-references) showed an
+      // EMPTY graph despite having real knowledge. Isolated sources and live memory
+      // facts now render as nodes (weightedIn=0 → smallest size); edges are unchanged.
       const ids = new Set<string>();
       for (const e of edges) { ids.add(e.from); ids.add(e.to); }
-      const nodes = [...ids].map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
+      const src = (await this.pool.query<{ source: string }>(
+        "SELECT source FROM knowledge_entries WHERE project_hash = $1 ORDER BY created_at DESC LIMIT 300", [projectHash])).rows;
+      for (const r of src) ids.add(r.source);
+      const wm = (await this.pool.query<{ agent_id: string; key: string }>(
+        "SELECT agent_id, key FROM working_memory WHERE project_hash = $1 ORDER BY importance DESC, created_at DESC LIMIT 200", [projectHash])).rows;
+      for (const r of wm) ids.add(`memory:${r.agent_id}:${r.key}`); // same naming as eviction-archival sources
+      const nodes = [...ids].slice(0, 500).map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
       return { nodes, edges };
     } catch { return { nodes: [], edges: [] }; }
   }

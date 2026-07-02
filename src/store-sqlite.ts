@@ -200,9 +200,17 @@ export class SqliteStore implements Store {
         const er = db.prepare("SELECT from_source, to_source, relation_type, weight FROM kb_edges LIMIT 2000").all() as Array<{ from_source: string; to_source: string; relation_type: string; weight: number }>;
         edges = er.map((e) => ({ from: e.from_source, to: e.to_source, relation: e.relation_type, weight: e.weight }));
       } catch { /* tables absent (pre-migration / never rebuilt) */ }
+      // v0.35.0 — nodes = edge endpoints ∪ ALL KB sources ∪ live memory facts (PG parity):
+      // a memory-only research project previously rendered an empty graph despite real knowledge.
       const ids = new Set<string>();
       for (const e of edges) { ids.add(e.from); ids.add(e.to); }
-      const nodes = [...ids].map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
+      try {
+        const src = db.prepare("SELECT source FROM knowledge ORDER BY created_at DESC LIMIT 300").all() as Array<{ source: string }>;
+        for (const r of src) ids.add(r.source);
+        const wm = db.prepare("SELECT agent_id, key FROM working_memory ORDER BY importance DESC, created_at DESC LIMIT 200").all() as Array<{ agent_id: string; key: string }>;
+        for (const r of wm) ids.add(`memory:${r.agent_id}:${r.key}`); // same naming as eviction-archival sources
+      } catch { /* tables absent on a fresh DB */ }
+      const nodes = [...ids].slice(0, 500).map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
       return { nodes, edges };
     } finally {
       db.close();

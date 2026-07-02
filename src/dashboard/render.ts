@@ -2639,18 +2639,29 @@ export function renderSecurityScansFragment(skillId: string, rows: SecurityScanR
 export function renderKbGraphFragment(
   data: { nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> },
   projectPath: string,
+  projects: Array<{ path: string; label: string }> = [],
 ): string {
+  // v0.35.0 — project PICKER (populated from knowledge_entries × project_paths_pg) replaces
+  // the raw absolute-path input. Auto-submits on change. Falls back to the free-text input
+  // when no PG project list is available (SQLite-only install), so nothing regresses.
+  const picker = projects.length
+    ? `<select name="projectPath" onchange="this.form.requestSubmit()"
+             style="flex:1; min-width:280px; padding:7px 10px; background:#0a0e16; border:1px solid #1d2634; border-radius:8px; color:#c3ccd9; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.8rem; cursor:pointer">
+        <option value="">— select a project —</option>
+        ${projects.map((p) => `<option value="${escapeHtml(p.path)}"${p.path === projectPath ? " selected" : ""}>${escapeHtml(p.label)}</option>`).join("")}
+      </select>`
+    : `<input name="projectPath" value="${escapeHtml(projectPath)}" placeholder="absolute project path"
+             style="flex:1; min-width:280px; padding:7px 10px; background:#0a0e16; border:1px solid #1d2634; border-radius:8px; color:#c3ccd9; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.8rem">`;
   const form = `
     <form hx-get="/dashboard/kb-graph" hx-target="#kb-graph" hx-swap="innerHTML"
           style="display:flex; gap:8px; margin:0 0 12px 0; flex-wrap:wrap">
-      <input name="projectPath" value="${escapeHtml(projectPath)}" placeholder="absolute project path"
-             style="flex:1; min-width:280px; padding:7px 10px; background:#0a0e16; border:1px solid #1d2634; border-radius:8px; color:#c3ccd9; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.8rem">
+      ${picker}
       <button type="submit" style="padding:7px 14px; background:#16241c; border:1px solid #2fe6a6; color:#2fe6a6; border-radius:8px; cursor:pointer; font-size:0.82rem">Load graph</button>
     </form>`;
 
   if (!projectPath) {
     return `${form}<div style="padding:14px; color:#94a3b8; font-size:0.88rem; line-height:1.55">
-      Enter an <strong>absolute project path</strong> to view its code/memory knowledge graph —
+      ${projects.length ? "<strong>Select a project</strong>" : "Enter an <strong>absolute project path</strong>"} to view its code/memory knowledge graph —
       SecureContext's own reference graph over <code>file:</code>/<code>memory:</code>/<code>session:</code> sources,
       <strong>separate from the personal-wiki graph</strong>. It builds automatically as the project's KB is indexed;
       run <code>zc_graph_rebuild</code> to force it.
@@ -2658,17 +2669,20 @@ export function renderKbGraphFragment(
   }
   if (!data.nodes.length) {
     return `${form}<div style="padding:14px; color:#94a3b8; font-size:0.88rem; line-height:1.55">
-      <strong>No backlink graph yet for this project.</strong> It builds automatically when content is indexed
-      (debounced), or run <code>zc_graph_rebuild</code>. Path: <code>${escapeHtml(projectPath)}</code>
+      <strong>No knowledge or memory indexed yet for this project.</strong> Nodes appear as soon as the project
+      has KB sources or working-memory facts; reference edges build automatically when indexed content
+      cross-references other sources (or run <code>zc_graph_rebuild</code>). Path: <code>${escapeHtml(projectPath)}</code>
     </div>`;
   }
 
+  const memCount = data.nodes.filter((n) => n.id.startsWith("memory:")).length;
   const topHub = data.nodes.slice().sort((a, b) => b.weightedIn - a.weightedIn)[0];
   const safeJson = JSON.stringify(data).replace(/<\/script>/gi, "<\\/script>").replace(/<!--/g, "<\\!--");
 
   return `${form}
   <div style="display:flex; gap:14px; flex-wrap:wrap; padding:2px 2px 10px 2px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:0.76rem; color:#8b99ad">
     <span><b style="color:#2fe6a6">${data.nodes.length}</b> sources</span>
+    ${memCount ? `<span><b style="color:#f1b84c">${memCount}</b> memory facts</span>` : ""}
     <span><b style="color:#5aa2ff">${data.edges.length}</b> references</span>
     ${topHub ? `<span>top hub: <b style="color:#f1b84c">${escapeHtml(topHub.id)}</b> (weighted_in=${topHub.weightedIn})</span>` : ""}
     <span style="color:#7a8799; margin-left:auto">node size ∝ backlinks · hubs rank higher in zc_search</span>
@@ -2705,6 +2719,11 @@ export function renderKbGraphFragment(
         .force("link", d3.forceLink(edges).id(function(d){ return d.id; }).distance(70).strength(0.4))
         .force("charge", d3.forceManyBody().strength(-180))
         .force("center", d3.forceCenter(W/2, H/2))
+        // v0.35.0 — gentle gathering so ISOLATED nodes (memory facts / un-referenced sources)
+        // stay in frame instead of being flung off-canvas by charge repulsion (same fix as
+        // the wiki graph's disconnected-component handling).
+        .force("x", d3.forceX(W/2).strength(0.07))
+        .force("y", d3.forceY(H/2).strength(0.07))
         .force("collide", d3.forceCollide().radius(function(d){ return rOf(d)+4; }));
       var link = g.append("g").selectAll("line").data(edges).enter().append("line")
         .attr("stroke", function(d){ return REL[d.relation] || "#33415a"; }).attr("stroke-opacity",0.5).attr("stroke-width",1).attr("marker-end","url(#kb-arrow)");
