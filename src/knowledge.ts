@@ -410,6 +410,7 @@ function _searchDb(
   let bm25RankMap: Map<string, number> | null = null;
   let cosRankMap:  Map<string, number> | null = null;
   let blRankMap:   Map<string, number> | null = null;
+  let graphRankMap: Map<string, number> | null = null;
   if (useRRF) {
     const entries = Array.from(candidateMap.entries());
     // BM25: lower FTS5 rank = more relevant.
@@ -427,6 +428,57 @@ function _searchDb(
       const withBl = entries.map(([s]) => ({ s, w: backlinkMap.get(s) ?? 0 }))
         .filter((x) => x.w > 0).sort((a, b) => b.w - a.w);
       blRankMap = new Map(withBl.map((x, i) => [x.s, i + 1]));
+    }
+    // v0.37.0 — 4th list: GRAPH NEIGHBOR EXPANSION. 1-hop kb_edges neighbors of the top
+    // candidates, ranked by aggregate edge weight. Neighbors not in the keyword candidate
+    // set are PULLED IN (call-sites / linked memory facts a keyword match can't reach);
+    // their only rank signals are graph (+ backlink), so they surface via association.
+    if (Config.RRF_W_GRAPH > 0) {
+      try {
+        const topSeeds = [...entries].sort((a, b) => a[1].rank - b[1].rank)
+          .slice(0, Config.GRAPH_EXPAND_TOP_K).map(([s]) => s);
+        if (topSeeds.length > 0) {
+          const sp = topSeeds.map(() => "?").join(",");
+          const eRows = db.prepare(
+            `SELECT from_source AS a, to_source AS b, weight FROM kb_edges
+             WHERE from_source IN (${sp}) OR to_source IN (${sp})`
+          ).all(...topSeeds, ...topSeeds) as Array<{ a: string; b: string; weight: number }>;
+          const seeds = new Set(topSeeds);
+          const nScore = new Map<string, number>();
+          for (const e of eRows) {
+            const nb = seeds.has(e.a) ? e.b : (seeds.has(e.b) ? e.a : null);
+            if (!nb || seeds.has(nb)) continue;
+            nScore.set(nb, (nScore.get(nb) ?? 0) + (e.weight ?? 1));
+          }
+          const rankedN = [...nScore.entries()].sort((x, y) => y[1] - x[1]).slice(0, Config.GRAPH_EXPAND_MAX);
+          if (rankedN.length > 0) {
+            graphRankMap = new Map(rankedN.map(([s], i) => [s, i + 1]));
+            // Pull in neighbors that aren't keyword candidates (KB sources + live memory facts).
+            const worstRank = Math.max(...[...candidateMap.values()].map((r) => r.rank));
+            const missing = rankedN.map(([s]) => s).filter((s) => !candidateMap.has(s));
+            const kbMissing  = missing.filter((s) => !s.startsWith("memory:"));
+            const memMissing = missing.filter((s) => s.startsWith("memory:"));
+            if (kbMissing.length > 0) {
+              const mp = kbMissing.map(() => "?").join(",");
+              const rows2 = db.prepare(`SELECT source, content FROM knowledge WHERE source IN (${mp})`)
+                .all(...kbMissing) as Array<{ source: string; content: string }>;
+              for (const r of rows2) candidateMap.set(r.source, { source: r.source, content: r.content, rank: worstRank });
+            }
+            for (const s of memMissing) {
+              // memory:<agent>:<key> — live fact value from working_memory
+              const parts = s.split(":");
+              if (parts.length < 3) continue;
+              const agent = parts[1]!, key = parts.slice(2).join(":");
+              try {
+                const wm = db.prepare(
+                  "SELECT value FROM working_memory WHERE agent_id = ? AND key = ? AND valid_to IS NULL"
+                ).get(agent, key) as { value: string } | undefined;
+                if (wm) candidateMap.set(s, { source: s, content: wm.value, rank: worstRank });
+              } catch { /* pre-migration DB */ }
+            }
+          }
+        }
+      } catch { /* kb_edges absent — no graph channel */ }
     }
   }
 
@@ -463,10 +515,12 @@ function _searchDb(
       const br  = bm25RankMap!.get(source);
       const cr  = cosRankMap?.get(source);
       const blr = blRankMap?.get(source);
+      const gr  = graphRankMap?.get(source);
       hybridScore =
         (br  ? Config.RRF_W_BM25     / (K + br)  : 0) +
         (cr  ? Config.RRF_W_VEC      / (K + cr)  : 0) +
-        (blr ? Config.RRF_W_BACKLINK / (K + blr) : 0);
+        (blr ? Config.RRF_W_BACKLINK / (K + blr) : 0) +
+        (gr  ? Config.RRF_W_GRAPH    / (K + gr)  : 0);
     } else {
       hybridScore = baseScore + blBoost;
     }

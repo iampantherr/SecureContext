@@ -404,7 +404,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
         continue;
       }
 
-      if (blockFailures.length > 0 || scan.score <= 6) {
+      if (blockFailures.length > 0 || scan.maxScore - scan.score >= 2) {
         summary.rejected_scan++;
         await recordPullAttempt({
           pull_id, source, source_commit: listing.commit, source_path: path,
@@ -416,11 +416,30 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           decision: "rejected_scan",
           decision_reason: blockFailures.length > 0
             ? `block-severity scan failures: ${blockFailures.map((f) => f.name).join(", ")}`
-            : `scan score ${scan.score}/8 below threshold`,
+            : `scan score ${scan.score}/${scan.maxScore} below threshold`,
           pulled_by,
         });
         continue;
       }
+
+      // v0.37.0 — UPSTREAM PINNING: compare this pull's body hash against the last
+      // successfully-added pull of the same skill. A silent upstream change (rug-pull)
+      // is surfaced in the pull record + logs; it still goes through the full scan above,
+      // so the drift note tells the operator WHY a re-review is worth their time.
+      let driftNote = "";
+      try {
+        const { withClient } = await import("../pg_pool.js");
+        const prev = await withClient(async (c) => (await c.query<{ candidate_body_hash: string }>(
+          `SELECT candidate_body_hash FROM skill_marketplace_pulls_pg
+            WHERE skill_name = $1 AND decision = 'added' ORDER BY created_at DESC LIMIT 1`,
+          [fm.name])).rows[0]);
+        if (prev && prev.candidate_body_hash && prev.candidate_body_hash !== candidateBodyHash) {
+          driftNote = " · UPSTREAM CHANGED since last vetted pull (rug-pull check: body hash drifted; fully re-scanned)";
+          logger.warn("skills", "marketplace_upstream_drift", {
+            skill_name: fm.name, previous_hash: prev.candidate_body_hash, new_hash: candidateBodyHash,
+          });
+        }
+      } catch { /* no PG / first pull — no pin to compare */ }
 
       // Passed both gates — upsert
       try {
@@ -435,7 +454,7 @@ export async function pullFromMarketplace(opts: PullOptions = {}): Promise<PullS
           lint_passed: true, lint_errors: [], lint_warnings: lint.warnings,
           scan_score: scan.score, scan_passed: scan.passed, scan_block_failures: [],
           decision: "added",
-          decision_reason: `lint OK; scan ${scan.score}/8; upserted via storage_dual`,
+          decision_reason: `lint OK; scan ${scan.score}/${scan.maxScore}; upserted via storage_dual${driftNote}`,
           pulled_by,
         });
       } catch (e) {

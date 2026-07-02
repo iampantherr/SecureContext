@@ -27,6 +27,8 @@ import { runMigrations } from "./migrations.js";
 import {
   rememberFact,
   forgetFact,
+  retireFact as retireFactSqlite,
+  reviveFact as reviveFactSqlite,
   recallWorkingMemory,
   archiveSessionSummary,
   getMemoryStats as _getMemoryStats,
@@ -127,6 +129,20 @@ export class SqliteStore implements Store {
     return forgetFact(projectPath, key, agentId);
   }
 
+  async retireFact(projectPath: string, key: string, agentId: string, supersededBy: string | null, reason: string): Promise<boolean> {
+    return retireFactSqlite(projectPath, key, agentId, supersededBy, reason);
+  }
+
+  async globalSearch(projectPath: string, question: string): Promise<{ answer: string; followups: string[]; communities: Array<{ community_id: number; size: number; sample_sources: string; summary: string }> } | null> {
+    const { globalSearchOnDb } = await import("./indexing/community_summaries.js");
+    const db = openProjectDb(projectPath);
+    try { return await globalSearchOnDb(db, question); } finally { db.close(); }
+  }
+
+  async reviveFact(projectPath: string, key: string, agentId: string): Promise<boolean> {
+    return reviveFactSqlite(projectPath, key, agentId);
+  }
+
   async recall(projectPath: string, agentId: string): Promise<MemoryFact[]> {
     return recallWorkingMemory(projectPath, agentId);
   }
@@ -207,7 +223,7 @@ export class SqliteStore implements Store {
       try {
         const src = db.prepare("SELECT source FROM knowledge ORDER BY created_at DESC LIMIT 300").all() as Array<{ source: string }>;
         for (const r of src) ids.add(r.source);
-        const wm = db.prepare("SELECT agent_id, key FROM working_memory ORDER BY importance DESC, created_at DESC LIMIT 200").all() as Array<{ agent_id: string; key: string }>;
+        const wm = db.prepare("SELECT agent_id, key FROM working_memory WHERE valid_to IS NULL ORDER BY importance DESC, created_at DESC LIMIT 200").all() as Array<{ agent_id: string; key: string }>;
         for (const r of wm) ids.add(`memory:${r.agent_id}:${r.key}`); // same naming as eviction-archival sources
       } catch { /* tables absent on a fresh DB */ }
       const nodes = [...ids].slice(0, 500).map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
@@ -243,8 +259,8 @@ export class SqliteStore implements Store {
     return listOpenContradictions(projectPath, agentId);
   }
 
-  async reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved"): Promise<number> {
-    return reviewContradictionSqlite(projectPath, agentId, keyA, keyB, status);
+  async reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved", mode?: string): Promise<number> {
+    return reviewContradictionSqlite(projectPath, agentId, keyA, keyB, status, mode);
   }
 
   // ── Broadcasts ────────────────────────────────────────────────────────────

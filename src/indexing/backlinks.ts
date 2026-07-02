@@ -83,7 +83,7 @@ export function rebuildBacklinks(db: DatabaseSync): BacklinkRebuildResult {
   // backlink search boost from what the agent's memory talks about.
   try {
     const wm = db.prepare(
-      "SELECT ('memory:' || agent_id || ':' || key) AS source, value AS content FROM working_memory ORDER BY importance DESC LIMIT 500"
+      "SELECT ('memory:' || agent_id || ':' || key) AS source, value AS content FROM working_memory WHERE valid_to IS NULL ORDER BY importance DESC LIMIT 500"
     ).all() as Row[];
     for (const r of wm) rows.push(r);
   } catch { /* working_memory absent on a KB-only DB */ }
@@ -101,7 +101,9 @@ export function rebuildBacklinks(db: DatabaseSync): BacklinkRebuildResult {
 
   db.exec("BEGIN");
   try {
-    db.exec("DELETE FROM kb_edges");
+    // v0.37.0 — LLM-extracted entity edges (match_kind='entity') are a separate, budgeted
+    // layer maintained by the entity extractor; the co-reference rebuild must not wipe them.
+    db.exec("DELETE FROM kb_edges WHERE match_kind <> 'entity'");
     db.exec("DELETE FROM kb_backlinks");
     const ins = db.prepare(
       `INSERT OR REPLACE INTO kb_edges(from_source, to_source, relation_type, match_kind, weight, computed_at)

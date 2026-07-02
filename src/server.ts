@@ -248,7 +248,7 @@ const TOOLS: Tool[] = [
       properties: {
         queries:  { type: "array", items: { type: "string" }, minItems: 1 },
         rerank:   { type: "boolean", description: "v0.20.0 — apply reranker for precision (slower)" },
-        mode:     { type: "string", enum: ["default", "hyde", "multihop"], description: "v0.20.0 — retrieval strategy" },
+        mode:     { type: "string", enum: ["default", "hyde", "multihop", "global"], description: "v0.20.0 — retrieval strategy. v0.37.0: 'global' answers CORPUS-LEVEL questions ('what are the main themes / what does this project know about X overall?') by map-reducing over pre-computed knowledge-cluster summaries, and returns drill-down follow-up queries." },
         hopDepth: { type: "integer", minimum: 1, maximum: 3, description: "v0.20.0 — for mode=multihop, how many reference hops to follow (default 2)" },
       },
       required: ["queries"],
@@ -1247,6 +1247,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 // works in BOTH proxy and in-process modes (the MCP server always runs locally with
 // filesystem access to PROJECT_PATH). Shared by both dispatch switches below.
 type ContraRow = { key_a: string; key_b: string; similarity: number; reason: string; detail: string };
+/** v0.37.0 — format a globalSearch answer (corpus-level Q&A + DRIFT-lite follow-ups). */
+function _fmtGlobalAnswer(g: { answer: string; followups: string[]; communities: Array<{ community_id: number; size: number; summary: string }> } | null): string {
+  if (!g) {
+    return "Global mode unavailable — the project has no knowledge clusters yet (index some content first) or Ollama is unreachable. Falling back tip: run a normal zc_search.";
+  }
+  const lines: string[] = [`## Global answer`, ``, g.answer, ``];
+  lines.push(`### Knowledge clusters consulted (${g.communities.length})`);
+  for (const c of g.communities.slice(0, 8)) {
+    lines.push(`- **cluster ${c.community_id}** (${c.size} sources): ${c.summary.slice(0, 160)}${c.summary.length > 160 ? "…" : ""}`);
+  }
+  if (g.followups.length > 0) {
+    lines.push(``, `### Suggested drill-down searches`);
+    for (const f of g.followups) lines.push(`- \`zc_search(["${f}"])\``);
+  }
+  return lines.join("\n");
+}
+
 function _fmtContradictionsList(open: ContraRow[]): string {
   if (open.length === 0) return "No suspected contradictions in working memory. ✓";
   const lines: string[] = [`## Suspected Contradictions (${open.length})`, ""];
@@ -1451,6 +1468,11 @@ async function _handleRemoteTool(
           mode:        body["mode"],
           hopDepth:    body["hopDepth"],
         });
+        // v0.37.0 — corpus-level answer mode.
+        if (body["mode"] === "global") {
+          const g = sr["global"] as { answer: string; followups: string[]; communities: Array<{ community_id: number; size: number; summary: string }> } | null;
+          return { content: [{ type: "text", text: _fmtGlobalAnswer(g) }] };
+        }
         const results = sr["results"] as Array<{ source: string; snippet: string }> ?? [];
         if (results.length === 0) return { content: [{ type: "text", text: "No results found." }] };
         const lines = results.map((r, i) => `${i + 1}. [${r.source}]\n   ${r.snippet}`);
@@ -1646,6 +1668,15 @@ async function dispatchToolCall(
 
       case "zc_search": {
         const { queries } = args as { queries: string[] };
+        // v0.37.0 — corpus-level answer mode (in-process SQLite parity).
+        if ((args as { mode?: string }).mode === "global") {
+          const { globalSearchOnDb } = await import("./indexing/community_summaries.js");
+          const { openDb: openDbG } = await import("./knowledge.js");
+          const gdb = openDbG(PROJECT_PATH);
+          let g: { answer: string; followups: string[]; communities: Array<{ community_id: number; size: number; summary: string }> } | null = null;
+          try { g = await globalSearchOnDb(gdb, (queries ?? []).join(" ")); } finally { gdb.close(); }
+          return { content: [{ type: "text", text: _fmtGlobalAnswer(g) }] };
+        }
         const results = await searchKnowledge(PROJECT_PATH, queries);
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No results found in knowledge base." }] };
@@ -2515,15 +2546,20 @@ async function dispatchToolCall(
       // ── v0.31.0 backlink graph (Tier-1 A) ───────────────────────────
       case "zc_graph_rebuild": {
         const { rebuildBacklinks: rebuildBLR, rebuildBacklinksPgAsync: rebuildBLRPg } = await import("./indexing/backlinks.js");
+        const { runEntityExtractionOnDb } = await import("./indexing/entity_extract.js");
         const { openDb: openDbR } = await import("./knowledge.js");
         const rdb = openDbR(PROJECT_PATH);
         const res = rebuildBLR(rdb);
+        // v0.37.0 — SQLite parity for entity extraction: the PG cron runs it automatically;
+        // in-process installs run a budgeted pass whenever the graph is rebuilt.
+        const ent = await runEntityExtractionOnDb(rdb).catch(() => ({ scanned: 0, edges: 0, ollamaDown: false }));
         rdb.close();
         rebuildBLRPg(PROJECT_PATH, res.typedEdges).catch(() => undefined);
         const lines: string[] = [];
         lines.push(`## Knowledge graph rebuilt`);
         lines.push(`Edges: ${res.edges}  Nodes: ${res.nodes}  (${res.elapsedMs}ms)`);
         if (res.topHub) lines.push(`Top hub: ${res.topHub.source} (weighted_in=${res.topHub.weightedIn})`);
+        if (ent.scanned > 0 || ent.edges > 0) lines.push(`Entity extraction: ${ent.scanned} entries scanned → ${ent.edges} entity edges${ent.ollamaDown ? " (stopped — Ollama unavailable)" : ""}`);
         lines.push(``);
         lines.push(`Backlink boost is ${Config.W_BACKLINK > 0 ? `ON (W_BACKLINK=${Config.W_BACKLINK})` : "OFF (W_BACKLINK=0)"} for zc_search ranking.`);
         return { content: [{ type: "text", text: lines.join("\n") }] };

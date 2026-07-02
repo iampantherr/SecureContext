@@ -260,6 +260,9 @@ function ensureEpistemologyColumns(db: DatabaseSync): void {
   add("resolved_at",       `TEXT`);
   add("access_count",      `INTEGER NOT NULL DEFAULT 0`);
   add("last_retrieved_at", `TEXT`);
+  add("valid_to",          `TEXT`);
+  add("superseded_by",     `TEXT`);
+  add("retired_reason",    `TEXT`);
 }
 
 /**
@@ -351,8 +354,12 @@ export function rememberFact(
       kind              = excluded.kind,
       confidence        = excluded.confidence,
       resolution_status = excluded.resolution_status,
-      resolved_at       = excluded.resolved_at
+      resolved_at       = excluded.resolved_at,
+      valid_to          = NULL,
+      superseded_by     = NULL,
+      retired_reason    = NULL
   `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt);
+  // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
   // v0.36.0 — memory facts are co-reference sources (memory-aware edge extraction), so a
   // memory write refreshes the backlink graph. Debounced 5s + fire-and-forget; dynamic
@@ -361,8 +368,10 @@ export function rememberFact(
 
   // Evict if over limit — evict lowest importance + oldest first (MemGPT eviction policy)
   // Limit is dynamically sized based on project complexity (see getWorkingMemoryLimits)
+  // v0.37.0 — retired facts (valid_to set) don't count against the bound and are never
+  // eviction candidates: they're already out of recall and purged by the enrichment cycle.
   const count = (db.prepare(
-    "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ?"
+    "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ? AND valid_to IS NULL"
   ).get(safeAgent) as { n: number }).n;
 
   const { max: wmMax, evictTo: wmEvictTo } = getWorkingMemoryLimits(db);
@@ -379,7 +388,7 @@ export function rememberFact(
     )`;
     const toEvict = db.prepare(`
       SELECT key, value FROM working_memory
-      WHERE agent_id = ? AND ${PROTECT}
+      WHERE agent_id = ? AND valid_to IS NULL AND ${PROTECT}
       ORDER BY importance ASC, created_at ASC
       LIMIT ?
     `).all(safeAgent, need) as Row[];
@@ -390,7 +399,7 @@ export function rememberFact(
       const have = new Set(toEvict.map((r) => r.key));
       const extra = db.prepare(`
         SELECT key, value FROM working_memory
-        WHERE agent_id = ?
+        WHERE agent_id = ? AND valid_to IS NULL
         ORDER BY importance ASC, created_at ASC
         LIMIT ?
       `).all(safeAgent, need) as Row[];
@@ -432,14 +441,14 @@ export function recallWorkingMemory(
     rows = db.prepare(`
       SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
       FROM working_memory
-      WHERE agent_id = 'default'
+      WHERE agent_id = 'default' AND valid_to IS NULL
       ORDER BY importance DESC, created_at DESC
     `).all() as unknown as MemoryFact[];
   } else {
     rows = db.prepare(`
       SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
       FROM working_memory
-      WHERE agent_id = ? OR agent_id = 'default'
+      WHERE (agent_id = ? OR agent_id = 'default') AND valid_to IS NULL
       ORDER BY
         CASE WHEN agent_id = ? THEN 0 ELSE 1 END,
         importance DESC,
@@ -518,6 +527,56 @@ export function forgetFact(
 }
 
 /**
+ * v0.37.0 — RETIRE a fact (temporal close-out, NOT deletion): sets valid_to so it drops
+ * out of recall/stats/eviction/scans, records what superseded it and why, and archives
+ * the value to the KB (still findable via zc_search, recoverable via reviveFact). Used by
+ * contradiction auto-resolution and the dashboard Keep-left/Keep-right actions. The row
+ * itself is purged to archival-only by the enrichment cycle after RETIRE_PURGE_DAYS.
+ */
+export function retireFact(
+  projectPath: string,
+  key: string,
+  agentId: string,
+  supersededBy: string | null,
+  reason: string,
+): boolean {
+  const safeKey   = sanitize(key,     100);
+  const safeAgent = sanitize(agentId,  64);
+  const db        = openDb(projectPath);
+  ensureAgentIdColumn(db);
+  ensureEpistemologyColumns(db);
+  const row = db.prepare(
+    "SELECT value FROM working_memory WHERE key = ? AND agent_id = ? AND valid_to IS NULL"
+  ).get(safeKey, safeAgent) as { value: string } | undefined;
+  if (!row) { db.close(); return false; }
+  db.prepare(
+    "UPDATE working_memory SET valid_to = ?, superseded_by = ?, retired_reason = ? WHERE key = ? AND agent_id = ?"
+  ).run(new Date().toISOString(), supersededBy ? sanitize(supersededBy, 100) : null, sanitize(reason, 100), safeKey, safeAgent);
+  db.close();
+  // Archive to KB (same naming as eviction) + refresh graph edges.
+  try { indexContent(projectPath, row.value, `memory:${safeAgent}:${safeKey}`); } catch { /* best-effort */ }
+  void import("./indexing/backlinks.js").then((m) => m.rebuildBacklinksAsync(projectPath)).catch(() => undefined);
+  return true;
+}
+
+/** v0.37.0 — undo a retirement (dashboard Undo): clears valid_to so the fact is live again. */
+export function reviveFact(projectPath: string, key: string, agentId: string): boolean {
+  const safeKey   = sanitize(key,     100);
+  const safeAgent = sanitize(agentId,  64);
+  const db        = openDb(projectPath);
+  ensureAgentIdColumn(db);
+  ensureEpistemologyColumns(db);
+  const r = db.prepare(
+    "UPDATE working_memory SET valid_to = NULL, superseded_by = NULL, retired_reason = NULL WHERE key = ? AND agent_id = ? AND valid_to IS NOT NULL"
+  ).run(safeKey, safeAgent) as { changes: number };
+  db.close();
+  if (r.changes > 0) {
+    void import("./indexing/backlinks.js").then((m) => m.rebuildBacklinksAsync(projectPath)).catch(() => undefined);
+  }
+  return r.changes > 0;
+}
+
+/**
  * Format working memory for context injection.
  * Returns a structured, token-efficient representation with priority sections.
  *
@@ -577,11 +636,11 @@ export function getMemoryStats(
   const safeAgent = sanitize(agentId, 64);
 
   const count = (db.prepare(
-    "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ?"
+    "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ? AND valid_to IS NULL"
   ).get(safeAgent) as { n: number }).n;
 
   const criticalCount = (db.prepare(
-    "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ? AND importance >= 4"
+    "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ? AND importance >= 4 AND valid_to IS NULL"
   ).get(safeAgent) as { n: number }).n;
 
   const { max, evictTo, profile } = getWorkingMemoryLimits(db);

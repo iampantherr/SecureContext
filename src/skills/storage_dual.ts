@@ -116,15 +116,17 @@ export async function upsertSkill(
       `Cannot upsert skill ${skill.skill_id}: security scan blocked — ${names.join("; ")}`,
     );
   }
-  // No block-severity failures. If score is still ≤6 (lots of warn-fails),
-  // require operator review explicitly.
-  if (scanResult.score <= 6) {
+  // No block-severity failures. If 2+ warn-checks failed, require operator review
+  // explicitly. (v0.37.0 — RELATIVE threshold: the scanner grew from 8 to 11 checks,
+  // so the old absolute "score <= 6" would have silently tightened; ≥2 warn-failures
+  // preserves the original policy.)
+  if (scanResult.maxScore - scanResult.score >= 2) {
     const warnNames = scanResult.checks.filter((c) => !c.passed).map((c) => c.name);
     throw new Error(
-      `Cannot upsert skill ${skill.skill_id}: security scan score ${scanResult.score}/8 too low (failed: ${warnNames.join(", ")}); requires operator review`,
+      `Cannot upsert skill ${skill.skill_id}: security scan score ${scanResult.score}/${scanResult.maxScore} too low (failed: ${warnNames.join(", ")}); requires operator review`,
     );
   }
-  // score 7-8/8 with no block-severity failures: pass. Audit row already written.
+  // At most one warn-failure with no block-severity failures: pass. Audit row already written.
 
   const backend = getBackend();
   if (backend === "postgres" || backend === "dual") {

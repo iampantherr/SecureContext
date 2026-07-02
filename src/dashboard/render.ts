@@ -1475,9 +1475,36 @@ export function renderSkillEditForm(row: Record<string, unknown>): string {
 export function renderContradictionsFragment(
   rows: Array<Record<string, unknown>>,
   projectNameMap: Map<string, string> = new Map(),
+  autoRows: Array<Record<string, unknown>> = [],
 ): string {
+  // v0.37.0 — auto-resolved supersessions (stale side retired automatically), each undoable.
+  const autoSection = autoRows.length === 0 ? "" : `
+<details class="contra-auto" style="margin-top:14px">
+  <summary style="cursor:pointer;color:#2fe6a6;font-weight:600">⚙ Auto-resolved supersessions (last 7 days: ${autoRows.length}) — stale facts retired automatically, click to review / undo</summary>
+  ${autoRows.map((r) => {
+    const ph2 = String(r.project_hash ?? ""); const agent = String(r.agent_id ?? "default");
+    const name = projectNameMap.get(ph2);
+    return `
+  <div class="contra-card" style="border-left-color:#2fe6a6">
+    <div class="contra-head">
+      <span style="color:#2fe6a6;font-weight:600">✓ auto-resolved</span>
+      <span class="contra-sim">sim ${r.similarity == null ? "?" : Number(r.similarity).toFixed(2)}</span>
+      <span class="contra-proj">${name ? escapeHtml(name) : "project:" + escapeHtml(ph2.slice(0, 8)) + "…"}</span>
+    </div>
+    <div style="font-size:.85rem;color:#c3ccd9;margin-bottom:10px">${escapeHtml(String(r.detail ?? "").slice(0, 260))}</div>
+    <form class="contra-actions" hx-post="/dashboard/contradictions/review" hx-target="closest .contra-card" hx-swap="outerHTML">
+      <input type="hidden" name="project_hash" value="${escapeHtml(ph2)}">
+      <input type="hidden" name="agent_id" value="${escapeHtml(agent)}">
+      <input type="hidden" name="key_a" value="${escapeHtml(String(r.key_a ?? ""))}">
+      <input type="hidden" name="key_b" value="${escapeHtml(String(r.key_b ?? ""))}">
+      <button type="submit" name="action" value="undo" class="contra-discard" title="Revive the retired fact and reopen the pair for triage">↩ Undo</button>
+    </form>
+  </div>`;
+  }).join("\n")}
+</details>`;
+
   if (rows.length === 0) {
-    return `<p class="empty">No suspected contradictions — working memory is consistent. ✓</p>`;
+    return `<p class="empty">No suspected contradictions — working memory is consistent. ✓</p>${autoSection}`;
   }
   const reasonLabel: Record<string, string> = {
     semantic_conflict:   "opposite polarity",
@@ -1516,12 +1543,12 @@ export function renderContradictionsFragment(
   </div>
   <form class="contra-actions" hx-post="/dashboard/contradictions/review" hx-target="closest .contra-card" hx-swap="outerHTML">
     ${hidden}
-    <button type="submit" name="action" value="accept"  class="contra-accept"  title="Acknowledge this is a real conflict">✓ Accept</button>
-    <button type="submit" name="action" value="discard" class="contra-discard" title="Resolved / no longer relevant">🗑 Discard</button>
-    <button type="submit" name="action" value="ignore"  class="contra-ignore"  title="Not a real conflict — dismiss">✕ Ignore</button>
+    <button type="submit" name="action" value="keep_a" class="contra-accept"  title="Keep the LEFT fact — retire the right one (archived to the KB, undoable)">⯇ Keep left</button>
+    <button type="submit" name="action" value="keep_b" class="contra-accept"  title="Keep the RIGHT fact — retire the left one (archived to the KB, undoable)">Keep right ⯈</button>
+    <button type="submit" name="action" value="not_conflict" class="contra-ignore" title="Both facts are valid — dismiss the flag; this pair won't be re-flagged">✕ Not a conflict</button>
   </form>
 </div>`;
-  }).join("\n");
+  }).join("\n") + autoSection;
 }
 
 export function renderPendingFragment(

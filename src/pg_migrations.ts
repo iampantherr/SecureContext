@@ -944,6 +944,30 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 32,
+    description: "v0.37.0: temporal fact retirement — valid_to/superseded_by/retired_reason on working_memory + resolution_mode on memory_contradictions_pg (mirrors SQLite migration 34)",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS superseded_by TEXT`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS retired_reason TEXT`);
+      await client.query(`ALTER TABLE memory_contradictions_pg ADD COLUMN IF NOT EXISTS resolution_mode TEXT`);
+      await client.query(`ALTER TABLE source_meta ADD COLUMN IF NOT EXISTS entity_scanned_at TIMESTAMPTZ`);  // v0.37.0 entity-extraction marker
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_wm_pg_live ON working_memory(project_hash, agent_id, valid_to)`);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS kb_community_summaries_pg (
+          project_hash   TEXT    NOT NULL,
+          community_id   INTEGER NOT NULL,
+          size           INTEGER NOT NULL,
+          sample_sources TEXT    NOT NULL,
+          summary        TEXT    NOT NULL,
+          computed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (project_hash, community_id)
+        )
+      `);
+    },
+  },
+
 ];
 
 /**

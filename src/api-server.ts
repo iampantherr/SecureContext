@@ -780,8 +780,18 @@ export async function createApiServer(storeOverride?: Store) {
         );
         return res.rows;
       });
+      // v0.37.0 — recently auto-resolved conflicts (retired stale side), each with an Undo.
+      const autoRows = await withClient(async (c) => {
+        const res = await c.query<Record<string, unknown>>(
+          `SELECT project_hash, agent_id, key_a, key_b, reason, similarity, detail, reviewed_at
+             FROM memory_contradictions_pg
+            WHERE status = 'resolved' AND resolution_mode = 'auto' AND reviewed_at > NOW() - INTERVAL '7 days'
+            ORDER BY reviewed_at DESC LIMIT 50`,
+        );
+        return res.rows;
+      }).catch(() => [] as Record<string, unknown>[]);
       const nameMap = await loadProjectNameMap();
-      reply.type("text/html").send(renderContradictionsFragment(rows, nameMap));
+      reply.type("text/html").send(renderContradictionsFragment(rows, nameMap, autoRows));
     } catch (e) {
       reply.type("text/html").send(`<p class="empty">Suspected contradictions unavailable: ${escapeHtml((e as Error).message)}</p>`);
     }
@@ -794,29 +804,61 @@ export async function createApiServer(storeOverride?: Store) {
     const key_a        = String(body.key_a ?? "").trim();
     const key_b        = String(body.key_b ?? "").trim();
     const action       = String(body.action ?? "").trim();
-    // accept = acknowledge a real conflict · discard = resolved/removed · ignore = false positive
-    const statusMap: Record<string, string> = { accept: "acknowledged", discard: "resolved", ignore: "dismissed" };
-    const status = statusMap[action];
-    if (!project_hash || !key_a || !key_b || !status) {
+    // v0.37.0 — actions now ACT ON MEMORY, not just the flag:
+    //   keep_a / keep_b  → retire the losing fact (valid_to + KB archival), flag → resolved
+    //   not_conflict     → both facts stay, flag → dismissed (operator override; never re-auto-resolved)
+    //   undo             → revive the retired side of an auto/operator resolution, flag → open
+    const VALID = new Set(["keep_a", "keep_b", "not_conflict", "undo"]);
+    if (!project_hash || !key_a || !key_b || !VALID.has(action)) {
       reply.type("text/html").send(`<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">❌ Invalid review request.</div>`);
       return;
     }
     try {
       const { withClient } = await import("./pg_pool.js");
-      const changed = await withClient(async (c) => {
-        const r = await c.query(
-          `UPDATE memory_contradictions_pg SET status = $1, reviewed_at = NOW()
-            WHERE project_hash = $2 AND agent_id = $3 AND key_a = $4 AND key_b = $5 AND status = 'open'`,
-          [status, project_hash, agent_id, key_a, key_b],
-        );
-        return r.rowCount ?? 0;
-      });
-      const label = action === "accept" ? "accepted" : action === "discard" ? "discarded" : "ignored";
-      reply.type("text/html").send(
-        changed > 0
-          ? `<div class="contra-resolved">✓ ${escapeHtml(label)} — <code>${escapeHtml(key_a)}</code> ⇄ <code>${escapeHtml(key_b)}</code></div>`
-          : `<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">Already reviewed elsewhere.</div>`,
-      );
+      const err = (m: string) => reply.type("text/html").send(`<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">❌ ${escapeHtml(m)}</div>`);
+
+      if (action === "not_conflict") {
+        const changed = await withClient(async (c) => (await c.query(
+          `UPDATE memory_contradictions_pg SET status = 'dismissed', reviewed_at = NOW(), resolution_mode = 'not_conflict'
+            WHERE project_hash = $1 AND agent_id = $2 AND key_a = $3 AND key_b = $4 AND status = 'open'`,
+          [project_hash, agent_id, key_a, key_b])).rowCount ?? 0);
+        reply.type("text/html").send(changed > 0
+          ? `<div class="contra-resolved">✓ Not a conflict — both facts kept. <code>${escapeHtml(key_a)}</code> ⇄ <code>${escapeHtml(key_b)}</code> won't be re-flagged.</div>`
+          : `<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">Already reviewed elsewhere.</div>`);
+        return;
+      }
+
+      // Resolve project_hash → path so store.retireFact/reviveFact work on either backend.
+      const pathRow = await withClient(async (c) => (await c.query<{ project_path: string }>(
+        `SELECT project_path FROM project_paths_pg WHERE project_hash = $1`, [project_hash])).rows[0]);
+      if (!pathRow) { err(`No known path for project ${project_hash.slice(0, 8)}… — cannot modify its memory from here.`); return; }
+      const pp = pathRow.project_path;
+
+      if (action === "undo") {
+        const revived = (await store.reviveFact(pp, key_a, agent_id)) || (await store.reviveFact(pp, key_a, "default"))
+          || (await store.reviveFact(pp, key_b, agent_id)) || (await store.reviveFact(pp, key_b, "default"));
+        await withClient(async (c) => c.query(
+          `UPDATE memory_contradictions_pg SET status = 'open', resolution_mode = NULL, reviewed_at = NULL
+            WHERE project_hash = $1 AND agent_id = $2 AND key_a = $3 AND key_b = $4`,
+          [project_hash, agent_id, key_a, key_b]));
+        reply.type("text/html").send(revived
+          ? `<div class="contra-resolved">↩ Undone — the retired fact is live again; the pair is back in triage.</div>`
+          : `<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">Nothing to revive (fact may have been purged or re-asserted).</div>`);
+        return;
+      }
+
+      // keep_a / keep_b
+      const victim = action === "keep_a" ? key_b : key_a;
+      const winner = action === "keep_a" ? key_a : key_b;
+      const retired = (await store.retireFact(pp, victim, agent_id, winner, "operator_keep_other"))
+        || (agent_id !== "default" && await store.retireFact(pp, victim, "default", winner, "operator_keep_other"));
+      const changed = await withClient(async (c) => (await c.query(
+        `UPDATE memory_contradictions_pg SET status = 'resolved', reviewed_at = NOW(), resolution_mode = $5
+          WHERE project_hash = $1 AND agent_id = $2 AND key_a = $3 AND key_b = $4 AND status IN ('open','acknowledged')`,
+        [project_hash, agent_id, key_a, key_b, action])).rowCount ?? 0);
+      reply.type("text/html").send(retired || changed > 0
+        ? `<div class="contra-resolved">✓ Kept <code>${escapeHtml(winner)}</code> — <code>${escapeHtml(victim)}</code> retired ${retired ? "(archived to the KB, undoable)" : "(flag updated; fact was already gone)"}.</div>`
+        : `<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">Already reviewed elsewhere.</div>`);
     } catch (e) {
       reply.type("text/html").send(`<div class="contra-resolved" style="border-left-color:#ff5d6c;color:#ffb3bb">❌ ${escapeHtml((e as Error).message)}</div>`);
     }
@@ -2877,8 +2919,34 @@ export async function createApiServer(storeOverride?: Store) {
       const { projectPath, agentId = "default", run, action, key_a, key_b } = request.body as Record<string, unknown>;
       const pp = validateProjectPath(projectPath);
       if (typeof action === "string" && typeof key_a === "string" && typeof key_b === "string") {
+        // v0.37.0 — keep_a / keep_b RESOLVE the conflict by retiring the losing fact
+        // (valid_to + KB archival, undoable). The victim may live in the scan agent's
+        // namespace or the shared 'default' pool — try both.
+        if (action === "keep_a" || action === "keep_b") {
+          const victim = action === "keep_a" ? key_b : key_a;
+          const winner = action === "keep_a" ? key_a : key_b;
+          const retired = (await store.retireFact(pp, victim, String(agentId), winner, "operator_keep_other"))
+            || (String(agentId) !== "default" && await store.retireFact(pp, victim, "default", winner, "operator_keep_other"));
+          const n = await store.reviewContradiction(pp, String(agentId), key_a, key_b, "resolved", action);
+          return { ok: true, reviewed: n, retired };
+        }
+        if (action === "revive") {
+          // Undo an auto/operator retirement: revive whichever side is retired, reopen the flag.
+          const revived = (await store.reviveFact(pp, key_a, String(agentId))) || (await store.reviveFact(pp, key_a, "default"))
+            || (await store.reviveFact(pp, key_b, String(agentId))) || (await store.reviveFact(pp, key_b, "default"));
+          const n = await store.reviewContradiction(pp, String(agentId), key_a, key_b, "acknowledged", "undone");
+          // reopen so it shows for triage again
+          try {
+            const { withClient } = await import("./pg_pool.js");
+            await withClient(async (c) => c.query(
+              `UPDATE memory_contradictions_pg SET status='open', resolution_mode=NULL, reviewed_at=NULL
+                WHERE project_hash = $1 AND key_a = LEAST($2,$3) AND key_b = GREATEST($2,$3)`,
+              [createHash("sha256").update(pp).digest("hex").slice(0, 16), key_a, key_b]));
+          } catch { /* SQLite-only install: acknowledged status above is the fallback */ }
+          return { ok: true, reviewed: n, revived };
+        }
         const st = action === "dismiss" ? "dismissed" : action === "acknowledge" ? "acknowledged" : "resolved";
-        const n = await store.reviewContradiction(pp, String(agentId), key_a, key_b, st as "dismissed" | "acknowledged" | "resolved");
+        const n = await store.reviewContradiction(pp, String(agentId), key_a, key_b, st as "dismissed" | "acknowledged" | "resolved", action === "dismiss" ? "not_conflict" : undefined);
         return { ok: true, reviewed: n };
       }
       let scan: { scanned: number; flagged: number; ollamaAvailable: boolean } | null = null;
@@ -2966,6 +3034,12 @@ export async function createApiServer(storeOverride?: Store) {
       const pp = validateProjectPath(projectPath);
       if (!Array.isArray(queries) || queries.length === 0) throw new ApiError(400, "queries must be a non-empty array");
       const queryStrs = queries.map(String);
+
+      // v0.37.0 — corpus-level Q&A over community summaries (+ DRIFT-lite follow-ups).
+      if (mode === "global") {
+        const g = await store.globalSearch(pp, queryStrs.join(" "));
+        return { ok: true, results: [], global: g };
+      }
 
       // v0.20.0 — advanced retrieval modes (Sprint 4)
       const useHyde      = mode === "hyde";
@@ -3625,7 +3699,7 @@ if (process.argv[1]?.endsWith("api-server.js")) {
         // — so it surfaces fresh conflicts without re-flagging years of history. Stored under 'default'
         // (one row per conflict, visible to every agent). First run is one interval after boot.
         try {
-          const enrich = (store as { runEnrichment?: () => Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean }> }).runEnrichment;
+          const enrich = (store as { runEnrichment?: () => Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean; entities?: number }> }).runEnrichment;
           if (typeof enrich === "function" && process.env.ZC_ENRICHMENT_CRON !== "0") {
             const { Scheduler } = await import("./cron/scheduler.js");
             const intervalMin = Math.max(5, parseInt(process.env.ZC_ENRICHMENT_INTERVAL_MIN ?? "30", 10) || 30);
@@ -3637,7 +3711,7 @@ if (process.argv[1]?.endsWith("api-server.js")) {
               next_run_ms: Date.now() + intervalMin * 60_000, // first run one interval after boot (no boot load)
               work: async () => {
                 const r = await enrich.call(store);
-                console.log(`Enrichment cron: projects=${r.projects} flagged=${r.flagged} backfilled=${r.backfilledProjects}${r.ollamaDown ? " (ollama down)" : ""}`);
+                console.log(`Enrichment cron: projects=${r.projects} flagged=${r.flagged} backfilled=${r.backfilledProjects} entity_edges=${r.entities ?? 0}${r.ollamaDown ? " (ollama down)" : ""}`);
               },
             });
             sched.start(60_000); // poll every 60s; the job itself fires every intervalMin

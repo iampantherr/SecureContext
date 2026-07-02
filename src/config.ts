@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.36.0",
+  VERSION: "0.37.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -85,6 +85,22 @@ export const Config = {
   RRF_W_BM25:        parseFloat(env["ZC_RRF_W_BM25"] ?? "1.0"),
   RRF_W_VEC:         parseFloat(env["ZC_RRF_W_VEC"] ?? "1.0"),
   RRF_W_BACKLINK:    parseFloat(env["ZC_RRF_W_BACKLINK"] ?? "0.25"),
+  // v0.37.0 — 4th RRF list: 1-hop kb_edges neighbors of the top candidates (graph
+  // retrieval channel — surfaces call-sites/linked memory a keyword match can't reach).
+  // RRF_W_GRAPH=0 disables the channel entirely (kill-switch; ranking identical to v0.36).
+  RRF_W_GRAPH:       parseFloat(env["ZC_RRF_W_GRAPH"] ?? "0.5"),
+  GRAPH_EXPAND_TOP_K: parseInt(env["ZC_GRAPH_EXPAND_TOP_K"] ?? "5", 10),
+  GRAPH_EXPAND_MAX:   parseInt(env["ZC_GRAPH_EXPAND_MAX"] ?? "20", 10),
+
+  // ── Self-correcting memory v2 (v0.37.0) ──────────────────────────────────
+  // Temporal fact retirement + contradiction auto-resolution. When the scan flags a
+  // pair where one fact CLEARLY supersedes the other (strictly newer + carries an
+  // action-reversal verb the older lacks), the older fact is retired (valid_to set,
+  // archived to the KB, dropped from recall) automatically — with a dashboard Undo.
+  // Ambiguous pairs still go to operator triage. AUTO_RESOLVE=0 ⇒ flag-only (v0.36 behaviour).
+  AUTO_RESOLVE:        (env["ZC_AUTO_RESOLVE"] ?? "1") !== "0",
+  RETIRE_PURGE_DAYS:   parseInt(env["ZC_RETIRE_PURGE_DAYS"] ?? "30", 10),
+  CONTRA_PRUNE_DAYS:   parseInt(env["ZC_CONTRA_PRUNE_DAYS"] ?? "30", 10),
 
   // ── Recency-decay / salience (Tier-2 #4) ─────────────────────────────────
   // Secondary recall signal: how recently + how often a fact was retrieved. Folded

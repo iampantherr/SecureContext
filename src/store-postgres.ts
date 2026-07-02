@@ -31,14 +31,17 @@
  */
 
 import pg from "pg";
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
 import { getEmbedding, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
 import { classifyFactKind, type EpistemicOpts } from "./memory.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { extractCoReferences, classifyRelation } from "./indexing/community.js";
-import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict } from "./contradiction_heuristics.js";
+import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict, autoResolveVictim } from "./contradiction_heuristics.js";
+import { llmExtractEntities, entityEdgesFor, ENTITY_EXTRACT_ENABLED, ENTITY_BUDGET } from "./indexing/entity_extract.js";
+import { detectCommunitiesFromRows } from "./indexing/community.js";
+import { summarizeCommunity, answerGlobal, type CommunitySummaryRow } from "./indexing/community_summaries.js";
 import { ROLE_PERMISSIONS, type AgentRole } from "./access-control.js";
 import type {
   Store,
@@ -201,8 +204,12 @@ export class PostgresStore implements Store {
         kind              = EXCLUDED.kind,
         confidence        = EXCLUDED.confidence,
         resolution_status = EXCLUDED.resolution_status,
-        resolved_at       = EXCLUDED.resolved_at
+        resolved_at       = EXCLUDED.resolved_at,
+        valid_to          = NULL,
+        superseded_by     = NULL,
+        retired_reason    = NULL
     `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt]);
+    // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
     // v0.36.0 — memory facts are now co-reference sources, so a memory WRITE must refresh
     // the backlink graph too (previously only indexing did — memory edges would go stale).
@@ -212,7 +219,7 @@ export class PostgresStore implements Store {
     // Evict if over the dynamic limit
     const limits = await this.getWorkingMemoryLimits(projectPath);
     const countRes = await this.pool.query<{ n: string }>(
-      "SELECT COUNT(*) as n FROM working_memory WHERE project_hash = $1 AND agent_id = $2",
+      "SELECT COUNT(*) as n FROM working_memory WHERE project_hash = $1 AND agent_id = $2 AND valid_to IS NULL",
       [projectHash, safeAgent]
     );
     const count = parseInt(countRes.rows[0]!.n, 10);
@@ -227,7 +234,7 @@ export class PostgresStore implements Store {
       )`;
       const victims = (await this.pool.query<{ key: string; value: string }>(
         `SELECT key, value FROM working_memory
-         WHERE project_hash = $1 AND agent_id = $2 AND ${PROTECT}
+         WHERE project_hash = $1 AND agent_id = $2 AND valid_to IS NULL AND ${PROTECT}
          ORDER BY importance ASC, created_at ASC
          LIMIT $3`,
         [projectHash, safeAgent, toEvictCount]
@@ -239,7 +246,7 @@ export class PostgresStore implements Store {
         const have = new Set(victims.map((v) => v.key));
         const extra = (await this.pool.query<{ key: string; value: string }>(
           `SELECT key, value FROM working_memory
-           WHERE project_hash = $1 AND agent_id = $2
+           WHERE project_hash = $1 AND agent_id = $2 AND valid_to IS NULL
            ORDER BY importance ASC, created_at ASC
            LIMIT $3`,
           [projectHash, safeAgent, toEvictCount]
@@ -256,6 +263,53 @@ export class PostgresStore implements Store {
         await this.index(projectPath, row.value, `memory:${safeAgent}:${row.key}`);
       }
     }
+  }
+
+  // ── v0.37.0 Temporal fact retirement ───────────────────────────────────────
+  async retireFact(projectPath: string, key: string, agentId: string, supersededBy: string | null, reason: string): Promise<boolean> {
+    return this._retireFactByHash(ph(projectPath), key, agentId, supersededBy, reason);
+  }
+
+  private async _retireFactByHash(projectHash: string, key: string, agentId: string, supersededBy: string | null, reason: string): Promise<boolean> {
+    const safeKey   = sanitize(key,     100);
+    const safeAgent = sanitize(agentId,  64);
+    const row = (await this.pool.query<{ value: string }>(
+      "SELECT value FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3 AND valid_to IS NULL",
+      [projectHash, safeKey, safeAgent])).rows[0];
+    if (!row) return false;
+    await this.pool.query(
+      "UPDATE working_memory SET valid_to = NOW(), superseded_by = $4, retired_reason = $5 WHERE project_hash = $1 AND key = $2 AND agent_id = $3",
+      [projectHash, safeKey, safeAgent, supersededBy ? sanitize(supersededBy, 100) : null, sanitize(reason, 100)]);
+    // Archive to the KB by hash (mirrors index()'s upserts — retire is non-destructive:
+    // the value stays findable via zc_search and revivable via reviveFact).
+    const source = `memory:${safeAgent}:${safeKey}`;
+    const now = new Date().toISOString();
+    try {
+      await this.pool.query(`
+        INSERT INTO knowledge_entries(project_hash, source, content, created_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT(project_hash, source) DO UPDATE SET content = EXCLUDED.content, created_at = EXCLUDED.created_at
+      `, [projectHash, source, row.value, now]);
+      await this.pool.query(`
+        INSERT INTO source_meta(project_hash, source, source_type, retention_tier, created_at, l0_summary, l1_summary)
+        VALUES ($1, $2, 'internal', 'internal', $3, $4, $5)
+        ON CONFLICT(project_hash, source) DO UPDATE SET created_at = EXCLUDED.created_at, l0_summary = EXCLUDED.l0_summary, l1_summary = EXCLUDED.l1_summary
+      `, [projectHash, source, now, row.value.slice(0, Config.TIER_L0_CHARS).trim(), row.value.slice(0, Config.TIER_L1_CHARS).trim()]);
+    } catch { /* archival is best-effort — retirement itself already succeeded */ }
+    void this._rebuildBacklinksByHash(projectHash).catch(() => undefined);
+    return true;
+  }
+
+  async reviveFact(projectPath: string, key: string, agentId: string): Promise<boolean> {
+    return this._reviveFactByHash(ph(projectPath), key, agentId);
+  }
+
+  private async _reviveFactByHash(projectHash: string, key: string, agentId: string): Promise<boolean> {
+    const r = await this.pool.query(
+      "UPDATE working_memory SET valid_to = NULL, superseded_by = NULL, retired_reason = NULL WHERE project_hash = $1 AND key = $2 AND agent_id = $3 AND valid_to IS NOT NULL",
+      [projectHash, sanitize(key, 100), sanitize(agentId, 64)]);
+    if ((r.rowCount ?? 0) > 0) { void this._rebuildBacklinksByHash(projectHash).catch(() => undefined); return true; }
+    return false;
   }
 
   async forget(projectPath: string, key: string, agentId: string): Promise<boolean> {
@@ -291,7 +345,7 @@ export class PostgresStore implements Store {
     if (safeAgent === "default") {
       const res = await this.pool.query<MemoryFact>(
         `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
-         FROM working_memory WHERE project_hash = $1 AND agent_id = 'default'
+         FROM working_memory WHERE project_hash = $1 AND agent_id = 'default' AND valid_to IS NULL
          ORDER BY importance DESC, created_at DESC`,
         [projectHash]
       );
@@ -301,7 +355,7 @@ export class PostgresStore implements Store {
       const res = await this.pool.query<MemoryFact>(
         `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
          FROM working_memory
-         WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default')
+         WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND valid_to IS NULL
          ORDER BY
            CASE WHEN agent_id = $2 THEN 0 ELSE 1 END,
            importance DESC,
@@ -349,11 +403,11 @@ export class PostgresStore implements Store {
     const safeAgent   = sanitize(agentId, 64);
     const [countRes, critRes] = await Promise.all([
       this.pool.query<{ n: string }>(
-        "SELECT COUNT(*) as n FROM working_memory WHERE project_hash = $1 AND agent_id = $2",
+        "SELECT COUNT(*) as n FROM working_memory WHERE project_hash = $1 AND agent_id = $2 AND valid_to IS NULL",
         [projectHash, safeAgent]
       ),
       this.pool.query<{ n: string }>(
-        "SELECT COUNT(*) as n FROM working_memory WHERE project_hash = $1 AND agent_id = $2 AND importance >= 4",
+        "SELECT COUNT(*) as n FROM working_memory WHERE project_hash = $1 AND agent_id = $2 AND importance >= 4 AND valid_to IS NULL",
         [projectHash, safeAgent]
       ),
     ]);
@@ -573,11 +627,55 @@ export class PostgresStore implements Store {
         const bm25RankMap = new Map(bm25Res.rows.map((r, i) => [r.source, i + 1]));
         let cosRankMap: Map<string, number> | null = null;
         let blRankMap:  Map<string, number> | null = null;
+        let graphRankMap: Map<string, number> | null = null;
         if (useRRF) {
           cosRankMap = new Map([...withCos].sort((a, b) => b.cosScore - a.cosScore).map((x, i) => [x.row.source, i + 1]));
           if (Config.W_BACKLINK > 0 && blMap.size > 0) {
             blRankMap = new Map(bm25Res.rows.map(r => ({ s: r.source, w: blMap.get(r.source) ?? 0 }))
               .filter(x => x.w > 0).sort((a, b) => b.w - a.w).map((x, i) => [x.s, i + 1]));
+          }
+          // v0.37.0 — 4th list: graph neighbor expansion (SQLite parity). 1-hop kb_edges_pg
+          // neighbors of the top candidates, ranked by aggregate weight; out-of-set neighbors
+          // (KB sources + live memory facts) are pulled into the candidate pool.
+          if (Config.RRF_W_GRAPH > 0) {
+            try {
+              const topSeeds = bm25Res.rows.slice(0, Config.GRAPH_EXPAND_TOP_K).map(r => r.source);
+              if (topSeeds.length > 0) {
+                const eRows = (await this.pool.query<{ a: string; b: string; weight: number }>(
+                  `SELECT from_source AS a, to_source AS b, weight FROM kb_edges_pg
+                   WHERE project_hash = $1 AND (from_source = ANY($2) OR to_source = ANY($2))`,
+                  [projectHash, topSeeds])).rows;
+                const seeds = new Set(topSeeds);
+                const nScore = new Map<string, number>();
+                for (const e of eRows) {
+                  const nb = seeds.has(e.a) ? e.b : (seeds.has(e.b) ? e.a : null);
+                  if (!nb || seeds.has(nb)) continue;
+                  nScore.set(nb, (nScore.get(nb) ?? 0) + (e.weight ?? 1));
+                }
+                const rankedN = [...nScore.entries()].sort((x, y) => y[1] - x[1]).slice(0, Config.GRAPH_EXPAND_MAX);
+                if (rankedN.length > 0) {
+                  graphRankMap = new Map(rankedN.map(([s], i) => [s, i + 1]));
+                  const inSet = new Set(bm25Res.rows.map(r => r.source));
+                  const missing = rankedN.map(([s]) => s).filter(s => !inSet.has(s));
+                  const kbMissing  = missing.filter(s => !s.startsWith("memory:"));
+                  const memMissing = missing.filter(s => s.startsWith("memory:"));
+                  if (kbMissing.length > 0) {
+                    const rows2 = (await this.pool.query<{ source: string; content: string }>(
+                      `SELECT source, content FROM knowledge_entries WHERE project_hash = $1 AND source = ANY($2)`,
+                      [projectHash, kbMissing])).rows;
+                    for (const r of rows2) withCos.push({ row: { source: r.source, content: r.content, rank: 0, source_type: "internal" }, cosScore: 0 });
+                  }
+                  for (const s of memMissing) {
+                    const parts = s.split(":");
+                    if (parts.length < 3) continue;
+                    const wm = (await this.pool.query<{ value: string }>(
+                      `SELECT value FROM working_memory WHERE project_hash = $1 AND agent_id = $2 AND key = $3 AND valid_to IS NULL`,
+                      [projectHash, parts[1], parts.slice(2).join(":")])).rows[0];
+                    if (wm) withCos.push({ row: { source: s, content: wm.value, rank: 0, source_type: "internal" }, cosScore: 0 });
+                  }
+                }
+              }
+            } catch { /* kb_edges_pg absent — no graph channel */ }
           }
         }
 
@@ -588,10 +686,12 @@ export class PostgresStore implements Store {
             const br  = bm25RankMap.get(row.source);
             const cr  = cosRankMap?.get(row.source);
             const blr = blRankMap?.get(row.source);
+            const gr  = graphRankMap?.get(row.source);
             hybrid =
               (br  ? Config.RRF_W_BM25     / (K + br)  : 0) +
               (cr  ? Config.RRF_W_VEC      / (K + cr)  : 0) +
-              (blr ? Config.RRF_W_BACKLINK / (K + blr) : 0);
+              (blr ? Config.RRF_W_BACKLINK / (K + blr) : 0) +
+              (gr  ? Config.RRF_W_GRAPH    / (K + gr)  : 0);
           } else {
             hybrid = Config.W_BM25 * (row.rank / maxBm25) + Config.W_COSINE * cosScore + blBoost(row.source);
           }
@@ -789,7 +889,7 @@ export class PostgresStore implements Store {
       `SELECT source, content FROM knowledge_entries WHERE project_hash = $1
        UNION ALL
        SELECT ('memory:' || agent_id || ':' || key) AS source, value AS content
-         FROM working_memory WHERE project_hash = $1`, [projectHash]
+         FROM working_memory WHERE project_hash = $1 AND valid_to IS NULL`, [projectHash]
     )).rows;
     const typed = extractCoReferences(rows).map((e) => ({
       from: e.from, to: e.to, relation: classifyRelation(e.from, e.to, e.matchKind), matchKind: e.matchKind, weight: e.weight,
@@ -797,7 +897,8 @@ export class PostgresStore implements Store {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("DELETE FROM kb_edges_pg     WHERE project_hash = $1", [projectHash]);
+      // v0.37.0 — preserve LLM-extracted entity edges across co-reference rebuilds.
+      await client.query("DELETE FROM kb_edges_pg     WHERE project_hash = $1 AND match_kind <> 'entity'", [projectHash]);
       await client.query("DELETE FROM kb_backlinks_pg WHERE project_hash = $1", [projectHash]);
       const CHUNK = 100;
       for (let i = 0; i < typed.length; i += CHUNK) {
@@ -851,7 +952,7 @@ export class PostgresStore implements Store {
         "SELECT source FROM knowledge_entries WHERE project_hash = $1 ORDER BY created_at DESC LIMIT 300", [projectHash])).rows;
       for (const r of src) ids.add(r.source);
       const wm = (await this.pool.query<{ agent_id: string; key: string }>(
-        "SELECT agent_id, key FROM working_memory WHERE project_hash = $1 ORDER BY importance DESC, created_at DESC LIMIT 200", [projectHash])).rows;
+        "SELECT agent_id, key FROM working_memory WHERE project_hash = $1 AND valid_to IS NULL ORDER BY importance DESC, created_at DESC LIMIT 200", [projectHash])).rows;
       for (const r of wm) ids.add(`memory:${r.agent_id}:${r.key}`); // same naming as eviction-archival sources
       const nodes = [...ids].slice(0, 500).map((id) => ({ id, inDegree: blMap.get(id)?.inDegree ?? 0, weightedIn: blMap.get(id)?.weightedIn ?? 0 }));
       return { nodes, edges };
@@ -886,9 +987,9 @@ export class PostgresStore implements Store {
       params.push(sinceDays);
       recencyClause = ` AND created_at > NOW() - ($${params.length}::int * INTERVAL '1 day')`;
     }
-    const facts = (await this.pool.query<{ key: string; value: string; kind: string | null; resolution_status: string | null }>(
-      `SELECT key, value, kind, resolution_status FROM working_memory
-       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND importance >= 3${recencyClause}
+    const facts = (await this.pool.query<{ key: string; value: string; kind: string | null; resolution_status: string | null; created_at: Date; agent_id: string }>(
+      `SELECT key, value, kind, resolution_status, created_at, agent_id FROM working_memory
+       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND importance >= 3 AND valid_to IS NULL${recencyClause}
        ORDER BY importance DESC, created_at DESC LIMIT $3`, params)).rows;
     if (facts.length < 2) return { scanned: facts.length, flagged: 0, ollamaAvailable: true };
 
@@ -898,7 +999,7 @@ export class PostgresStore implements Store {
       if (!emb) return { scanned: facts.length, flagged: 0, ollamaAvailable: false };
       vectors.set(f.key, emb.vector);
     }
-    const found: Array<{ ka: string; kb: string; sim: number; reason: string; detail: string }> = [];
+    const found: Array<{ ka: string; kb: string; sim: number; reason: string; detail: string; victim: string | null }> = [];
     for (let i = 0; i < facts.length; i++) {
       for (let j = i + 1; j < facts.length; j++) {
         const a = facts[i]!, b = facts[j]!;
@@ -909,18 +1010,48 @@ export class PostgresStore implements Store {
         const conflict = detectConflict(a, b);
         if (!conflict) continue;
         const [ka, kb] = a.key < b.key ? [a.key, b.key] : [b.key, a.key];
-        found.push({ ka, kb, sim, reason: conflict.reason, detail: conflict.detail });
+        // v0.37.0 — clear supersession ⇒ auto-resolve (retire the stale side); else open triage.
+        const victim = Config.AUTO_RESOLVE ? autoResolveVictim(a, b, conflict.reason) : null;
+        found.push({ ka, kb, sim, reason: conflict.reason, detail: conflict.detail, victim });
       }
     }
+    const agentOf = new Map(facts.map((f) => [f.key, f.agent_id]));
+    let flagged = 0;
     for (const f of found) {
+      // Operator override wins forever: a pair previously reviewed (dismissed/acknowledged/
+      // resolved) is never auto-resolved and never re-opened by the scan.
+      const existing = (await this.pool.query<{ status: string }>(
+        `SELECT status FROM memory_contradictions_pg WHERE project_hash = $1 AND agent_id = $2 AND key_a = $3 AND key_b = $4`,
+        [projectHash, safeAgent, f.ka, f.kb])).rows[0];
+      if (existing && existing.status !== "open") continue;
+
+      if (f.victim) {
+        const winner = f.victim === f.ka ? f.kb : f.ka;
+        const retired = await this._retireFactByHash(
+          projectHash, f.victim, agentOf.get(f.victim) ?? "default", winner, "superseded",
+        ).catch(() => false);
+        if (retired) {
+          await this.pool.query(
+            `INSERT INTO memory_contradictions_pg(project_hash, agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by, reviewed_at, resolution_mode)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'resolved','cron',NOW(),'auto')
+             ON CONFLICT (project_hash, agent_id, key_a, key_b) DO UPDATE SET
+               similarity = EXCLUDED.similarity, reason = EXCLUDED.reason, detail = EXCLUDED.detail,
+               status = 'resolved', reviewed_at = NOW(), resolution_mode = 'auto', surfaced_at = NOW()`,
+            [projectHash, safeAgent, f.ka, f.kb, f.sim, f.reason, `Auto-resolved: '${f.victim}' superseded by '${winner}'. ${f.detail}`]);
+          flagged++;
+          continue;
+        }
+        // retire failed (e.g. hash→path unknown) → fall through to open triage
+      }
       await this.pool.query(
         `INSERT INTO memory_contradictions_pg(project_hash, agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7,'open','cron')
          ON CONFLICT (project_hash, agent_id, key_a, key_b) DO UPDATE SET
            similarity = EXCLUDED.similarity, reason = EXCLUDED.reason, detail = EXCLUDED.detail, surfaced_at = NOW()`,
         [projectHash, safeAgent, f.ka, f.kb, f.sim, f.reason, f.detail]);
+      flagged++;
     }
-    return { scanned: facts.length, flagged: found.length, ollamaAvailable: true };
+    return { scanned: facts.length, flagged, ollamaAvailable: true };
   }
 
   /**
@@ -929,7 +1060,7 @@ export class PostgresStore implements Store {
    * recall-time scan) and backfills any empty backlink graphs. Idempotent + best-effort per
    * pair; bails early if Ollama is down (every scan would fail). Run on a schedule by the cron.
    */
-  async runEnrichment(): Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean }> {
+  async runEnrichment(): Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean; entities?: number }> {
     // Scan the SHARED 'default' pool ONCE per project (NOT per agent). Contradictions stored
     // under agent_id='default' surface for every agent via recall's "agent OR default" clause,
     // so there is no per-agent row duplication (scanning per pair inflated 91 distinct conflicts
@@ -950,7 +1081,213 @@ export class PostgresStore implements Store {
     }
     let backfilledProjects = 0;
     try { backfilledProjects = (await this.backfillBacklinks()).projects; } catch { /* best-effort */ }
-    return { projects: projects.length, flagged, backfilledProjects, ollamaDown };
+    // v0.37.0 — keep the flag table and working memory lean:
+    //  - reviewed contradiction rows older than CONTRA_PRUNE_DAYS are deleted (short audit
+    //    window, then gone — the facts' own history lives in the KB archive);
+    //  - retired facts older than RETIRE_PURGE_DAYS are deleted (they were archived to the
+    //    KB at retire time, so this is a purge of the tombstone row, not of the knowledge).
+    try {
+      await this.pool.query(
+        `DELETE FROM memory_contradictions_pg WHERE status <> 'open' AND reviewed_at < NOW() - ($1::int * INTERVAL '1 day')`,
+        [Config.CONTRA_PRUNE_DAYS]);
+      await this.pool.query(
+        `DELETE FROM working_memory WHERE valid_to IS NOT NULL AND valid_to < NOW() - ($1::int * INTERVAL '1 day')`,
+        [Config.RETIRE_PURGE_DAYS]);
+    } catch { /* best-effort */ }
+    // v0.37.0 — budgeted semantic entity extraction over unscanned KB entries.
+    let entities = 0;
+    if (!ollamaDown) {
+      try {
+        const er = await this.runEntityExtraction();
+        entities = er.edges;
+        if (er.ollamaDown) ollamaDown = true;
+      } catch { /* best-effort */ }
+    }
+    // v0.37.0 — refresh community summaries for up to 2 projects with stale/missing
+    // summaries per cycle (powers zc_search mode:"global").
+    if (!ollamaDown) {
+      try {
+        const stale = (await this.pool.query<{ project_hash: string }>(
+          `SELECT DISTINCT e.project_hash FROM kb_edges_pg e
+            WHERE NOT EXISTS (SELECT 1 FROM kb_community_summaries_pg s
+                               WHERE s.project_hash = e.project_hash AND s.computed_at > NOW() - INTERVAL '24 hours')
+            LIMIT 2`)).rows;
+        for (const p of stale) {
+          const r2 = await this.refreshCommunitySummaries(p.project_hash);
+          if (r2.ollamaDown) { ollamaDown = true; break; }
+        }
+      } catch { /* best-effort */ }
+    }
+    // v0.37.0 — automated trajectory→skill discovery (6h-gated internally, zero-LLM).
+    try { await this.runSkillDiscovery(); } catch { /* best-effort */ }
+    return { projects: projects.length, flagged, backfilledProjects, ollamaDown, entities };
+  }
+
+  /**
+   * v0.37.0 — budgeted LLM entity/relation extraction (local Ollama only). Scans up to
+   * ENTITY_BUDGET knowledge entries that have never been entity-scanned, persists
+   * `match_kind='entity'` edges (preserved across co-reference rebuilds), marks the
+   * entries scanned, and refreshes the backlink aggregate for the touched projects.
+   * Failed extractions are NOT marked — they retry next cycle.
+   */
+  async runEntityExtraction(budget: number = ENTITY_BUDGET): Promise<{ scanned: number; edges: number; ollamaDown: boolean }> {
+    if (!ENTITY_EXTRACT_ENABLED) return { scanned: 0, edges: 0, ollamaDown: false };
+    const rows = (await this.pool.query<{ project_hash: string; source: string; content: string }>(
+      `SELECT ke.project_hash, ke.source, ke.content
+         FROM knowledge_entries ke
+         JOIN source_meta sm ON sm.project_hash = ke.project_hash AND sm.source = ke.source
+        WHERE sm.entity_scanned_at IS NULL AND ke.source NOT LIKE '[SESSION_SUMMARY]%'
+        ORDER BY ke.created_at DESC LIMIT $1`, [budget])).rows;
+    let scanned = 0, edges = 0;
+    const touched = new Set<string>();
+    for (const r of rows) {
+      const x = await llmExtractEntities(r.content);
+      if (x === null) return { scanned, edges, ollamaDown: true };
+      for (const e of entityEdgesFor(r.source, x)) {
+        await this.pool.query(
+          `INSERT INTO kb_edges_pg(project_hash, from_source, to_source, relation_type, match_kind, weight)
+           VALUES ($1,$2,$3,$4,'entity',$5)
+           ON CONFLICT (project_hash, from_source, to_source, relation_type) DO UPDATE SET
+             weight = kb_edges_pg.weight + 1, computed_at = NOW()`,
+          [r.project_hash, e.from, e.to, e.relation, e.weight]);
+        edges++;
+      }
+      await this.pool.query(
+        `UPDATE source_meta SET entity_scanned_at = NOW() WHERE project_hash = $1 AND source = $2`,
+        [r.project_hash, r.source]);
+      scanned++;
+      touched.add(r.project_hash);
+    }
+    // Refresh the backlink aggregate so entity hubs join the search boost + graph sizing.
+    for (const h of touched) {
+      try {
+        await this.pool.query(`DELETE FROM kb_backlinks_pg WHERE project_hash = $1`, [h]);
+        await this.pool.query(
+          `INSERT INTO kb_backlinks_pg(project_hash, source, in_degree, weighted_in)
+           SELECT $1, to_source, COUNT(DISTINCT from_source), SUM(weight)
+           FROM kb_edges_pg WHERE project_hash = $1 GROUP BY to_source
+           ON CONFLICT (project_hash, source) DO UPDATE SET
+             in_degree = EXCLUDED.in_degree, weighted_in = EXCLUDED.weighted_in, computed_at = NOW()`, [h]);
+      } catch { /* best-effort per project */ }
+    }
+    return { scanned, edges, ollamaDown: false };
+  }
+
+  /**
+   * v0.37.0 — (re)compute Louvain communities over KB + live memory and pre-summarize the
+   * top clusters (one budgeted local-LLM call each). These summaries power globalSearch.
+   */
+  async refreshCommunitySummaries(projectHash: string): Promise<{ communities: number; summarized: number; ollamaDown: boolean }> {
+    const rows = (await this.pool.query<{ source: string; content: string }>(
+      `SELECT source, content FROM knowledge_entries WHERE project_hash = $1
+       UNION ALL
+       SELECT ('memory:' || agent_id || ':' || key) AS source, value AS content
+         FROM working_memory WHERE project_hash = $1 AND valid_to IS NULL`, [projectHash])).rows;
+    const det = detectCommunitiesFromRows(rows);
+    // v0.37.0 E2E fix: singleton clusters COUNT (an isolated research doc is still a theme —
+    // dropping size-1 communities made global mode blind to them on small projects). Cap 8,
+    // biggest first, so singletons only fill remaining slots.
+    const top = det.communities.filter((c) => c.size >= 1).slice(0, 8);
+    if (top.length === 0) return { communities: 0, summarized: 0, ollamaDown: false };
+    const contentBySource = new Map(rows.map((r) => [r.source, r.content]));
+    const membersOf = new Map<number, Array<{ source: string; snippet: string }>>();
+    for (const a of det.assignments) {
+      const list = membersOf.get(a.communityId) ?? [];
+      if (list.length < 12) list.push({ source: a.source, snippet: (contentBySource.get(a.source) ?? "").slice(0, 300) });
+      membersOf.set(a.communityId, list);
+    }
+    const out: Array<{ id: number; size: number; samples: string; summary: string }> = [];
+    for (const c of top) {
+      const s = await summarizeCommunity(membersOf.get(c.id) ?? []);
+      if (s === null) return { communities: top.length, summarized: out.length, ollamaDown: true };
+      out.push({ id: c.id, size: c.size, samples: c.sampleSources.slice(0, 4).join(","), summary: s });
+    }
+    await this.pool.query(`DELETE FROM kb_community_summaries_pg WHERE project_hash = $1`, [projectHash]);
+    for (const o of out) {
+      await this.pool.query(
+        `INSERT INTO kb_community_summaries_pg(project_hash, community_id, size, sample_sources, summary)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (project_hash, community_id) DO UPDATE SET
+           size = EXCLUDED.size, sample_sources = EXCLUDED.sample_sources, summary = EXCLUDED.summary, computed_at = NOW()`,
+        [projectHash, o.id, o.size, o.samples, o.summary]);
+    }
+    return { communities: top.length, summarized: out.length, ollamaDown: false };
+  }
+
+  /**
+   * v0.37.0 — corpus-level Q&A over the pre-computed community summaries (GraphRAG-style
+   * global search at local cost) + DRIFT-lite follow-up queries. Generates summaries on
+   * demand for a project that has never been summarized. Null ⇒ Ollama down / no corpus.
+   */
+  async globalSearch(projectPath: string, question: string): Promise<{ answer: string; followups: string[]; communities: CommunitySummaryRow[] } | null> {
+    const projectHash = ph(projectPath);
+    const fetchSums = async () => (await this.pool.query<CommunitySummaryRow>(
+      `SELECT community_id, size, sample_sources, summary FROM kb_community_summaries_pg
+        WHERE project_hash = $1 ORDER BY size DESC LIMIT 12`, [projectHash])).rows;
+    let sums = await fetchSums();
+    if (sums.length === 0) {
+      await this.refreshCommunitySummaries(projectHash).catch(() => undefined);
+      sums = await fetchSums();
+    }
+    if (sums.length === 0) return null;
+    const res = await answerGlobal(question, sums);
+    return res ? { ...res, communities: sums } : null;
+  }
+
+  /**
+   * v0.37.0 — SPOTTER GRADUATION: the trajectory→skill discovery loop runs automatically.
+   * Every ≥6h the cron (a) queues failure-cluster candidates (cooldown-gated internally),
+   * (b) runs the zero-LLM success-pattern detectors over the last 7 days of tool calls, and
+   * (c) auto-FILES high-confidence signals (confidence ≥ 0.6, ≥3 occurrences, deduped against
+   * active skills + open candidates) into skill_candidates_pg — where the EXISTING operator
+   * flow takes over (dashboard: generate body → approve → admission scan). Discovery is
+   * automatic; authoring stays evidence-gated and human-approved. ZC_SPOTTER_AUTO=0 disables.
+   */
+  async runSkillDiscovery(): Promise<{ signals: number; filed: number }> {
+    if ((process.env["ZC_SPOTTER_AUTO"] ?? "1") === "0") return { signals: 0, filed: 0 };
+    // Gate: at most one auto dry-run per 6 hours.
+    const last = (await this.pool.query<{ ts: Date | null }>(
+      `SELECT MAX(started_at) AS ts FROM skill_spotter_runs_pg WHERE mode = 'dry-run'`)).rows[0];
+    if (last?.ts && Date.now() - new Date(last.ts).getTime() < 6 * 3600_000) return { signals: 0, filed: 0 };
+
+    try {
+      const { detectAndQueueSkillCandidates } = await import("./skill_candidate_detector.js");
+      await detectAndQueueSkillCandidates();
+    } catch { /* failure-cluster path is best-effort */ }
+
+    const { runSpotterDryRun } = await import("./skills/spotter/run.js");
+    const summary = await runSpotterDryRun({ windowDays: 7 });
+
+    const sigs = (await this.pool.query<{ signal_id: number; occurrences: number; confidence: number; proposed_trigger: string | null; proposed_name_hint: string | null; evidence: unknown }>(
+      `SELECT signal_id, occurrences, confidence, proposed_trigger, proposed_name_hint, evidence
+         FROM skill_spotter_signals_pg
+        WHERE run_id = $1 AND confidence >= 0.6 AND occurrences >= 3 AND proposed_name_hint IS NOT NULL
+        ORDER BY confidence DESC LIMIT 5`, [summary.run_id])).rows;
+    let filed = 0;
+    for (const s of sigs) {
+      const hint = String(s.proposed_name_hint ?? "").slice(0, 60);
+      if (!hint) continue;
+      // Dedup: skip when an active skill or an open candidate already covers this name.
+      const dupSkill = (await this.pool.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM skills_pg WHERE archived_at IS NULL AND name ILIKE $1`, [`%${hint.slice(0, 30)}%`])).rows[0];
+      const dupCand = (await this.pool.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM skill_candidates_pg WHERE status IN ('pending','ready') AND headline ILIKE $1`, [`%${hint.slice(0, 30)}%`])).rows[0];
+      if (Number(dupSkill?.n ?? 0) > 0 || Number(dupCand?.n ?? 0) > 0) continue;
+      const candidateId = randomUUID();
+      await this.pool.query(
+        `INSERT INTO skill_candidates_pg (
+           candidate_id, project_hash, target_role, rejection_count,
+           first_rejection_at, last_rejection_at, rejection_outcomes, headline, status
+         ) VALUES ($1, 'spotter-auto', 'developer', 0, now(), now(), $2::jsonb, $3, 'pending')`,
+        [candidateId,
+         JSON.stringify({ source: "spotter-cron", signal_id: s.signal_id, occurrences: s.occurrences, confidence: s.confidence, evidence: s.evidence }),
+         `[spotter-auto] ${hint}: ${(s.proposed_trigger ?? "repeated successful pattern").slice(0, 150)} (${s.occurrences}x, conf ${s.confidence})`]);
+      await this.pool.query(
+        `UPDATE skill_spotter_signals_pg SET outcome = 'filed_candidate', outcome_reason = 'auto-filed by enrichment cron (v0.37.0)' WHERE signal_id = $1`,
+        [s.signal_id]);
+      filed++;
+    }
+    return { signals: summary.signals_emitted, filed };
   }
 
   async listContradictions(projectPath: string, agentId: string): Promise<Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>> {
@@ -964,15 +1301,15 @@ export class PostgresStore implements Store {
     } catch { return []; }
   }
 
-  async reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved"): Promise<number> {
+  async reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved", mode?: string): Promise<number> {
     const projectHash = ph(projectPath);
     const safeAgent = sanitize(agentId, 64);
     const [ka, kb] = keyA < keyB ? [keyA, keyB] : [keyB, keyA];
     try {
       const r = await this.pool.query(
-        `UPDATE memory_contradictions_pg SET status = $1, reviewed_at = NOW()
+        `UPDATE memory_contradictions_pg SET status = $1, reviewed_at = NOW(), resolution_mode = $6
          WHERE project_hash = $2 AND agent_id = $3 AND key_a = $4 AND key_b = $5`,
-        [status, projectHash, safeAgent, ka, kb]);
+        [status, projectHash, safeAgent, ka, kb, mode ?? null]);
       return r.rowCount ?? 0;
     } catch { return 0; }
   }

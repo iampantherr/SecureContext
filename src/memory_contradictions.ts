@@ -24,9 +24,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { openDb } from "./knowledge.js";
-import { recallWorkingMemory, type MemoryFact } from "./memory.js";
+import { recallWorkingMemory, retireFact, type MemoryFact } from "./memory.js";
 import { getEmbedding, cosineSimilarity } from "./embedder.js";
-import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict } from "./contradiction_heuristics.js";
+import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict, autoResolveVictim } from "./contradiction_heuristics.js";
+import { Config } from "./config.js";
 
 export interface OpenContradiction {
   key_a:      string;
@@ -54,6 +55,7 @@ function ensureTable(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_mc_status ON memory_contradictions(agent_id, status, surfaced_at DESC);
   `);
+  try { db.exec(`ALTER TABLE memory_contradictions ADD COLUMN resolution_mode TEXT`); } catch { /* exists */ }
 }
 
 /**
@@ -79,7 +81,7 @@ export async function detectContradictions(
     vectors.set(f.key, emb.vector);
   }
 
-  const found: Array<{ a: MemoryFact; b: MemoryFact; sim: number; reason: string; detail: string }> = [];
+  const found: Array<{ a: MemoryFact; b: MemoryFact; sim: number; reason: string; detail: string; victim: string | null }> = [];
   for (let i = 0; i < facts.length; i++) {
     for (let j = i + 1; j < facts.length; j++) {
       const a = facts[i]!, b = facts[j]!;
@@ -88,14 +90,17 @@ export async function detectContradictions(
       const sim = cosineSimilarity(va, vb);
       if (sim < SIM_HIGH) continue;
       const conflict = detectConflict(a, b);
-      if (conflict) found.push({ a, b, sim, reason: conflict.reason, detail: conflict.detail });
+      if (!conflict) continue;
+      // v0.37.0 — clear supersession ⇒ auto-resolve (retire the stale side); else open triage.
+      const victim = Config.AUTO_RESOLVE ? autoResolveVictim(a, b, conflict.reason) : null;
+      found.push({ a, b, sim, reason: conflict.reason, detail: conflict.detail, victim });
     }
   }
 
   const db = openDb(projectPath);
   ensureTable(db);
   const now = new Date().toISOString();
-  const stmt = db.prepare(`
+  const openStmt = db.prepare(`
     INSERT INTO memory_contradictions(agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by, surfaced_at)
     VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
     ON CONFLICT(agent_id, key_a, key_b) DO UPDATE SET
@@ -104,11 +109,39 @@ export async function detectContradictions(
       detail      = excluded.detail,
       surfaced_at = excluded.surfaced_at
   `);
+  const autoStmt = db.prepare(`
+    INSERT INTO memory_contradictions(agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by, surfaced_at, reviewed_at, resolution_mode)
+    VALUES (?, ?, ?, ?, ?, ?, 'resolved', ?, ?, ?, 'auto')
+    ON CONFLICT(agent_id, key_a, key_b) DO UPDATE SET
+      similarity      = excluded.similarity,
+      reason          = excluded.reason,
+      detail          = excluded.detail,
+      status          = 'resolved',
+      reviewed_at     = excluded.reviewed_at,
+      resolution_mode = 'auto',
+      surfaced_at     = excluded.surfaced_at
+  `);
+  const statusStmt = db.prepare(`SELECT status FROM memory_contradictions WHERE agent_id = ? AND key_a = ? AND key_b = ?`);
+  const retirements: Array<{ victim: string; victimAgent: string; winner: string }> = [];
   for (const f of found) {
     const [ka, kb] = f.a.key < f.b.key ? [f.a.key, f.b.key] : [f.b.key, f.a.key];
-    stmt.run(agentId, ka, kb, f.sim, f.reason, f.detail, surfacedBy, now);
+    // Operator override wins forever: previously-reviewed pairs are never auto-resolved or re-opened.
+    const existing = statusStmt.get(agentId, ka, kb) as { status: string } | undefined;
+    if (existing && existing.status !== "open") continue;
+    if (f.victim) {
+      const winner = f.victim === f.a.key ? f.b.key : f.a.key;
+      const victimAgent = (f.victim === f.a.key ? f.a.agent_id : f.b.agent_id) ?? agentId;
+      autoStmt.run(agentId, ka, kb, f.sim, f.reason, `Auto-resolved: '${f.victim}' superseded by '${winner}'. ${f.detail}`, surfacedBy, now, now);
+      retirements.push({ victim: f.victim, victimAgent, winner });
+    } else {
+      openStmt.run(agentId, ka, kb, f.sim, f.reason, f.detail, surfacedBy, now);
+    }
   }
   db.close();
+  // Retire AFTER closing this db handle (retireFact opens its own; avoids nested handles on Windows).
+  for (const r of retirements) {
+    try { retireFact(projectPath, r.victim, r.victimAgent, r.winner, "superseded"); } catch { /* best-effort */ }
+  }
 
   // Best-effort PG mirror (parity). Contradictions are rare → a handful of rows.
   mirrorContradictionsPgAsync(projectPath, agentId, found.map((f) => {
@@ -162,15 +195,17 @@ export function reviewContradiction(
   keyA: string,
   keyB: string,
   status: "dismissed" | "acknowledged" | "resolved",
+  mode?: string,
 ): number {
   const [ka, kb] = keyA < keyB ? [keyA, keyB] : [keyB, keyA];
   const db = openDb(projectPath);
+  ensureTable(db);
   let changed = 0;
   try {
     const r = db.prepare(`
-      UPDATE memory_contradictions SET status = ?, reviewed_at = ?
+      UPDATE memory_contradictions SET status = ?, reviewed_at = ?, resolution_mode = ?
       WHERE agent_id = ? AND key_a = ? AND key_b = ?
-    `).run(status, new Date().toISOString(), agentId, ka, kb) as { changes: number };
+    `).run(status, new Date().toISOString(), mode ?? null, agentId, ka, kb) as { changes: number };
     changed = r.changes;
   } catch { /* table absent */ }
   db.close();

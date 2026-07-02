@@ -21,6 +21,33 @@ export interface FactLite {
   value:              string;
   kind?:              string | null;
   resolution_status?: string | null;
+  created_at?:        string | Date | null;  // needed by auto-resolution (PG returns Date)
+}
+
+/**
+ * v0.37.0 — CONSERVATIVE auto-resolution: when a flagged pair has a clear supersession,
+ * return the key of the fact to RETIRE (the stale side); return null when ambiguous
+ * (→ operator triage, exactly as before). Clear supersession requires ALL of:
+ *   - the conflict is a polarity flip or decision reversal (never resolution_conflict —
+ *     a falsified-claim clash is a judgment call for a human),
+ *   - a strict time ordering (> 60s apart, so same-burst writes stay ambiguous),
+ *   - the NEWER fact carries an action-reversal verb ("removed/reverted/dropped…") and
+ *     the OLDER does not — i.e. the newer fact explicitly undoes the older state.
+ * The retire is non-destructive (valid_to + KB archival + dashboard Undo), which is what
+ * makes auto-application acceptable here at all.
+ */
+export function autoResolveVictim(a: FactLite, b: FactLite, reason: string): string | null {
+  if (reason !== "semantic_conflict" && reason !== "decision_reversal") return null;
+  const ts = (f: FactLite): number => {
+    if (f.created_at == null) return NaN;
+    return f.created_at instanceof Date ? f.created_at.getTime() : Date.parse(String(f.created_at));
+  };
+  const ta = ts(a), tb = ts(b);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb) || Math.abs(ta - tb) < 60_000) return null;
+  const newer = ta > tb ? a : b;
+  const older = ta > tb ? b : a;
+  if (hasNegation(newer.value) && !hasNegation(older.value)) return older.key;
+  return null;
 }
 
 // semantic_conflict fires on an ACTION-REVERSAL polarity flip (one fact undoes what the

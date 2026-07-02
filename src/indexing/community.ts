@@ -169,10 +169,15 @@ export function extractCoReferences(rows: Array<{ source: string; content: strin
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function buildKnowledgeGraph(db: DatabaseSync): any {
-  const graph = new Graph({ type: "undirected", multi: false, allowSelfLoops: false });
-
   type Row = { source: string; content: string };
   const rows = db.prepare("SELECT source, content FROM knowledge").all() as Row[];
+  return buildGraphFromRows(rows);
+}
+
+/** v0.37.0 — row-based graph construction so PG (and any store) can run Louvain too. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function buildGraphFromRows(rows: Array<{ source: string; content: string }>): any {
+  const graph = new Graph({ type: "undirected", multi: false, allowSelfLoops: false });
 
   // Add all nodes first (so edges can reference them)
   for (const r of rows) {
@@ -203,8 +208,15 @@ function buildKnowledgeGraph(db: DatabaseSync): any {
  * Returns assignments ordered by community size descending.
  */
 export function detectCommunities(db: DatabaseSync): CommunityDetectionResult {
+  type Row = { source: string; content: string };
+  const rows = db.prepare("SELECT source, content FROM knowledge").all() as Row[];
+  return detectCommunitiesFromRows(rows);
+}
+
+/** v0.37.0 — store-agnostic Louvain over {source, content} rows (PG parity). */
+export function detectCommunitiesFromRows(rows: Array<{ source: string; content: string }>): CommunityDetectionResult {
   const start = Date.now();
-  const graph = buildKnowledgeGraph(db);
+  const graph = buildGraphFromRows(rows);
 
   if (graph.order === 0) {
     return {

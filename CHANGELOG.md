@@ -4,6 +4,58 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.37.0] — 2026-07-02 — Tier-1 competitive parity: self-correcting temporal memory, graph retrieval, entities, global Q&A, auto skill discovery, scanner breadth
+
+Six features that close every functional gap the July-2026 competitive research found
+(Zep/Graphiti's temporal model + graph retrieval, GraphRAG's global search, Letta's skill
+learning, Snyk's scan breadth) — all default-on, all verified with a live terminal-agent E2E.
+
+### Added
+- **Self-correcting memory v2 (temporal fact retirement).** `working_memory` gains
+  `valid_to`/`superseded_by`/`retired_reason` (SQLite mig 34 / PG mig 32). When the contradiction
+  scan finds a CLEAR supersession (strictly newer fact carrying an action-reversal verb the older
+  lacks, >60s apart), the stale fact is **auto-retired**: dropped from recall/stats/eviction/scans,
+  archived to the KB, flagged `resolved/auto` — with a dashboard **Undo**. Ambiguous pairs still go
+  to triage, whose actions now ACT ON MEMORY: **Keep left / Keep right** retire the losing fact
+  (archived, undoable); **Not a conflict** dismisses forever (operator override is never re-auto-
+  resolved). Re-asserting a retired key revives it. The enrichment cycle prunes reviewed flags
+  (>30d) and purges retired tombstones (>30d, already archived). `ZC_AUTO_RESOLVE=0` reverts to
+  flag-only.
+- **Graph retrieval channel.** A 4th RRF list: 1-hop `kb_edges` neighbors of the top candidates
+  (ranked by edge weight) join the fusion — and out-of-set neighbors (call-sites, linked live
+  memory facts) are pulled into the candidate pool, making retrieval associative. Both stores.
+  `ZC_RRF_W_GRAPH=0` disables.
+- **Semantic entity extraction (local-LLM layer).** The enrichment cron runs budgeted Ollama
+  extraction (`ZC_ENTITY_BUDGET`/cycle) over unscanned KB entries → `entity:<slug>` nodes + typed
+  relations (`match_kind='entity'`, preserved across co-reference rebuilds, feeding the same
+  backlink boost + graph UI). SQLite parity via `zc_graph_rebuild`. `ZC_ENTITY_EXTRACT=0` disables.
+- **Community query mode.** `zc_search {mode:"global"}` answers corpus-level questions by
+  map-reducing over pre-computed Louvain-community summaries (cron-refreshed, on-demand fallback)
+  and returns DRIFT-lite follow-up queries. Singleton clusters count (an isolated research doc is
+  still a theme). Both stores.
+- **Automated trajectory→skill discovery (spotter graduation).** The enrichment cycle (≥6h apart)
+  auto-runs the zero-LLM success-pattern detectors + the failure-cluster detector and **auto-files
+  high-confidence signals** (conf ≥0.6, ≥3 occurrences, deduped vs skills+candidates) into the
+  existing operator candidates queue — discovery automatic, authoring human-gated.
+  `ZC_SPOTTER_AUTO=0` disables.
+- **Admission-scan breadth: 8 → 11 checks.** New: `exfil_imperative` (BLOCK — natural-language
+  prose instructing sensitive-data movement, invisible to AST scanning), `toxic_tool_flow` (warn —
+  read+network+write-out allowed_tools combinations), `trigger_shadowing` (warn — near-duplicate
+  trigger/description vs an active skill = invocation-hijack risk). Thresholds are now RELATIVE
+  (≥2 warn-failures ⇒ review) so the old 8-check policy is preserved. Marketplace pulls gain
+  **upstream pinning**: a body-hash drift since the last vetted pull is logged + recorded on the
+  pull row (rug-pull visibility).
+
+### Verified (live terminal-agent E2E + fix loop)
+- A real developer agent's own writes triggered auto-retirement (its second recall contained ONLY
+  the surviving fact); its own `zc_search` surfaced a zero-keyword-overlap call-site via the graph
+  channel; its `mode:"global"` call returned a cluster-cited corpus answer.
+- E2E caught + fixed one real bug: singleton communities were excluded from global mode.
+- Dashboard browser E2E: auto-resolved section + Undo (fact revived, pair reopened), Keep-right
+  (fact retired + archived) — all persisted correctly.
+- Entity extraction on the agent's project produced 69 edges (`entity:pro-tier`,
+  `entity:session-token`, …). Suite 865/868 (3 pre-existing fixtures).
+
 ## [0.36.0] — 2026-07-02 — Memory-aware edge extraction
 
 Working-memory facts become first-class knowledge-graph sources: what an agent's memory

@@ -161,14 +161,24 @@ export interface Store {
   backfillBacklinks?(): Promise<{ projects: number; edges: number }>;
   /** Optional Tier-2 #6 enrichment cycle (run by the cron): re-scan contradictions for every
    *  active (project,agent) pair + backfill empty backlink graphs. PG-native. */
-  runEnrichment?(): Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean }>;
+  runEnrichment?(): Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean; entities?: number }>;
   graphData(projectPath: string): Promise<{ nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> }>;
   backlinksFor(projectPath: string, source: string, limit: number): Promise<{ inDegree: number; weightedIn: number; inbound: Array<{ from: string; relation: string; weight: number }> } | null>;
+
+  // ── Community query mode (v0.37.0) ───────────────────────────────────────────
+  /** Corpus-level Q&A over pre-computed Louvain community summaries (+ DRIFT-lite follow-ups). */
+  globalSearch(projectPath: string, question: string): Promise<{ answer: string; followups: string[]; communities: Array<{ community_id: number; size: number; sample_sources: string; summary: string }> } | null>;
+
+  // ── Temporal fact retirement (v0.37.0) ───────────────────────────────────────
+  /** Retire a fact (valid_to close-out + KB archival, non-destructive). Returns false if no live fact. */
+  retireFact(projectPath: string, key: string, agentId: string, supersededBy: string | null, reason: string): Promise<boolean>;
+  /** Undo a retirement (clears valid_to). Returns false if the fact wasn't retired. */
+  reviveFact(projectPath: string, key: string, agentId: string): Promise<boolean>;
 
   // ── Memory contradictions (Tier-1 B) ─────────────────────────────────────────
   scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }>;
   listContradictions(projectPath: string, agentId: string): Promise<Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>>;
-  reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved"): Promise<number>;
+  reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved", mode?: string): Promise<number>;
 
   // ── Broadcasts ──────────────────────────────────────────────────────────────
   broadcast(projectPath: string, type: BroadcastType, agentId: string, opts: BroadcastOptions): Promise<BroadcastMessage>;

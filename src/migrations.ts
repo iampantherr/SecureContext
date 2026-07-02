@@ -1057,6 +1057,31 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 34,
+    description: "v0.37.0: temporal fact retirement — valid_to/superseded_by/retired_reason on working_memory + resolution_mode on memory_contradictions (mirrors PG migration 32)",
+    up: (db) => {
+      const safeAdd = (table: string, col: string, ddl: string) => {
+        try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`); } catch { /* exists / table absent */ }
+      };
+      safeAdd("working_memory", "valid_to",       `TEXT`);
+      safeAdd("working_memory", "superseded_by",  `TEXT`);
+      safeAdd("working_memory", "retired_reason", `TEXT`);
+      safeAdd("memory_contradictions", "resolution_mode", `TEXT`);
+      safeAdd("source_meta", "entity_scanned_at", `TEXT`);  // v0.37.0 entity-extraction marker
+      try { db.exec(`CREATE INDEX IF NOT EXISTS idx_wm_live ON working_memory(agent_id, valid_to)`); } catch { /* table absent */ }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS community_summaries (
+          community_id   INTEGER PRIMARY KEY,
+          size           INTEGER NOT NULL,
+          sample_sources TEXT    NOT NULL,
+          summary        TEXT    NOT NULL,
+          computed_at    TEXT    NOT NULL
+        );
+      `);
+    },
+  },
+
 ];
 
 /**
