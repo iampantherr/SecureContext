@@ -211,6 +211,11 @@ export function getRecentSkillRuns(db: DatabaseSync, skill_id: string, limit = 2
     status:        r.status as SkillRun["status"],
     failure_trace: (r.failure_trace as string) ?? null,
     ts:            r.ts as string,
+    // v0.39.0 — evidence must flow through: the learned-helplessness guard reads
+    // evidence.transient to exclude infra-blip failures from the mutation trigger.
+    evidence:      typeof r.evidence === "string"
+      ? (() => { try { return JSON.parse(r.evidence as string) as Record<string, unknown>; } catch { return null; } })()
+      : null,
   }));
 }
 

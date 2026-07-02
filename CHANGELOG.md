@@ -4,6 +4,35 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.39.0] — 2026-07-02 — Tier-3: embedding dedup + model migration, L2 progressive disclosure, mutator learned-helplessness guard, trajectory export
+
+### Added
+- **Content-addressable embedding dedup + safe model migration.** `embeddings` gains
+  `content_hash` (SQLite mig 36 / PG mig 34). Re-indexing identical content for the same source
+  and active model now SKIPS the Ollama embed call entirely (hash match) — bulk re-index of an
+  unchanged project costs zero embedding compute. When `ZC_EMBED_MODEL` changes, the enrichment
+  cron's `reembedStaleModels` re-embeds rows from the old model in bounded batches (40/cycle)
+  and prunes orphans whose source content is gone — no more silent dimension-mismatch rot.
+- **L2 progressive disclosure.** `zc_file_summary` gains a `symbol` param: ask for one
+  function/class/method and get ONLY that declaration's lines
+  (`[L2 · path · 'symbol' · lines a–b of n]`), brace-balanced for C-family syntax with an
+  indent fallback for Python. The Notebook ladder is now L0 (1-line) → L1 (~5-line) → L2
+  (one symbol) → raw `force_full_read` — deep reads no longer force a whole-file context hit.
+- **Mutator learned-helplessness guard.** Transient infra failures (timeouts, ECONNREFUSED,
+  429/502/503/504, HMAC-block, Ollama/Docker down, OOM) no longer count toward the
+  3-failures mutation trigger. `zc_record_skill_outcome` auto-tags failed/timeout runs whose
+  trace matches the transient lexicon (`evidence.transient=true`, also settable explicitly),
+  and `checkMutationGuardrails` excludes them — a one-off network blip can no longer rewrite
+  a healthy skill's body.
+- **Trajectory export.** `GET /api/v1/trajectories/export?project=…` streams the HMAC-chained
+  tool-call log as session-grouped JSONL (one line per session: events with `row_hash`, joined
+  outcome evidence) — training/eval-grade agent trajectories with tamper-evidence built in.
+
+### Verified
+- Real terminal-agent E2E on live agents (see release notes); unit: transient-vs-real
+  mutation triggers, identical-content skip + changed-content re-embed, symbol slicing.
+  Tests 865/868 (3 pre-existing fixtures).
+
 ## [0.38.0] — 2026-07-02 — Tier-2: per-claim citations, forget recovery window, A2A protocol compat, OTLP audit export
 
 ### Added

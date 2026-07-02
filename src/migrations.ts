@@ -1090,6 +1090,14 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 36,
+    description: "v0.39.0: content-addressable embeddings — content_hash column enables dedup (skip re-embedding identical content) + explicit model-migration detection (mirrors PG migration 34)",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE embeddings ADD COLUMN content_hash TEXT`); } catch { /* exists / table absent */ }
+    },
+  },
+
 ];
 
 /**

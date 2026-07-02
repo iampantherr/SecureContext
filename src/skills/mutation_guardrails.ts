@@ -22,6 +22,17 @@
 import type { DatabaseSync } from "node:sqlite";
 import { getRecentSkillRuns, getRecentMutations } from "./storage.js";
 
+/**
+ * v0.39.0 — transient-failure lexicon for the learned-helplessness guard: environment
+ * problems that say nothing about skill quality. Shared by the guardrails filter and the
+ * zc_record_skill_outcome tagger.
+ */
+const TRANSIENT_FAILURE = /(timeout|timed[- ]?out|econnrefused|econnreset|enotfound|etimedout|network (error|unreachable|issue)|rate[- ]?limit|429|502|503|504|hmac.{0,24}(block|fail|verif)|ollama.{0,24}(down|unavailable|unreachable|not running)|docker.{0,24}(not running|daemon|socket)|connection (refused|reset|closed)|disk full|no space left|out of memory|oom[- ]?kill|dns (failure|error)|service unavailable|temporar(y|ily) (failure|unavailable))/i;
+
+export function isTransientFailure(text: string | null | undefined): boolean {
+  return !!text && TRANSIENT_FAILURE.test(text);
+}
+
 export interface GuardrailDecision {
   /** True iff all guardrails pass; safe to enqueue. */
   trigger: boolean;
@@ -82,8 +93,21 @@ export function checkMutationGuardrails(
   }
 
   // 2. Failure threshold
+  // v0.39.0 — LEARNED-HELPLESSNESS GUARD: transient infra failures (network blip, Ollama
+  // down, rate limit, HMAC-hook outage, …) do NOT count toward the mutation trigger — a
+  // one-off environment problem must never durably mutate a healthy skill body. Runs are
+  // excluded when tagged transient at record time (evidence.transient) or when their
+  // failure trace matches the transient lexicon (covers legacy/untagged rows).
   const recentRuns = getRecentSkillRuns(db, skill_id, FAILURE_WINDOW);
-  const failures = recentRuns.filter((r) => r.status !== "succeeded" || (r.outcome_score !== null && r.outcome_score < 0.5)).length;
+  const isTransientRun = (r: { failure_trace: string | null }): boolean => {
+    const ev = (r as unknown as { evidence?: unknown }).evidence;
+    const obj = typeof ev === "string" ? (() => { try { return JSON.parse(ev); } catch { return null; } })() : ev;
+    if (obj && typeof obj === "object" && (obj as { transient?: unknown }).transient === true) return true;
+    return isTransientFailure(r.failure_trace);
+  };
+  const failures = recentRuns.filter((r) =>
+    (r.status !== "succeeded" || (r.outcome_score !== null && r.outcome_score < 0.5)) && !isTransientRun(r)
+  ).length;
   if (failures < FAILURE_THRESHOLD) {
     return {
       trigger: false,

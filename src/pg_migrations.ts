@@ -976,6 +976,14 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 34,
+    description: "v0.39.0: content-addressable embeddings — content_hash for dedup + model migration (mirrors SQLite migration 36)",
+    up: async (client) => {
+      await client.query(`ALTER TABLE embeddings ADD COLUMN IF NOT EXISTS content_hash TEXT`);
+    },
+  },
+
 ];
 
 /**

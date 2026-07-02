@@ -160,20 +160,40 @@ async function storeEmbeddingAsync(
   content: string,
   source: string
 ): Promise<void> {
+  // v0.39.0 — CONTENT-ADDRESSABLE dedup: SHA-256(content) is stored alongside each vector.
+  // Re-indexing UNCHANGED content (postedit hooks, bulk re-index, retire-archival) now skips
+  // the Ollama call entirely instead of re-embedding identical bytes — and a model change is
+  // detected explicitly (hash matches, model doesn't ⇒ re-embed) rather than via silent drift.
+  const { createHash: chE } = await import("node:crypto");
+  const contentHash = chE("sha256").update(content).digest("hex");
+  {
+    const db0 = openDb(projectPath);
+    try {
+      const existing = db0.prepare(
+        `SELECT content_hash, model_name FROM embeddings WHERE source = ?`
+      ).get(source) as { content_hash: string | null; model_name: string } | undefined;
+      if (existing && existing.content_hash === contentHash && existing.model_name === ACTIVE_MODEL) {
+        return; // identical content, same model — vector already correct
+      }
+    } catch { /* content_hash column absent (pre-migration) — fall through to embed */ }
+    finally { db0.close(); }
+  }
+
   const result = await getEmbedding(content);
   if (!result) return;
 
   const db = openDb(projectPath);
   try {
     db.prepare(
-      `INSERT OR REPLACE INTO embeddings(source, vector, model_name, dimensions, created_at)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT OR REPLACE INTO embeddings(source, vector, model_name, dimensions, created_at, content_hash)
+       VALUES (?, ?, ?, ?, ?, ?)`
     ).run(
       source,
       serializeVector(result.vector),
       result.modelName,
       result.dimensions,
-      new Date().toISOString()
+      new Date().toISOString(),
+      contentHash
     );
   } finally {
     db.close();

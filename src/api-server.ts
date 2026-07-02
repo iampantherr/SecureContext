@@ -826,6 +826,66 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ─── v0.39.0 — Trajectory export (Tier-3 #13) ────────────────────────────────
+  // Streams recent agent sessions as JSONL trajectories for eval/analysis pipelines:
+  // per session, the ordered tool-call sequence (with chain hashes — each line is
+  // independently verifiable) + the evidence-rich outcomes. Metadata-level by design:
+  // SC deliberately never stores raw tool payloads, so trajectories carry the
+  // structure + evidence signal, not conversation content.
+  app.get("/api/v1/trajectories/export", async (request, reply) => {
+    try {
+      const q = request.query as Record<string, unknown>;
+      const sinceDays = Math.max(1, Math.min(90, parseInt(String(q.sinceDays ?? "7"), 10) || 7));
+      const limitSessions = Math.max(1, Math.min(500, parseInt(String(q.limitSessions ?? "50"), 10) || 50));
+      // Optional project filter: a 16-hex project hash or a filesystem path.
+      let projectHash: string | null = null;
+      const rawProject = String(q.project ?? "").trim();
+      if (rawProject) {
+        if (/^[0-9a-f]{16}$/.test(rawProject)) {
+          projectHash = rawProject;
+        } else {
+          const pp = validateProjectPath(rawProject);
+          const { createHash } = await import("node:crypto");
+          const { realpathSync } = await import("node:fs");
+          let normalized = pp;
+          try { normalized = realpathSync(pp); } catch { /* use raw */ }
+          projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+        }
+      }
+      const { withClient } = await import("./pg_pool.js");
+      const lines: string[] = [];
+      await withClient(async (c) => {
+        const params: unknown[] = [sinceDays, limitSessions];
+        let projClause = "";
+        if (projectHash) { params.push(projectHash); projClause = ` AND project_hash = $${params.length}`; }
+        const sessions = (await c.query<{ session_id: string; agent_id: string; project_hash: string; started: Date; ended: Date; calls: string }>(
+          `SELECT session_id, agent_id, project_hash, MIN(ts) AS started, MAX(ts) AS ended, COUNT(*)::text AS calls
+             FROM tool_calls_pg WHERE ts > NOW() - ($1::int * INTERVAL '1 day')${projClause}
+            GROUP BY session_id, agent_id, project_hash ORDER BY MAX(ts) DESC LIMIT $2`,
+          params)).rows;
+        for (const s of sessions) {
+          const events = (await c.query<Record<string, unknown>>(
+            `SELECT tool_name, status, latency_ms, input_tokens, output_tokens, skill_id, task_id, row_hash
+               FROM tool_calls_pg WHERE session_id = $1 ORDER BY id ASC LIMIT 500`, [s.session_id])).rows;
+          let outcomes: Record<string, unknown>[] = [];
+          try {
+            outcomes = (await c.query<Record<string, unknown>>(
+              `SELECT * FROM outcomes_pg WHERE session_id = $1 ORDER BY 1 ASC LIMIT 50`, [s.session_id])).rows
+              .map((o) => ({ task_id: o.task_id ?? null, status: o.status ?? o.outcome ?? null, evidence: o.evidence ?? null }));
+          } catch { /* outcomes table variant — omit */ }
+          lines.push(JSON.stringify({
+            session_id: s.session_id, agent: s.agent_id, project_hash: s.project_hash,
+            started: s.started, ended: s.ended, tool_calls: Number(s.calls),
+            events, outcomes,
+          }));
+        }
+      });
+      reply.type("application/x-ndjson").send(lines.join("\n") + (lines.length ? "\n" : ""));
+    } catch (e) {
+      reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
   // ─── v0.33.0 — Suspected-contradictions review (dashboard) ──────────────────
   app.get("/dashboard/contradictions", async (_request, reply) => {
     const { renderContradictionsFragment, loadProjectNameMap } = await import("./dashboard/render.js");

@@ -526,22 +526,67 @@ export class PostgresStore implements Store {
 
   private async _storeEmbedding(projectHash: string, content: string, source: string): Promise<void> {
     try {
+      // v0.39.0 — content-addressable dedup (SQLite parity): identical content + same model
+      // ⇒ skip the Ollama call; hash-match with a DIFFERENT model ⇒ explicit re-embed.
+      const contentHash = createHash("sha256").update(content).digest("hex");
+      try {
+        const existing = (await this.pool.query<{ content_hash: string | null; model_name: string }>(
+          `SELECT content_hash, model_name FROM embeddings WHERE project_hash = $1 AND source = $2`,
+          [projectHash, source])).rows[0];
+        if (existing && existing.content_hash === contentHash && existing.model_name === ACTIVE_MODEL) return;
+      } catch { /* content_hash column absent (pre-migration) — fall through */ }
+
       const result = await getEmbedding(content);
       if (!result) return;
       // pgvector expects "[x1,x2,...,xN]" string format
       const vectorStr = "[" + result.vector.join(",") + "]";
       await this.pool.query(`
-        INSERT INTO embeddings(project_hash, source, vector, model_name, dimensions, created_at)
-        VALUES ($1, $2, $3::vector, $4, $5, $6)
+        INSERT INTO embeddings(project_hash, source, vector, model_name, dimensions, created_at, content_hash)
+        VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
         ON CONFLICT(project_hash, source) DO UPDATE SET
-          vector     = EXCLUDED.vector,
-          model_name = EXCLUDED.model_name,
-          dimensions = EXCLUDED.dimensions,
-          created_at = EXCLUDED.created_at
-      `, [projectHash, source, vectorStr, result.modelName, result.dimensions, new Date().toISOString()]);
+          vector       = EXCLUDED.vector,
+          model_name   = EXCLUDED.model_name,
+          dimensions   = EXCLUDED.dimensions,
+          created_at   = EXCLUDED.created_at,
+          content_hash = EXCLUDED.content_hash
+      `, [projectHash, source, vectorStr, result.modelName, result.dimensions, new Date().toISOString(), contentHash]);
     } catch {
       // Embedding failure is non-fatal — falls back to BM25-only search
     }
+  }
+
+  /**
+   * v0.39.0 — SAFE EMBEDDING-MODEL MIGRATION: budgeted re-embed of rows whose vectors were
+   * produced by a DIFFERENT model than the active one (they're invisible to search via the
+   * ACTIVE_MODEL filter — silently stale). Run by the enrichment cron until the backlog drains.
+   */
+  async reembedStaleModels(budget: number = 40): Promise<{ reembedded: number; remaining: number; ollamaDown: boolean }> {
+    const stale = (await this.pool.query<{ project_hash: string; source: string }>(
+      `SELECT e.project_hash, e.source FROM embeddings e
+        WHERE e.model_name <> $1 LIMIT $2`, [ACTIVE_MODEL, budget])).rows;
+    const remainingRes = await this.pool.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM embeddings WHERE model_name <> $1`, [ACTIVE_MODEL]);
+    let reembedded = 0;
+    for (const s of stale) {
+      const row = (await this.pool.query<{ content: string }>(
+        `SELECT content FROM knowledge_entries WHERE project_hash = $1 AND source = $2`,
+        [s.project_hash, s.source])).rows[0];
+      if (!row) {
+        // Source no longer exists — the stale vector is an orphan; drop it.
+        await this.pool.query(`DELETE FROM embeddings WHERE project_hash = $1 AND source = $2`, [s.project_hash, s.source]);
+        continue;
+      }
+      const emb = await getEmbedding(row.content);
+      if (!emb) return { reembedded, remaining: Number(remainingRes.rows[0]!.n) - reembedded, ollamaDown: true };
+      const vectorStr = "[" + emb.vector.join(",") + "]";
+      const contentHash = createHash("sha256").update(row.content).digest("hex");
+      await this.pool.query(`
+        UPDATE embeddings SET vector = $3::vector, model_name = $4, dimensions = $5, created_at = $6, content_hash = $7
+        WHERE project_hash = $1 AND source = $2`,
+        [s.project_hash, s.source, vectorStr, emb.modelName, emb.dimensions, new Date().toISOString(), contentHash]);
+      reembedded++;
+    }
+    return { reembedded, remaining: Math.max(0, Number(remainingRes.rows[0]!.n) - reembedded), ollamaDown: false };
   }
 
   async search(projectPath: string, queries: string[], opts: SearchOptions = {}): Promise<KnowledgeEntry[]> {
@@ -1117,6 +1162,13 @@ export class PostgresStore implements Store {
     }
     // v0.37.0 — automated trajectory→skill discovery (6h-gated internally, zero-LLM).
     try { await this.runSkillDiscovery(); } catch { /* best-effort */ }
+    // v0.39.0 — drain any stale-model embedding backlog (budgeted; explicit model migration).
+    if (!ollamaDown) {
+      try {
+        const re = await this.reembedStaleModels();
+        if (re.ollamaDown) ollamaDown = true;
+      } catch { /* best-effort */ }
+    }
     return { projects: projects.length, flagged, backfilledProjects, ollamaDown, entities };
   }
 

@@ -604,11 +604,13 @@ const TOOLS: Tool[] = [
     description:
       "Return the L0 (one-line purpose) + L1 (1500-char detail) summary for a single file — no Read required. " +
       "The primary Tier-1 verb for check/review questions. ~400 tokens vs ~4000 for a full Read. " +
-      "Returns stale=true if the file on disk is newer than the indexed version (run zc_index_project to refresh, or the PostEdit hook will do it automatically).",
+      "Returns stale=true if the file on disk is newer than the indexed version (run zc_index_project to refresh, or the PostEdit hook will do it automatically). " +
+      "v0.39.0 — pass symbol:'<functionOrClassName>' for L2 PROGRESSIVE DISCLOSURE: returns ONLY that symbol's code slice (the middle rung between the L1 summary and force_full_read — never pay for the whole file when you need one function).",
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Path relative to project root (or absolute)" },
+        path:   { type: "string", description: "Path relative to project root (or absolute)" },
+        symbol: { type: "string", description: "v0.39.0 — L2: return only this function/class/method's code slice instead of the summary" },
       },
       required: ["path"],
     },
@@ -2264,7 +2266,52 @@ async function dispatchToolCall(
       }
 
       case "zc_file_summary": {
-        const { path: summaryPath } = args as { path: string };
+        const { path: summaryPath, symbol } = args as { path: string; symbol?: string };
+
+        // v0.39.0 — PROGRESSIVE DISCLOSURE L2: {symbol:"name"} returns ONLY that
+        // function/class/method's code slice (zero-LLM, regex-located across common
+        // languages) — the middle rung between the L1 summary and force_full_read.
+        // A 2,000-line file no longer costs the whole file when one symbol is needed.
+        if (symbol && symbol.trim()) {
+          try {
+            const { readFileSync: rfsL2 } = await import("node:fs");
+            const { isAbsolute: isAbsL2, join: joinL2 } = await import("node:path");
+            const absPath = isAbsL2(summaryPath) ? summaryPath : joinL2(PROJECT_PATH, summaryPath);
+            const raw = rfsL2(absPath, "utf8");
+            const linesL2 = raw.split(/\r?\n/);
+            const sym = symbol.trim().replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+            const declRe = new RegExp(
+              `^\\s*(export\\s+)?(default\\s+)?(async\\s+)?` +
+              `(function\\s*\\*?\\s*${sym}\\b|class\\s+${sym}\\b|(const|let|var)\\s+${sym}\\s*=|` +
+              `def\\s+${sym}\\b|(public|private|protected|static|async|\\w+)?\\s*${sym}\\s*(=\\s*)?(async\\s*)?\\()`
+            );
+            const startIdx = linesL2.findIndex((l) => declRe.test(l));
+            if (startIdx === -1) {
+              return { content: [{ type: "text", text: `[L2] symbol '${symbol}' not found in ${summaryPath}. Try the L1 summary (no symbol param) or Read with offset/limit.` }] };
+            }
+            // Slice to the end of the block: brace-balance from the decl line; indentation
+            // fallback (Python-style) when no opening brace is found.
+            let end = startIdx, depth = 0, sawBrace = false;
+            for (let i = startIdx; i < Math.min(linesL2.length, startIdx + 400); i++) {
+              for (const ch of linesL2[i]!) {
+                if (ch === "{") { depth++; sawBrace = true; }
+                else if (ch === "}") depth--;
+              }
+              end = i;
+              if (sawBrace && depth <= 0) break;
+              if (!sawBrace && i > startIdx) {
+                const line = linesL2[i]!;
+                const baseIndent = (linesL2[startIdx]!.match(/^\s*/)?.[0] ?? "").length;
+                if (line.trim() !== "" && (line.match(/^\s*/)?.[0] ?? "").length <= baseIndent) { end = i - 1; break; }
+              }
+            }
+            const slice = linesL2.slice(startIdx, end + 1).join("\n");
+            return { content: [{ type: "text", text: `[L2 · ${summaryPath} · '${symbol}' · lines ${startIdx + 1}-${end + 1} of ${linesL2.length}]\n\n${slice.slice(0, 12_000)}` }] };
+          } catch (e) {
+            return { content: [{ type: "text", text: `[L2] could not read ${summaryPath}: ${(e as Error).message}` }], isError: true };
+          }
+        }
+
         // v0.22.8 — getFileSummary is now async (PG-first read; SQLite fallback)
         let sum = await getFileSummary(PROJECT_PATH, summaryPath);
 
@@ -3034,7 +3081,7 @@ async function dispatchToolCall(
             `Tell the system WHY the skill fell short (what guidance was wrong/missing) and ONE concrete change ` +
             `to the skill body — that's the signal the mutator uses to improve it. Re-call with both fields.` }], isError: true };
         }
-        const evidence: Record<string, unknown> | null =
+        let evidence: Record<string, unknown> | null =
           (what_worked || what_didnt || recommendation_for_skill)
             ? {
                 ...(what_worked?.trim() ? { what_worked: what_worked.trim() } : {}),
@@ -3042,6 +3089,14 @@ async function dispatchToolCall(
                 ...(recommendation_for_skill?.trim() ? { recommendation_for_skill: recommendation_for_skill.trim() } : {}),
               }
             : null;
+        // v0.39.0 — learned-helplessness guard: tag transient infra failures at record time so
+        // they never count toward mutation triggers (one network/Ollama/HMAC-hook blip must not
+        // drive the mutator to "fix" a healthy skill).
+        if (status === "failed" || status === "timeout") {
+          const { isTransientFailure } = await import("./skills/mutation_guardrails.js");
+          const failText = [what_didnt, (inputs as { error?: unknown })?.error].filter(Boolean).map(String).join(" ");
+          if (isTransientFailure(failText)) evidence = { ...(evidence ?? {}), transient: true };
+        }
 
         const { DatabaseSync: RsoDb } = await import("node:sqlite");
         const { mkdirSync: rsoMkd } = await import("node:fs");
