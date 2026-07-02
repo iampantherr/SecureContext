@@ -392,11 +392,11 @@ async function rememberRejection(
         // rejection, not a prediction — even when the orchestrator's reason text contains
         // words like "should"/"will". Set it explicitly rather than relying on the column
         // default, and never auto-classify by the interpolated reason text.
-        `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, kind, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'fact', now())
+        `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, kind, created_at, origin)
+         VALUES ($1, $2, $3, $4, $5, 'fact', now(), $6)
          ON CONFLICT (project_hash, key, agent_id) DO UPDATE
-           SET value = EXCLUDED.value, importance = EXCLUDED.importance, created_at = EXCLUDED.created_at`,
-        [projectHash, key.slice(0, 100), value.slice(0, 500), 4, rejectedAgent],
+           SET value = EXCLUDED.value, importance = EXCLUDED.importance, created_at = EXCLUDED.created_at, origin = EXCLUDED.origin`,
+        [projectHash, key.slice(0, 100), value.slice(0, 500), 4, rejectedAgent, `broadcast:REJECT:${shortTask.slice(0, 60)}`],
       );
     });
     return true;

@@ -67,6 +67,8 @@ export interface MemoryFact {
   // v0.32.0 recency-decay/salience (optional; absent ⇒ no salience contribution):
   access_count?:      number;
   last_retrieved_at?: string | null;
+  // v0.38.0 per-claim citation (what created the fact):
+  origin?:            string | null;
 }
 
 // SECURITY: Strip control chars and limit length to prevent log injection / DB bloat
@@ -263,6 +265,7 @@ function ensureEpistemologyColumns(db: DatabaseSync): void {
   add("valid_to",          `TEXT`);
   add("superseded_by",     `TEXT`);
   add("retired_reason",    `TEXT`);
+  add("origin",            `TEXT`);
 }
 
 /**
@@ -279,6 +282,9 @@ export interface EpistemicOpts {
   kind?:       MemoryKind;
   confidence?: number | null;
   resolution?: ResolutionStatus | null;
+  /** v0.38.0 — per-claim citation: WHAT created the fact ("zc_remember", "compact:<session>",
+   *  "broadcast:REJECT:<task>", …). Surfaced by recall {cite:true} + the dashboard. */
+  origin?:     string | null;
 }
 
 /**
@@ -344,8 +350,8 @@ export function rememberFact(
   // prediction's key with resolution='resolved_incorrect' RESOLVES it in place —
   // this is the resolution mechanism (no separate tool needed).
   db.prepare(`
-    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at, origin)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key, agent_id) DO UPDATE SET
       value             = excluded.value,
       importance        = excluded.importance,
@@ -355,10 +361,11 @@ export function rememberFact(
       confidence        = excluded.confidence,
       resolution_status = excluded.resolution_status,
       resolved_at       = excluded.resolved_at,
+      origin            = excluded.origin,
       valid_to          = NULL,
       superseded_by     = NULL,
       retired_reason    = NULL
-  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt);
+  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember");
   // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
   // v0.36.0 — memory facts are co-reference sources (memory-aware edge extraction), so a
@@ -439,14 +446,14 @@ export function recallWorkingMemory(
   let rows: MemoryFact[];
   if (safeAgent === "default") {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
       FROM working_memory
       WHERE agent_id = 'default' AND valid_to IS NULL
       ORDER BY importance DESC, created_at DESC
     `).all() as unknown as MemoryFact[];
   } else {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
       FROM working_memory
       WHERE (agent_id = ? OR agent_id = 'default') AND valid_to IS NULL
       ORDER BY
@@ -514,16 +521,12 @@ export function forgetFact(
 
   ensureAgentIdColumn(db);
 
-  const result = db.prepare(
-    "DELETE FROM working_memory WHERE key = ? AND agent_id = ?"
-  ).run(safeKey, safeAgent) as { changes: number };
-
+  // v0.38.0 — SOFT DELETE with a recovery window: forget RETIRES the fact (valid_to set,
+  // archived to the KB, out of recall immediately) instead of hard-deleting it. Recoverable
+  // via reviveFact / the dashboard for RETIRE_PURGE_DAYS, after which the enrichment cycle
+  // purges the tombstone (the KB archive remains searchable forever).
   db.close();
-  // v0.36.0 — drop the forgotten fact's memory edges on the next debounced rebuild.
-  if (result.changes > 0) {
-    void import("./indexing/backlinks.js").then((m) => m.rebuildBacklinksAsync(projectPath)).catch(() => undefined);
-  }
-  return result.changes > 0;
+  return retireFact(projectPath, safeKey, safeAgent, null, "forgotten");
 }
 
 /**
@@ -585,7 +588,8 @@ export function reviveFact(projectPath: string, key: string, agentId: string): b
 export function formatWorkingMemoryForContext(
   facts: MemoryFact[],
   agentId: string = "default",
-  max: number = Config.WORKING_MEMORY_MAX
+  max: number = Config.WORKING_MEMORY_MAX,
+  cite: boolean = false,  // v0.38.0 — per-claim citation chips (opt-in; recall stays lean by default)
 ): string {
   if (facts.length === 0) return "## Working Memory\nEmpty — no facts stored yet.";
 
@@ -598,9 +602,14 @@ export function formatWorkingMemoryForContext(
   ];
 
   // v0.31.0: plain facts render byte-identical; non-fact / resolved claims get an inline badge.
+  const citeChip = (f: MemoryFact): string => {
+    if (!cite) return "";
+    const d = f.created_at ? String(f.created_at).slice(0, 10) : "?";
+    return `  〔${f.agent_id ?? agentId} · ${d}${f.origin ? ` · ${f.origin}` : ""}〕`;
+  };
   const fmtFact = (f: MemoryFact): string => {
     const base = `  [★${f.importance}] ${f.key}: ${f.value}`;
-    if ((!f.kind || f.kind === "fact") && !f.resolution_status) return base;
+    if ((!f.kind || f.kind === "fact") && !f.resolution_status) return base + citeChip(f);
     const tags: string[] = [];
     if (f.kind && f.kind !== "fact") tags.push(f.kind);
     if (f.confidence != null) tags.push(`p=${f.confidence.toFixed(2)}`);
@@ -608,7 +617,7 @@ export function formatWorkingMemoryForContext(
     else if (f.resolution_status === "resolved_correct")   tags.push("✓ correct");
     else if (f.resolution_status === "resolved_incorrect") tags.push("✗ incorrect");
     else if (f.resolution_status === "resolved_partial")   tags.push("~ partial");
-    return tags.length ? `${base}  ⟨${tags.join(" · ")}⟩` : base;
+    return (tags.length ? `${base}  ⟨${tags.join(" · ")}⟩` : base) + citeChip(f);
   };
 
   if (critical.length > 0) {

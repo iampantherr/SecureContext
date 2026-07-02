@@ -4,6 +4,37 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.38.0] — 2026-07-02 — Tier-2: per-claim citations, forget recovery window, A2A protocol compat, OTLP audit export
+
+### Added
+- **Per-claim citations.** `working_memory` gains `origin` (SQLite mig 35 / PG mig 33) recording
+  WHAT created each fact (`zc_remember`, `compact:<session>`, `broadcast:REJECT:<task>`).
+  `zc_recall_context {cite:true}` appends a provenance chip — `〔agent · date · origin〕` — to every
+  fact (opt-in; default recall stays lean). Provenance is backed by the HMAC-chained tool-call log.
+- **Forget with a recovery window.** `zc_forget` now SOFT-deletes: the fact is retired
+  (out of recall immediately, KB-archived, `retired_reason='forgotten'`) and recoverable via
+  `reviveFact` / the dashboard for `RETIRE_PURGE_DAYS` (30) before the tombstone is purged.
+  No more irreversible memory loss from one wrong tool call.
+- **A2A protocol compatibility (experimental).** A minimal Google-A2A-shaped surface: public
+  `GET /.well-known/agent.json` agent card; `POST /a2a/tasks/send` maps an external task to a
+  typed ASSIGN broadcast; `GET /a2a/tasks/:id` resolves state from the chained broadcast stream
+  (a MERGE on the task completes it, its summary returned as the artifact). External
+  LangGraph/CrewAI/A2A agents can now hand work to an SC-coordinated team — SC's identity
+  tokens + evidence gate still govern the agents doing the work. Known nuance: an ASSIGN
+  submitted before a session starts may not appear in that session's recall channel window
+  (live sessions are nudged by the dispatcher on arrival).
+- **OTLP export of the HMAC-chained audit trail.** The enrichment cron ships `tool_calls_pg`
+  rows as OTLP/HTTP JSON spans (zero-dependency — no OTel SDK) to `ZC_OTLP_ENDPOINT`, each span
+  carrying `audit.row_hash`/`audit.prev_hash` — the only tamper-evident trace data in your
+  Grafana/Langfuse/Jaeger stack. Cursor table makes it exactly-once; off unless the endpoint is set.
+
+### Verified
+- Real terminal-agent E2E: an **externally-submitted A2A task** was read by a live SC agent from
+  its broadcast channel and MERGEd; `GET /a2a/tasks/a2a-demo-1` returned `completed` with the
+  agent's artifact — a full foreign-client round-trip. The agent's own dual force-recall confirmed
+  `zc_forget` removal; the `forgotten` tombstone verified in PG. OTLP: 200 real chained spans
+  shipped to a local collector with cursor advance. Tests 865/868 (3 pre-existing fixtures).
+
 ## [0.37.0] — 2026-07-02 — Tier-1 competitive parity: self-correcting temporal memory, graph retrieval, entities, global Q&A, auto skill discovery, scanner breadth
 
 Six features that close every functional gap the July-2026 competitive research found

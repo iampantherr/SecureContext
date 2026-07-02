@@ -41,6 +41,7 @@ import { isAbsolute as posixIsAbsolute } from "node:path/posix";
 import { isAbsolute as win32IsAbsolute } from "node:path/win32";
 import { createStore } from "./store.js";
 import type { Store, RetentionTier } from "./store.js";
+import { Config } from "./config.js";
 import type { EpistemicOpts } from "./memory.js";
 import { checkOllamaAvailable } from "./embedder.js";
 
@@ -216,6 +217,10 @@ export async function createApiServer(storeOverride?: Store) {
     // an Authorization header. When a multi-tenant story lands (Sprint 3.x),
     // these routes will gate via the existing per-project RBAC token system.
     if (request.url === "/dashboard" || request.url.startsWith("/dashboard/")) return;
+
+    // v0.38.0 — the A2A agent card is public by protocol design (discovery document,
+    // no secrets). Task submission/query under /a2a/* stays behind the bearer gate.
+    if (request.url === "/.well-known/agent.json") return;
 
     // v0.26.0 Step 4 — PreToolUse hook (~/.claude/hooks/skill-script-hmac-verify.mjs)
     // calls /api/v1/skills/<name>/verify-script to ask "is this script's HMAC
@@ -757,6 +762,69 @@ export async function createApiServer(storeOverride?: Store) {
   function escapeHtml(s: string): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
+
+  // ─── v0.38.0 — A2A protocol compatibility (Tier-2 #8, experimental) ─────────
+  // Minimal Google-A2A-shaped surface so EXTERNAL agents (LangGraph/CrewAI/etc.)
+  // can hand tasks to an SC-coordinated team: the agent card advertises the
+  // capability; tasks/send maps to a typed ASSIGN broadcast; tasks/get resolves
+  // from the (HMAC-chained) broadcast stream — a MERGE on the task completes it.
+  // SC's evidence gate + identity tokens still govern the agents doing the work.
+  app.get("/.well-known/agent.json", async (_request, reply) => {
+    reply.type("application/json").send({
+      name: "SecureContext Coordination Gateway",
+      description: "Hands tasks to a SecureContext-coordinated agent team (typed ASSIGN/MERGE broadcasts, evidence-gated outcomes, HMAC-chained audit).",
+      url: `http://${API_HOST === "0.0.0.0" ? "localhost" : API_HOST}:${API_PORT}`,
+      version: Config.VERSION,
+      capabilities: { streaming: false, pushNotifications: false },
+      defaultInputModes: ["text"],
+      defaultOutputModes: ["text"],
+      skills: [{
+        id: "assign_task",
+        name: "Assign a task to the project's agent team",
+        description: "Submits the message as an ASSIGN broadcast on the target project; the team's MERGE completes the task. Pass metadata.projectPath (or set ZC_A2A_DEFAULT_PROJECT_PATH).",
+        inputModes: ["text"], outputModes: ["text"],
+      }],
+    });
+  });
+
+  app.post("/a2a/tasks/send", async (request, reply) => {
+    try {
+      const body = request.body as Record<string, unknown>;
+      const meta = (body.metadata ?? {}) as Record<string, unknown>;
+      const taskId = String(body.id ?? `a2a-${Date.now().toString(36)}`).slice(0, 100);
+      const msg = body.message as { parts?: Array<{ text?: string }> } | undefined;
+      const text = (msg?.parts ?? []).map((p) => p.text ?? "").join("\n").trim();
+      if (!text) { reply.status(400).send({ error: "message.parts[].text is required" }); return; }
+      const rawPath = typeof meta.projectPath === "string" ? meta.projectPath : process.env.ZC_A2A_DEFAULT_PROJECT_PATH;
+      if (!rawPath) { reply.status(400).send({ error: "metadata.projectPath is required (or set ZC_A2A_DEFAULT_PROJECT_PATH)" }); return; }
+      const pp = validateProjectPath(rawPath);
+      await store.broadcast(pp, "ASSIGN", "a2a-gateway", {
+        task: taskId, summary: text.slice(0, 950), state: "a2a-submitted", importance: 4,
+      });
+      reply.send({ id: taskId, status: { state: "submitted", timestamp: new Date().toISOString() } });
+    } catch (e) {
+      reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
+  app.get("/a2a/tasks/:id", async (request, reply) => {
+    try {
+      const taskId = String((request.params as Record<string, unknown>).id ?? "").slice(0, 100);
+      const { withClient } = await import("./pg_pool.js");
+      const rows = await withClient(async (c) => (await c.query<{ type: string; summary: string; agent_id: string; created_at: string }>(
+        `SELECT type, summary, agent_id, created_at FROM broadcasts WHERE task = $1 ORDER BY id DESC LIMIT 20`, [taskId])).rows);
+      if (rows.length === 0) { reply.status(404).send({ error: `unknown task ${taskId}` }); return; }
+      const merge = rows.find((r) => r.type === "MERGE");
+      const state = merge ? "completed" : rows.some((r) => r.type === "STATUS" || r.type === "REVISE") ? "working" : "submitted";
+      reply.send({
+        id: taskId,
+        status: { state, timestamp: rows[0]!.created_at },
+        ...(merge ? { artifacts: [{ parts: [{ type: "text", text: merge.summary }], metadata: { agent: merge.agent_id } }] } : {}),
+      });
+    } catch (e) {
+      reply.status(500).send({ error: (e as Error).message });
+    }
+  });
 
   // ─── v0.33.0 — Suspected-contradictions review (dashboard) ──────────────────
   app.get("/dashboard/contradictions", async (_request, reply) => {
@@ -3712,6 +3780,12 @@ if (process.argv[1]?.endsWith("api-server.js")) {
               work: async () => {
                 const r = await enrich.call(store);
                 console.log(`Enrichment cron: projects=${r.projects} flagged=${r.flagged} backfilled=${r.backfilledProjects} entity_edges=${r.entities ?? 0}${r.ollamaDown ? " (ollama down)" : ""}`);
+                // v0.38.0 — ship new audit rows as OTLP spans (no-op unless ZC_OTLP_ENDPOINT set).
+                try {
+                  const { exportAuditSpans } = await import("./otel_export.js");
+                  const ot = await exportAuditSpans();
+                  if (ot && ot.exported > 0) console.log(`OTLP export: ${ot.exported} audit span(s) shipped`);
+                } catch (e) { console.error("OTLP export failed:", (e as Error).message); }
               },
             });
             sched.start(60_000); // poll every 60s; the job itself fires every intervalMin

@@ -361,6 +361,7 @@ const TOOLS: Tool[] = [
       properties: {
         agent_id: { type: "string", description: "Agent namespace (default: 'default')" },
         force:    { type: "boolean", description: "Skip the recall cache and force a fresh pull (default: false)" },
+        cite:     { type: "boolean", description: "v0.38.0 — append a provenance citation to every fact: 〔agent · date · origin〕 (origin = what created it: zc_remember, compact:<session>, broadcast:REJECT:<task>). Default false (keeps recall lean)." },
       },
       required: [],
     },
@@ -1393,7 +1394,14 @@ async function _handleRemoteTool(
         // the agent sees their own notes AND project-wide coordination notes.
         const recallAgentId = String(body["agent_id"] ?? AGENT_ID);
         const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}`);
-        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null }> ?? [];
+        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null; agent_id?: string; created_at?: string; origin?: string | null }> ?? [];
+        // v0.38.0 — per-claim citations, opt-in ({cite:true}) so default recall stays lean.
+        const wantCite = body["cite"] === true;
+        const citeChip = (f: { agent_id?: string; created_at?: string; origin?: string | null }): string => {
+          if (!wantCite) return "";
+          const d = f.created_at ? String(f.created_at).slice(0, 10) : "?";
+          return `  〔${f.agent_id ?? "?"} · ${d}${f.origin ? ` · ${f.origin}` : ""}〕`;
+        };
         const skills    = recallRes["skills"] as Array<{ skill_id: string; name: string; description: string }> ?? [];
         const max       = recallRes["max"] as number ?? 50;
         const lines     = [`## Working Memory (${facts.length}/${max} facts)`];
@@ -1409,9 +1417,9 @@ async function _handleRemoteTool(
           else if (f.resolution_status === "resolved_partial") t.push("~ partial");
           return t.length ? `  ⟨${t.join(" · ")}⟩` : "";
         };
-        for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}`);
-        for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}`);
-        for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}`);
+        for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+        for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+        for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
         // v0.21.0 — append skill inventory so the agent sees what's available
         // every time they recall context. Skip the section if no skills match
         // the role (avoids noise for projects that haven't authored any skills).
@@ -1838,7 +1846,7 @@ async function dispatchToolCall(
         if (rcBanner) parts.push(rcBanner);
 
         // Section 1: Working Memory (structured by priority — limit is project-aware)
-        parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit));
+        parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit, (args as { cite?: boolean })?.cite === true));
 
         // Section 1b (v0.31.0): suspected contradictions (background scan once/session; local SQLite).
         const { formatContradictionsSection: fmtContraInproc } = await import("./memory_contradictions.js");

@@ -195,8 +195,8 @@ export class PostgresStore implements Store {
     const resolvedAt = (safeRes && safeRes !== "open") ? now : null;
 
     await this.pool.query(`
-      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT(project_hash, key, agent_id) DO UPDATE SET
         value             = EXCLUDED.value,
         importance        = EXCLUDED.importance,
@@ -205,10 +205,11 @@ export class PostgresStore implements Store {
         confidence        = EXCLUDED.confidence,
         resolution_status = EXCLUDED.resolution_status,
         resolved_at       = EXCLUDED.resolved_at,
+        origin            = EXCLUDED.origin,
         valid_to          = NULL,
         superseded_by     = NULL,
         retired_reason    = NULL
-    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt]);
+    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember"]);
     // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
     // v0.36.0 — memory facts are now co-reference sources, so a memory WRITE must refresh
@@ -316,14 +317,10 @@ export class PostgresStore implements Store {
     const projectHash = ph(projectPath);
     const safeKey    = sanitize(key,     100);
     const safeAgent  = sanitize(agentId,  64);
-    const res = await this.pool.query(
-      "DELETE FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3",
-      [projectHash, safeKey, safeAgent]
-    );
-    // v0.36.0 — a forgotten fact's memory edges must drop from the graph on the next
-    // (debounced, full-replace) rebuild.
-    if ((res.rowCount ?? 0) > 0) this._scheduleBacklinkRebuild(projectPath);
-    return (res.rowCount ?? 0) > 0;
+    // v0.38.0 — SOFT DELETE with a recovery window: forget RETIRES the fact (out of recall
+    // immediately, KB-archived, revivable for RETIRE_PURGE_DAYS) instead of hard-deleting.
+    void projectHash;
+    return this.retireFact(projectPath, safeKey, safeAgent, null, "forgotten");
   }
 
   async recall(projectPath: string, agentId: string): Promise<MemoryFact[]> {
@@ -344,7 +341,7 @@ export class PostgresStore implements Store {
     let rows: MemoryFact[];
     if (safeAgent === "default") {
       const res = await this.pool.query<MemoryFact>(
-        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
+        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
          FROM working_memory WHERE project_hash = $1 AND agent_id = 'default' AND valid_to IS NULL
          ORDER BY importance DESC, created_at DESC`,
         [projectHash]
@@ -353,7 +350,7 @@ export class PostgresStore implements Store {
     } else {
       // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
       const res = await this.pool.query<MemoryFact>(
-        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at
+        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
          FROM working_memory
          WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND valid_to IS NULL
          ORDER BY

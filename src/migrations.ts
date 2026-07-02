@@ -1082,6 +1082,14 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 35,
+    description: "v0.38.0: per-claim citations — origin column on working_memory (what created the fact: tool, compaction session, broadcast; mirrors PG migration 33)",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE working_memory ADD COLUMN origin TEXT`); } catch { /* exists / table absent */ }
+    },
+  },
+
 ];
 
 /**

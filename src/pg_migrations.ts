@@ -968,6 +968,14 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 33,
+    description: "v0.38.0: per-claim citations — origin column on working_memory (mirrors SQLite migration 35)",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS origin TEXT`);
+    },
+  },
+
 ];
 
 /**

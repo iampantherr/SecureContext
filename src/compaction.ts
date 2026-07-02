@@ -125,11 +125,11 @@ async function persistCompactionFact(projectHash: string, sessionId: string | nu
       // turns, not the agent's own claim, so it must NOT be auto-classified by its text (a
       // summary that mentions "we decided X" is still a fact, not a decision). Setting the
       // typed column explicitly also removes the reliance on the DB default.
-      `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, kind, created_at)
-       VALUES ($1, $2, $3, 4, 'system', 'fact', now())
+      `INSERT INTO working_memory (project_hash, key, value, importance, agent_id, kind, created_at, origin)
+       VALUES ($1, $2, $3, 4, 'system', 'fact', now(), $4)
        ON CONFLICT (project_hash, key, agent_id) DO UPDATE
-         SET value = EXCLUDED.value, created_at = EXCLUDED.created_at`,
-      [projectHash, key.slice(0, 100), value.slice(0, 500)],
+         SET value = EXCLUDED.value, created_at = EXCLUDED.created_at, origin = EXCLUDED.origin`,
+      [projectHash, key.slice(0, 100), value.slice(0, 500), `compact:${(sessionId ?? "global").slice(0, 60)}`],
     );
   });
   return key;
