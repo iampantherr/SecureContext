@@ -354,6 +354,11 @@ export function rememberFact(
       resolved_at       = excluded.resolved_at
   `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt);
 
+  // v0.36.0 — memory facts are co-reference sources (memory-aware edge extraction), so a
+  // memory write refreshes the backlink graph. Debounced 5s + fire-and-forget; dynamic
+  // import keeps the memory↔knowledge↔backlinks module graph cycle-free at load time.
+  void import("./indexing/backlinks.js").then((m) => m.rebuildBacklinksAsync(projectPath)).catch(() => undefined);
+
   // Evict if over limit — evict lowest importance + oldest first (MemGPT eviction policy)
   // Limit is dynamically sized based on project complexity (see getWorkingMemoryLimits)
   const count = (db.prepare(
@@ -505,6 +510,10 @@ export function forgetFact(
   ).run(safeKey, safeAgent) as { changes: number };
 
   db.close();
+  // v0.36.0 — drop the forgotten fact's memory edges on the next debounced rebuild.
+  if (result.changes > 0) {
+    void import("./indexing/backlinks.js").then((m) => m.rebuildBacklinksAsync(projectPath)).catch(() => undefined);
+  }
   return result.changes > 0;
 }
 

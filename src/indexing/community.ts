@@ -116,6 +116,14 @@ export function extractCoReferences(rows: Array<{ source: string; content: strin
   // correct (the '/' bounded the match); this also fixes the un-pathed case.
   const basenameIndex = new Map<string, string>();
   for (const s of sources) {
+    // v0.36.0 — a memory fact ("memory:<agent>:<key>") is referenceable by its KEY:
+    // content saying "see cache_decision" links to memory:default:cache_decision. Without
+    // this, the generic path would index it under "<agent>:<key>", which nothing ever says.
+    if (s.startsWith("memory:")) {
+      const key = s.slice(s.lastIndexOf(":") + 1);
+      if (key.length >= 4 && !basenameIndex.has(key)) basenameIndex.set(key, s);
+      continue;
+    }
     const afterScheme = s.includes(":") ? s.slice(s.indexOf(":") + 1) : s;
     const lastSeg = afterScheme.split(/[/\\]/).pop() ?? afterScheme;
     const m = lastSeg.match(/^(.+?)(\.\w+)?$/);

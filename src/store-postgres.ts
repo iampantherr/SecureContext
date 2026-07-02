@@ -204,6 +204,11 @@ export class PostgresStore implements Store {
         resolved_at       = EXCLUDED.resolved_at
     `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt]);
 
+    // v0.36.0 — memory facts are now co-reference sources, so a memory WRITE must refresh
+    // the backlink graph too (previously only indexing did — memory edges would go stale).
+    // Debounced 5s + fire-and-forget: a burst of remembers still costs one rebuild.
+    this._scheduleBacklinkRebuild(projectPath);
+
     // Evict if over the dynamic limit
     const limits = await this.getWorkingMemoryLimits(projectPath);
     const countRes = await this.pool.query<{ n: string }>(
@@ -261,6 +266,9 @@ export class PostgresStore implements Store {
       "DELETE FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3",
       [projectHash, safeKey, safeAgent]
     );
+    // v0.36.0 — a forgotten fact's memory edges must drop from the graph on the next
+    // (debounced, full-replace) rebuild.
+    if ((res.rowCount ?? 0) > 0) this._scheduleBacklinkRebuild(projectPath);
     return (res.rowCount ?? 0) > 0;
   }
 
@@ -774,8 +782,14 @@ export class PostgresStore implements Store {
   }
 
   private async _rebuildBacklinksByHash(projectHash: string): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }> {
+    // v0.36.0 — memory-aware extraction (SQLite parity): live working-memory facts join the
+    // co-reference scan as "memory:<agent>:<key>" pseudo-sources (eviction-archival naming),
+    // so a fact mentioning "session.ts" creates a memory→file edge and the file gains boost.
     const rows = (await this.pool.query<{ source: string; content: string }>(
-      "SELECT source, content FROM knowledge_entries WHERE project_hash = $1", [projectHash]
+      `SELECT source, content FROM knowledge_entries WHERE project_hash = $1
+       UNION ALL
+       SELECT ('memory:' || agent_id || ':' || key) AS source, value AS content
+         FROM working_memory WHERE project_hash = $1`, [projectHash]
     )).rows;
     const typed = extractCoReferences(rows).map((e) => ({
       from: e.from, to: e.to, relation: classifyRelation(e.from, e.to, e.matchKind), matchKind: e.matchKind, weight: e.weight,

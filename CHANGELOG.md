@@ -4,6 +4,38 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.36.0] — 2026-07-02 — Memory-aware edge extraction
+
+Working-memory facts become first-class knowledge-graph sources: what an agent's memory
+*talks about* now shapes the graph and search ranking, not just what's been file-indexed.
+
+### Added
+- **Memory facts join the co-reference scan** (both stores). The backlink rebuild unions live
+  `working_memory` rows into the extraction as `memory:<agent>:<key>` pseudo-sources — the same
+  naming eviction-archival uses, so edges survive a fact's eviction unchanged. A fact whose value
+  mentions `session.ts` creates a memory→file edge, and the file gains backlink in-degree —
+  i.e. **search boost from what the agent's memory discusses** (gbrain-style salience).
+- **Memory keys are referenceable.** The basename index special-cases `memory:` sources so content
+  mentioning a fact's key (≥4 chars, word-boundary) links to it — docs citing `auth_review_note`
+  create a file→memory edge.
+- **`remember`/`forget` trigger the debounced graph rebuild** in both stores (previously only
+  indexing did — memory edges would have gone permanently stale). A burst of remembers still costs
+  exactly one rebuild (5s trailing debounce, fire-and-forget).
+
+### Verified
+- **Real terminal-agent E2E**: a live A2A developer agent given only ordinary steps (index a file,
+  remember a research note mentioning it) produced the `memory:developer:auth_review_note →
+  file:auth.ts [weak_ref]` edge in PG by default, and its own `zc_graph_backlinks` call observed it
+  (quoted verbatim in its MERGE). Its unscripted work-log notes organically raised the file to
+  in_degree=3.
+- Live API E2E: reverse (file→memory via key mention) edge; forget drops edges on the next rebuild.
+- Real projects rebuilt: Test_Agent_Coordination 0 → 23 edges (hub `owns:researcher`, in-degree 14),
+  A2A_communication 0 → 9 edges. Tests 865/868 (3 pre-existing fixtures).
+
+### Notes
+- Memory→file matches are conservative (word-boundary basename ⇒ tagged `weak_ref`, log-damped in
+  ranking). Keys ending in a common word attract more weak edges — bounded, but visible in graphs.
+
 ## [0.35.0] — 2026-07-02 — KB graph: project picker + memory-fact nodes
 
 ### Added

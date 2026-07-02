@@ -76,6 +76,18 @@ export function rebuildBacklinks(db: DatabaseSync): BacklinkRebuildResult {
   type Row = { source: string; content: string };
   const rows = db.prepare("SELECT source, content FROM knowledge").all() as Row[];
 
+  // v0.36.0 — memory-aware extraction: LIVE working-memory facts join the scan as
+  // pseudo-sources ("memory:<agent>:<key>", the same naming eviction-archival uses, so
+  // edges survive a fact's eviction unchanged). A research note whose value mentions
+  // "session.ts" now creates a memory→file edge — the file gains graph structure AND
+  // backlink search boost from what the agent's memory talks about.
+  try {
+    const wm = db.prepare(
+      "SELECT ('memory:' || agent_id || ':' || key) AS source, value AS content FROM working_memory ORDER BY importance DESC LIMIT 500"
+    ).all() as Row[];
+    for (const r of wm) rows.push(r);
+  } catch { /* working_memory absent on a KB-only DB */ }
+
   const typed: TypedEdge[] = extractCoReferences(rows).map((e) => ({
     from:      e.from,
     to:        e.to,
