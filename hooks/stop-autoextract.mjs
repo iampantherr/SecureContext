@@ -57,6 +57,18 @@ async function fetchJson(url, opts = {}, timeoutMs = API_TIMEOUT_MS) {
   }
 }
 
+// v0.40.1 — coordination filter (kept in sync with userprompt-autoextract.mjs;
+// duplicated because each hook is a self-contained script by security contract).
+// Harness-authored coordination traffic (dispatcher ASSIGN pings, nudges, alerts,
+// shutdown signals) is transient machine-to-machine state — never memory material.
+const IGNORE_PREFIXES = ["DISPATCHER:", "ALERT:", "REMINDER:", "A2A SHUTDOWN SIGNAL:"];
+function isCoordinationMessage(text) {
+  const extra = (process.env.ZC_AUTO_EXTRACT_IGNORE_PREFIXES || "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  const t = text.trimStart();
+  return [...IGNORE_PREFIXES, ...extra].some((p) => t.startsWith(p));
+}
+
 /** Pull user/assistant TEXT out of the new transcript slice (JSONL). */
 function extractChatText(raw) {
   const parts = [];
@@ -68,10 +80,13 @@ function extractChatText(raw) {
     if (role !== "user" && role !== "assistant") continue;
     const content = obj?.message?.content;
     if (typeof content === "string") {
-      if (content.trim()) parts.push(`${role}: ${content.trim()}`);
+      if (content.trim() && !(role === "user" && isCoordinationMessage(content))) {
+        parts.push(`${role}: ${content.trim()}`);
+      }
     } else if (Array.isArray(content)) {
       for (const block of content) {
         if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
+          if (role === "user" && isCoordinationMessage(block.text)) continue;
           parts.push(`${role}: ${block.text.trim()}`);
         }
       }
@@ -141,7 +156,9 @@ async function main() {
     "extract at most 5 DURABLE facts worth remembering in FUTURE sessions: decisions made and why, " +
     "constraints or gotchas discovered, user preferences stated, project-state changes. " +
     "NEVER extract: transient status, greetings, anything containing credentials/tokens/keys, " +
-    "or restatements of what code already says. If nothing durable, return an empty list.\n" +
+    "restatements of what code already says, task assignments, agent-coordination or dispatcher/" +
+    "orchestrator status instructions (who was assigned what, reminders to broadcast/merge/claim " +
+    "tasks). If nothing durable, return an empty list.\n" +
     'Respond with JSON ONLY: {"facts":[{"key":"short_snake_case_id","value":"one-sentence fact",' +
     '"importance":2,"kind":"fact"}]} where importance is 2-4 and kind is one of ' +
     '"fact","decision","hypothesis","prediction".\n\nCONVERSATION:\n' + chatCapped;

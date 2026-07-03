@@ -4,6 +4,30 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.40.1] — 2026-07-03 — Auto-extract: deterministic coordination-message filter
+
+### Fixed
+- **Dispatcher coordination traffic could reach the extraction feed.** The A2A dispatcher
+  delivers ASSIGN pings (with up to 2,000 chars of embedded task summary), wake nudges,
+  idle alerts, and shutdown signals by typing into the agent's terminal — so they arrive
+  as "user prompts" and were previously kept out of memory only by the extraction LLM's
+  judgment. Both hooks now DETERMINISTICALLY drop harness-authored messages by their fixed
+  prefixes (`DISPATCHER:`, `ALERT:`, `REMINDER:`, `A2A SHUTDOWN SIGNAL:`; extensible via
+  `ZC_AUTO_EXTRACT_IGNORE_PREFIXES`) in both the prompt buffer and the transcript path,
+  and the extraction prompt explicitly excludes task assignments / coordination
+  instructions. Coordination state belongs to the typed broadcast channel — re-parsing it
+  into working memory would duplicate a lower-trust copy (and a stale or rejected task's
+  premise could persist as a "fact").
+
+### Verified
+- Live terminal-agent E2E with REAL dispatcher traffic: an externally-submitted A2A task
+  carrying trap markers was delivered as a genuine `DISPATCHER:` ASSIGN ping (dispatcher
+  log `DRAIN_SEND developer ASSIGN`), the agent completed it normally, and the markers
+  never entered auto-extracted memory — while two operator briefs in the same session
+  extracted 4 correctly-typed facts (2 decisions, 2 facts). The only rows containing task
+  content were the orchestrator's own deliberate `zc_remember` work-log entries, by design.
+  Unit: DISPATCHER/SHUTDOWN prompts skipped, operator prompt buffered. Tests 865/868.
+
 ## [0.40.0] — 2026-07-02 — Automatic background memory extraction + operator console redesign
 
 ### Added
