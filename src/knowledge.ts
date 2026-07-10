@@ -154,8 +154,10 @@ function _purgeStaleContent(db: DatabaseSync, _projectPath: string): void {
   }
 }
 
-/** Fire-and-forget: compute embedding and store asynchronously */
-async function storeEmbeddingAsync(
+/** Fire-and-forget: compute embedding and store asynchronously.
+ *  Exported since M1 (v0.41.0): memory.ts embeds live working-memory facts at
+ *  remember-time so focused recall can rank them by relevance. */
+export async function storeEmbeddingAsync(
   projectPath: string,
   content: string,
   source: string
@@ -447,7 +449,7 @@ function _searchDb(
   type EmbedRow = { source: string; vector: Buffer; model_name: string };
   type MetaRow  = { source: string; source_type: string };
 
-  const candidateMap = new Map<string, BM25Row>();
+  const candidateMap = new Map<string, BM25Row & { synthetic?: boolean }>();
 
   for (const query of queries) {
     if (!query.trim()) continue;
@@ -467,6 +469,55 @@ function _searchDb(
     for (const row of rows) {
       if (!candidateMap.has(row.source)) candidateMap.set(row.source, row);
     }
+  }
+
+  // M1 (v0.41.0) — OR-fallback keyword pass. FTS5 MATCH on a plain phrase is
+  // implicit-AND: one word the target doc lacks ("what is the retry SCHEDULE…")
+  // empties the result. When the AND pass under-fills, retry with the terms
+  // OR-joined so any-term matches join the candidate pool (they rank below
+  // AND hits naturally — their FTS rank is worse).
+  if (Config.BM25_OR_FALLBACK && candidateMap.size < Config.BM25_CANDIDATES) {
+    const terms = [...new Set(
+      queries.join(" ").toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3)
+    )].slice(0, 12);
+    if (terms.length >= 2) {
+      try {
+        const orRows = db.prepare(
+          `SELECT source, content, rank FROM knowledge WHERE knowledge MATCH ? ORDER BY rank LIMIT ?`
+        ).all(terms.map((t) => `"${t}"`).join(" OR "), Config.BM25_CANDIDATES) as BM25Row[];
+        for (const row of orRows) {
+          if (!candidateMap.has(row.source)) candidateMap.set(row.source, row);
+        }
+      } catch { /* malformed OR query — keep AND results only */ }
+    }
+  }
+
+  // M1 (v0.41.0) — INDEPENDENT vector candidates. Previously the vector index
+  // only re-ranked keyword hits, so a question with zero keyword overlap
+  // returned nothing no matter how close the embedding match was. Now the
+  // top-N nearest stored vectors join the pool directly (synthetic BM25 rank —
+  // they contribute through the cosine/RRF channels, not the keyword channel).
+  if (queryVector && Config.VECTOR_CANDIDATES > 0) {
+    try {
+      const allEmb = db.prepare(
+        `SELECT source, vector FROM embeddings WHERE model_name = ?`
+      ).all(ACTIVE_MODEL) as Array<{ source: string; vector: Buffer }>;
+      const scored: Array<{ source: string; cos: number }> = [];
+      for (const e of allEmb) {
+        if (candidateMap.has(e.source)) continue;
+        const vec = deserializeVector(e.vector);
+        const cos = cosineSimilarity(vec, queryVector);
+        if (cos < Config.VECTOR_MIN_SIM) continue; // similarity floor — no garbage injection
+        scored.push({ source: e.source, cos });
+      }
+      scored.sort((a, b) => b.cos - a.cos);
+      const worstRank = Math.max(0, ...[...candidateMap.values()].map((r) => r.rank));
+      for (const s of scored.slice(0, Config.VECTOR_CANDIDATES)) {
+        const row = db.prepare(`SELECT source, content FROM knowledge WHERE source = ?`).get(s.source) as
+          | { source: string; content: string } | undefined;
+        if (row) candidateMap.set(row.source, { ...row, rank: worstRank, synthetic: true });
+      }
+    } catch { /* embeddings table absent/pre-migration — keyword candidates only */ }
   }
 
   if (candidateMap.size === 0) return [];
@@ -517,8 +568,12 @@ function _searchDb(
   let graphRankMap: Map<string, number> | null = null;
   if (useRRF) {
     const entries = Array.from(candidateMap.entries());
-    // BM25: lower FTS5 rank = more relevant.
-    bm25RankMap = new Map([...entries].sort((a, b) => a[1].rank - b[1].rank).map(([s], i) => [s, i + 1]));
+    // BM25: lower FTS5 rank = more relevant. M1: synthetic (vector-injected)
+    // candidates have NO keyword evidence — exclude them from the BM25 list so
+    // their score comes purely from the cosine/graph/backlink channels.
+    bm25RankMap = new Map([...entries]
+      .filter(([, r]) => !(r as { synthetic?: boolean }).synthetic)
+      .sort((a, b) => a[1].rank - b[1].rank).map(([s], i) => [s, i + 1]));
     // Vector: higher cosine = more relevant (only when a query embedding exists).
     if (queryVector) {
       const withCos = entries.map(([s]) => {
@@ -542,17 +597,28 @@ function _searchDb(
         const topSeeds = [...entries].sort((a, b) => a[1].rank - b[1].rank)
           .slice(0, Config.GRAPH_EXPAND_TOP_K).map(([s]) => s);
         if (topSeeds.length > 0) {
-          const sp = topSeeds.map(() => "?").join(",");
-          const eRows = db.prepare(
-            `SELECT from_source AS a, to_source AS b, weight FROM kb_edges
-             WHERE from_source IN (${sp}) OR to_source IN (${sp})`
-          ).all(...topSeeds, ...topSeeds) as Array<{ a: string; b: string; weight: number }>;
+          // M4 (v0.41.0) — bounded multi-hop BFS (was 1-hop): a chain A→B→C where
+          // only A matches the query surfaces C at depth 2, per-hop weight decay.
           const seeds = new Set(topSeeds);
           const nScore = new Map<string, number>();
-          for (const e of eRows) {
-            const nb = seeds.has(e.a) ? e.b : (seeds.has(e.b) ? e.a : null);
-            if (!nb || seeds.has(nb)) continue;
-            nScore.set(nb, (nScore.get(nb) ?? 0) + (e.weight ?? 1));
+          let frontier = topSeeds;
+          const visited = new Set(topSeeds);
+          for (let depth = 1; depth <= Math.max(1, Config.GRAPH_MAX_DEPTH) && frontier.length > 0; depth++) {
+            const decay = Math.pow(Config.GRAPH_HOP_DECAY, depth - 1);
+            const sp = frontier.map(() => "?").join(",");
+            const eRows = db.prepare(
+              `SELECT from_source AS a, to_source AS b, weight FROM kb_edges
+               WHERE from_source IN (${sp}) OR to_source IN (${sp})`
+            ).all(...frontier, ...frontier) as Array<{ a: string; b: string; weight: number }>;
+            const frontierSet = new Set(frontier);
+            const next: string[] = [];
+            for (const e of eRows) {
+              const nb = frontierSet.has(e.a) ? e.b : (frontierSet.has(e.b) ? e.a : null);
+              if (!nb || seeds.has(nb)) continue;
+              nScore.set(nb, (nScore.get(nb) ?? 0) + (e.weight ?? 1) * decay);
+              if (!visited.has(nb)) { visited.add(nb); next.push(nb); }
+            }
+            frontier = next;
           }
           const rankedN = [...nScore.entries()].sort((x, y) => y[1] - x[1]).slice(0, Config.GRAPH_EXPAND_MAX);
           if (rankedN.length > 0) {

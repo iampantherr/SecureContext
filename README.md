@@ -2,7 +2,7 @@
 
 > **The security and memory layer for Claude Code.** Persistent memory that survives restarts, cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs locally on PostgreSQL — zero cloud sync, MIT-licensed.
 
-[![Version](https://img.shields.io/badge/version-0.40.1-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.41.0-blue)](package.json)
 [![Tests](https://img.shields.io/badge/tests-865%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)

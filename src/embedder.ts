@@ -33,6 +33,15 @@ export interface EmbeddingResult {
 // Module-level availability cache — avoid hammering Ollama on every call
 let ollamaAvailable: boolean | null = null;
 let lastAvailabilityCheck = 0;
+// M1 hardening (v0.41.0): one transient embed failure used to flip the cache to
+// "down" for a full EMBED_AVAIL_TTL, silently disabling EVERY semantic feature
+// (vector search, focused recall, contradiction scan) for 60s — found when a
+// benchmark's rapid-fire calls degraded mid-run. Now: only a STREAK of failures
+// flips the flag, and a cached "down" is re-probed quickly (DOWN_RETRY_MS)
+// instead of waiting out the full up-state TTL.
+let embedFailureStreak = 0;
+const EMBED_FAILURE_STREAK_LIMIT = 2;
+const DOWN_RETRY_MS = 5_000;
 
 // Resolved embedding URL — may differ from Config.OLLAMA_URL if Docker fallback is used
 let resolvedOllamaUrl: string = Config.OLLAMA_URL;
@@ -56,7 +65,10 @@ function ollamaFallbackUrls(): string[] {
 
 async function isOllamaAvailable(): Promise<boolean> {
   const now = Date.now();
-  if (ollamaAvailable !== null && now - lastAvailabilityCheck < Config.EMBED_AVAIL_TTL) {
+  // "Up" is trusted for the full TTL; "down" is re-probed quickly so a transient
+  // blip doesn't blind semantic features for a whole minute.
+  const cacheTtl = ollamaAvailable === false ? DOWN_RETRY_MS : Config.EMBED_AVAIL_TTL;
+  if (ollamaAvailable !== null && now - lastAvailabilityCheck < cacheTtl) {
     return ollamaAvailable;
   }
 
@@ -107,37 +119,47 @@ export async function checkOllamaAvailable(): Promise<{ available: boolean; url:
 export async function getEmbedding(text: string): Promise<EmbeddingResult | null> {
   if (!(await isOllamaAvailable())) return null;
 
-  const truncated   = text.slice(0, Config.EMBED_MAX_CHARS);
-  const controller  = new AbortController();
-  const timer       = setTimeout(() => controller.abort(), Config.EMBED_TIMEOUT_MS);
+  const truncated = text.slice(0, Config.EMBED_MAX_CHARS);
 
-  try {
-    const resp = await fetch(resolvedOllamaUrl, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ model: Config.OLLAMA_MODEL, prompt: truncated }),
-      signal:  controller.signal,
-    });
-    clearTimeout(timer);
-
-    if (!resp.ok) {
-      ollamaAvailable = false;
-      return null;
+  const attempt = async (): Promise<EmbeddingResult | null | "retryable"> => {
+    const controller = new AbortController();
+    const timer      = setTimeout(() => controller.abort(), Config.EMBED_TIMEOUT_MS);
+    try {
+      const resp = await fetch(resolvedOllamaUrl, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ model: Config.OLLAMA_MODEL, prompt: truncated }),
+        signal:  controller.signal,
+      });
+      clearTimeout(timer);
+      if (!resp.ok) return "retryable";
+      const data = (await resp.json()) as { embedding?: number[] };
+      if (!Array.isArray(data.embedding) || data.embedding.length === 0) return null;
+      const vector = new Float32Array(data.embedding);
+      embedFailureStreak = 0; // success heals the streak
+      return { vector, modelName: Config.OLLAMA_MODEL, dimensions: vector.length };
+    } catch {
+      clearTimeout(timer);
+      return "retryable"; // timeout/abort/network — worth one retry
     }
+  };
 
-    const data = (await resp.json()) as { embedding?: number[] };
-    if (!Array.isArray(data.embedding) || data.embedding.length === 0) return null;
-
-    const vector = new Float32Array(data.embedding);
-    return {
-      vector,
-      modelName:  Config.OLLAMA_MODEL,
-      dimensions: vector.length,
-    };
-  } catch {
-    ollamaAvailable = false;
+  let result = await attempt();
+  if (result === "retryable") {
+    // M1 hardening: absorb a single transient blip (saturation, GC pause) with
+    // one short-backoff retry instead of instantly poisoning the availability cache.
+    await new Promise((r) => setTimeout(r, 300));
+    result = await attempt();
+  }
+  if (result === "retryable") {
+    embedFailureStreak++;
+    if (embedFailureStreak >= EMBED_FAILURE_STREAK_LIMIT) {
+      ollamaAvailable = false;          // re-probed after DOWN_RETRY_MS, not the full TTL
+      lastAvailabilityCheck = Date.now();
+    }
     return null;
   }
+  return result;
 }
 
 /**

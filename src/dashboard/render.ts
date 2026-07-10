@@ -486,6 +486,19 @@ export function renderDashboardHtml(): string {
   .chain-banner .chain-status{font-family:var(--mono);font-weight:600;letter-spacing:.04em;}
   .chain-banner .chain-detail{color:inherit;opacity:.85;}
 
+  /* skills git sync */
+  .fs-git-sync-details{margin-top:12px;padding:8px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;}
+  .git-sync-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:6px;}
+  .git-sync-pills{display:flex;gap:6px;flex-wrap:wrap;}
+  .git-pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.72rem;font-family:var(--mono);letter-spacing:.03em;}
+  .git-pill-ok{background:rgba(16,185,129,.15);color:#10b981;}
+  .git-pill-warn{background:rgba(245,158,11,.15);color:#f59e0b;}
+  .git-pill-dirty{background:rgba(239,68,68,.15);color:#f87171;}
+  .git-pill-new{background:rgba(96,165,250,.15);color:#60a5fa;}
+  .git-sync-btn{padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--accent,#2563eb);color:#fff;font-size:.82rem;cursor:pointer;font-weight:500;}
+  .git-sync-btn[disabled]{opacity:.5;cursor:default;background:transparent;color:var(--text-faint);}
+  .git-sync-meta{margin-top:6px;font-size:.78rem;color:var(--text-faint);}
+  .git-sync-meta code{font-size:.75rem;color:#94a3b8;}
   /* fs quarantine / admission */
   .fs-quarantine-details,.fs-admission-details,.per-agent-panel,.anti-patterns-panel,.savings-methodology,.skill-edit-form details.fixtures-readonly,.summarizer-breakdown,.trend-panel{margin-top:12px;padding:8px 14px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;}
   .fs-quarantine-table,.fs-admission-table,.spotter-runs-table,.runs-table,.scans-table,.savings-table,.summarizer-table,.mutations-table,.broadcasts-table,.market-pulls-table,.pull-details-table{width:100%;border-collapse:collapse;font-size:.84rem;}
@@ -852,6 +865,16 @@ export function renderDashboardHtml(): string {
      on a load trigger so operators see new events without a manual reload. -->
 <div class="panel" id="fs-skills-panel">
   <h2>Skill admission security <span class="sub">AST gate · HMAC chain · quarantine</span></h2>
+
+  <details class="fs-git-sync-details" open>
+    <summary><strong>Git sync &amp; versioning</strong> <small>(back up ~/.claude/skills to the private repo — commit &amp; push in one click; shows which skills are uncommitted)</small></summary>
+    <div id="fs-git-sync"
+         hx-get="/dashboard/fs-skills/git-status"
+         hx-trigger="load, every 60s"
+         hx-target="this" hx-swap="innerHTML">
+      Loading git status…
+    </div>
+  </details>
 
   <div id="fs-chain-banner"
        hx-get="/dashboard/fs-skills/chain-banner"

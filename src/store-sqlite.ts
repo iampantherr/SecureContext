@@ -143,7 +143,15 @@ export class SqliteStore implements Store {
     return reviveFactSqlite(projectPath, key, agentId);
   }
 
-  async recall(projectPath: string, agentId: string): Promise<MemoryFact[]> {
+  async recall(
+    projectPath: string,
+    agentId: string,
+    opts: { focus?: string; from?: Date; to?: Date; asOf?: Date } = {},
+  ): Promise<MemoryFact[]> {
+    if ((opts.focus && opts.focus.trim()) || opts.asOf || opts.from || opts.to) {
+      const { recallWorkingMemoryFocused } = await import("./memory.js");
+      return recallWorkingMemoryFocused(projectPath, agentId, opts.focus ?? "", opts);
+    }
     return recallWorkingMemory(projectPath, agentId);
   }
 

@@ -73,12 +73,17 @@ export async function detectContradictions(
     .slice(0, MAX_SCAN_FACTS);
   if (facts.length < 2) return { scanned: facts.length, flagged: 0, ollamaAvailable: true };
 
-  // Embed each fact value on demand; bail cleanly the moment Ollama is unavailable.
+  // M5 hardening (v0.41.0): skip facts whose embed transiently fails instead of
+  // aborting the whole scan — only an all-null run means Ollama is actually down.
   const vectors = new Map<string, Float32Array>();
+  let embFails = 0;
   for (const f of facts) {
     const emb = await getEmbedding(f.value);
-    if (!emb) return { scanned: facts.length, flagged: 0, ollamaAvailable: false };
+    if (!emb) { embFails++; continue; }
     vectors.set(f.key, emb.vector);
+  }
+  if (vectors.size < 2) {
+    return { scanned: facts.length, flagged: 0, ollamaAvailable: embFails < facts.length };
   }
 
   const found: Array<{ a: MemoryFact; b: MemoryFact; sim: number; reason: string; detail: string; victim: string | null }> = [];

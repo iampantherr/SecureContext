@@ -31,7 +31,9 @@ RUN addgroup -g 1001 -S securecontext && \
 # in Anthropic-style filesystem skills. The script_scanner runs `python3 -c`
 # with a small ast.parse() walker that detects shell=True, eval, exec,
 # os.system, pickle.loads, etc. — patterns regex can't reliably catch.
-RUN apk add --no-cache python3
+# git is also needed for the dashboard's skills git-sync panel (commit/push
+# the bind-mounted ~/.claude/skills repo to its private remote).
+RUN apk add --no-cache python3 git
 
 WORKDIR /app
 

@@ -4,6 +4,60 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.41.0] — 2026-07-10 — Memory-quality program: benchmark, focused recall, consolidation, temporal queries, multi-hop
+
+The Zep/Graphiti-research-driven M0–M5 program. Every stage benchmarked against a
+permanent yardstick and verified with real terminal agents. Bench result on the
+identical corpus: **overall hit@10 0% → 75%, MRR 0.000 → 0.571** (IE 0→75%,
+multi-hop 0→100%, temporal 0→75% with wrong-era decoy wins 60%→0%, knowledge-update 0→50%).
+
+### Added
+- **M0 — Memory benchmark harness** (`scripts/memory-bench.mjs`, `bench/bench-data.mjs`):
+  deterministic LongMemEval-style corpus + 32 questions across five ability categories,
+  scored Recall@K/MRR through the live API. `--seed` re-pristines; results are versioned
+  in `bench/results/` as the permanent regression yardstick.
+- **M1 — Relevance-ranked recall.** `zc_recall_context {focus:"<current task>"}` re-ranks
+  live facts by cosine(focus) × importance × salience (ZC_RECALL_W_*). Facts are embedded
+  at remember-time (`memory:<agent>:<key>`, content-hash deduped) with a cron backfill.
+  Without focus, ordering is byte-identical.
+- **M1 — Search candidate fix.** The vector index is now an INDEPENDENT candidate channel
+  (with a calibrated 0.55 similarity floor) plus a BM25 OR-fallback — natural-language
+  questions no longer return empty when one word misses (previously the vector index was
+  never consulted unless keywords hit). Kill-switches: ZC_VECTOR_CANDIDATES=0,
+  ZC_BM25_OR_FALLBACK=0.
+- **M2 — Memory consolidation** (`src/consolidation.ts` + cron): near-duplicate facts
+  (same agent+kind, cosine ≥ 0.75 — empirically calibrated) are LLM-merged into a
+  canonical statement; the loser is retired (`consolidated`, revivable). Guards: a
+  deterministic different-numbers veto (measured: contradicting TTL facts score 0.947 —
+  ABOVE paraphrase range), the contradiction-signal veto, and an LLM NOT_DUPLICATE veto.
+  ZC_CONSOLIDATE=0 disables.
+- **M3 — Temporal queries + bi-temporal-lite.** Zero-dep NL parser (`src/temporal_parse.ts`):
+  "last week", "about six weeks ago", "as of one month ago", "since March" resolve into
+  windows that boost in-window facts (ZC_RECALL_W_TEMPORAL) — and **as-of time travel**
+  reconstructs what was true at a past moment, including since-retired facts. Structured
+  dateFrom/dateTo/asOf params too (Graphiti exposes only structured filters and deferred
+  NL; Mem0 has NL but no time travel — SC now has all four). Optional event-time
+  `valid_at`/`invalid_at` columns (SQLite mig 37 / PG mig 35).
+- **M4 — Multi-hop graph retrieval.** The graph channel walks bounded BFS
+  (ZC_GRAPH_MAX_DEPTH=2, per-hop decay) instead of 1 hop — a chain A→B→C surfaces C when
+  only A matches the query. =1 restores the old behaviour.
+
+### Fixed (found by the benchmark + live agents)
+- Embedder learned-helplessness: ONE transient embed failure disabled ALL semantic
+  features for 60s. Now: retry-once, 2-failure streak required, 5s down-reprobe.
+- Contradiction scan aborted entirely (reporting "Ollama unavailable") on a single
+  failed embed; now skips that fact and continues.
+- Vector-injected garbage for no-answer queries (similarity floor).
+
+### Verified
+- Live terminal-agent E2E on the bench corpus (6/6): focused recall rank 79→1; temporal
+  window ranks last week's decision above the 3-week-old decoy; as-of surfaces a retired
+  fact; NL search empty→top-1; multi-hop rank 1; consolidated canonical fact visible.
+- Live terminal-agent REGRESSION E2E on a fresh project (7/7): classic recall format,
+  contradiction flagging, index+search, L2 symbol summary, transient mutation guard,
+  soft forget, focused recall — old features intact alongside new. Suite 865/868
+  (3 pre-existing fixtures) at every stage.
+
 ## [0.40.1] — 2026-07-03 — Auto-extract: deterministic coordination-message filter
 
 ### Fixed

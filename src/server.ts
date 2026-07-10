@@ -353,6 +353,9 @@ const TOOLS: Tool[] = [
       "Recall working memory and recent session events. " +
       "Call this at the start of every session to restore project context. " +
       "Returns structured sections: Working Memory · Session Events · System Status. " +
+      "WHEN YOU HAVE A SPECIFIC TASK, pass focus:'<one line describing it>' — facts are then " +
+      "ranked by relevance to YOUR task instead of raw importance (v0.41.0), which surfaces " +
+      "the gotchas/decisions that actually matter for the work at hand. " +
       "v0.17.1: repeat calls within 60s by the same agent/project return a cached response " +
       "(unchanged if no new memory / broadcasts / events have landed), saving ~$0.06 per cached call. " +
       "Pass force:true to bypass the cache.",
@@ -362,6 +365,7 @@ const TOOLS: Tool[] = [
         agent_id: { type: "string", description: "Agent namespace (default: 'default')" },
         force:    { type: "boolean", description: "Skip the recall cache and force a fresh pull (default: false)" },
         cite:     { type: "boolean", description: "v0.38.0 — append a provenance citation to every fact: 〔agent · date · origin〕 (origin = what created it: zc_remember, compact:<session>, broadcast:REJECT:<task>). Default false (keeps recall lean)." },
+        focus:    { type: "string", description: "v0.41.0 — one line describing your CURRENT task. Re-ranks facts by blended relevance (cosine to focus × importance × salience) so task-relevant facts surface first. Omit for the classic importance ordering." },
       },
       required: [],
     },
@@ -1395,7 +1399,10 @@ async function _handleRemoteTool(
         // UNION of (this agent's private facts) + (shared "default" pool) so
         // the agent sees their own notes AND project-wide coordination notes.
         const recallAgentId = String(body["agent_id"] ?? AGENT_ID);
-        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}`);
+        // M1 (v0.41.0) — focus re-ranks facts by relevance to the caller's current task.
+        const recallFocus = typeof body["focus"] === "string" && (body["focus"] as string).trim()
+          ? `&focus=${encodeURIComponent((body["focus"] as string).slice(0, 2000))}` : "";
+        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}${recallFocus}`);
         const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null; agent_id?: string; created_at?: string; origin?: string | null }> ?? [];
         // v0.38.0 — per-claim citations, opt-in ({cite:true}) so default recall stays lean.
         const wantCite = body["cite"] === true;
@@ -1419,9 +1426,15 @@ async function _handleRemoteTool(
           else if (f.resolution_status === "resolved_partial") t.push("~ partial");
           return t.length ? `  ⟨${t.join(" · ")}⟩` : "";
         };
-        for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
-        for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
-        for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+        if (recallFocus) {
+          // M1 — facts arrive RELEVANCE-ordered; regrouping by ★ would undo the ranking.
+          lines[0] = `## Working Memory (${facts.length}/${max} facts · ranked by task relevance)`;
+          for (const f of facts) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+        } else {
+          for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+        }
         // v0.21.0 — append skill inventory so the agent sees what's available
         // every time they recall context. Skip the section if no skills match
         // the role (avoids noise for projects that haven't authored any skills).
@@ -1803,7 +1816,8 @@ async function dispatchToolCall(
       }
 
       case "zc_recall_context": {
-        const { agent_id, force } = args as { agent_id?: string; force?: boolean };
+        const { agent_id, force, focus } = args as { agent_id?: string; force?: boolean; focus?: string };
+        const hasFocus = typeof focus === "string" && focus.trim().length > 0;
 
         // v0.17.1 — open DB once, use it for BOTH the cache freshness check AND
         // the full recompute path below. This avoids opening the SQLite file twice.
@@ -1822,7 +1836,10 @@ async function dispatchToolCall(
         // broadcasts / session_events, return the cached text with a small
         // "(cached Ns ago)" prefix. Skips ~800 output tokens on Opus (~$0.06).
         // Bypass via force=true.
-        if (!force) {
+        // M1 — focused recalls are task-specific: never serve OR write the shared
+        // (project, agent) cache for them (a cached focused list would poison the
+        // next unfocused call and vice versa).
+        if (!force && !hasFocus) {
           const { tryGetCachedRecall, decorateCachedResponse } = await import("./recall_cache.js");
           const cached = tryGetCachedRecall(PROJECT_PATH, agent_id, rcDb);
           if (cached.hit && cached.response !== undefined && cached.ageMs !== undefined) {
@@ -1831,7 +1848,17 @@ async function dispatchToolCall(
           }
         }
 
-        const wm         = recallWorkingMemory(PROJECT_PATH, agent_id);
+        let wm: ReturnType<typeof recallWorkingMemory>;
+        if (hasFocus) {
+          // M3 — parse NL time expressions in the focus into a structured window/as-of.
+          const { parseTemporalQuery } = await import("./temporal_parse.js");
+          const w = parseTemporalQuery(focus!);
+          wm = await (await import("./memory.js")).recallWorkingMemoryFocused(
+            PROJECT_PATH, agent_id ?? "default", (w.cleaned.trim() || focus!),
+            { from: w.from, to: w.to, asOf: w.asOf });
+        } else {
+          wm = recallWorkingMemory(PROJECT_PATH, agent_id);
+        }
         const events     = getRecentEvents(PROJECT_PATH, 20);
         const broadcasts = recallSharedChannel(PROJECT_PATH, { limit: 30 });
 
@@ -1847,8 +1874,9 @@ async function dispatchToolCall(
         const rcBanner = formatHealthBanner(rcHealth);
         if (rcBanner) parts.push(rcBanner);
 
-        // Section 1: Working Memory (structured by priority — limit is project-aware)
-        parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit, (args as { cite?: boolean })?.cite === true));
+        // Section 1: Working Memory (structured by priority — limit is project-aware;
+        // M1: relevance-ordered flat list when a focus was given)
+        parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit, (args as { cite?: boolean })?.cite === true, hasFocus));
 
         // Section 1b (v0.31.0): suspected contradictions (background scan once/session; local SQLite).
         const { formatContradictionsSection: fmtContraInproc } = await import("./memory_contradictions.js");
@@ -1899,8 +1927,10 @@ async function dispatchToolCall(
         // can piggyback on the already-open connection.
         const _recallText = parts.join("\n");
         try {
-          const { putCachedRecall } = await import("./recall_cache.js");
-          putCachedRecall(PROJECT_PATH, agent_id, _recallText, rcDb);
+          if (!hasFocus) { // M1 — never cache task-specific focused output under the shared key
+            const { putCachedRecall } = await import("./recall_cache.js");
+            putCachedRecall(PROJECT_PATH, agent_id, _recallText, rcDb);
+          }
         } catch { /* caching is best-effort; never fail the recall */ }
         rcDb.close();
         return { content: [{ type: "text", text: _recallText }] };

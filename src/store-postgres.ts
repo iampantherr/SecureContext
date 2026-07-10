@@ -217,6 +217,11 @@ export class PostgresStore implements Store {
     // Debounced 5s + fire-and-forget: a burst of remembers still costs one rebuild.
     this._scheduleBacklinkRebuild(projectPath);
 
+    // M1 (v0.41.0) — embed the LIVE fact (fire-and-forget, content-hash deduped) so
+    // focused recall can rank it by relevance. Same memory:<agent>:<key> source the
+    // eviction archive uses.
+    void this._storeEmbedding(projectHash, safeValue, `memory:${safeAgent}:${safeKey}`);
+
     // Evict if over the dynamic limit
     const limits = await this.getWorkingMemoryLimits(projectPath);
     const countRes = await this.pool.query<{ n: string }>(
@@ -323,9 +328,18 @@ export class PostgresStore implements Store {
     return this.retireFact(projectPath, safeKey, safeAgent, null, "forgotten");
   }
 
-  async recall(projectPath: string, agentId: string): Promise<MemoryFact[]> {
+  async recall(
+    projectPath: string,
+    agentId: string,
+    opts: { focus?: string; from?: Date; to?: Date; asOf?: Date } = {},
+  ): Promise<MemoryFact[]> {
     const projectHash = ph(projectPath);
     const safeAgent   = sanitize(agentId, 64);
+
+    // M3 (v0.41.0) — AS-OF time travel: reconstruct what was true at a past moment.
+    // Includes facts retired SINCE then (they were live at asOf) and excludes facts
+    // created after — the transaction timeline (created_at/valid_to) makes this a
+    // pure predicate change, no history table needed. (Applied in the branch SQL below.)
     // v0.22.2 — per-agent namespacing with shared pool. Each agent gets its
     // own private notebook (agent_id = ZC_AGENT_ID = "developer", "orchestrator",
     // etc.) AND always sees the project-wide "default" pool (cross-agent
@@ -339,25 +353,30 @@ export class PostgresStore implements Store {
     // When agentId="default" explicitly: return only the shared pool
     // (avoids redundant self-join).
     let rows: MemoryFact[];
+    const COLS = `key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at`;
     if (safeAgent === "default") {
+      const live = opts.asOf ? `created_at <= $2 AND (valid_to IS NULL OR valid_to > $2)` : `valid_to IS NULL`;
+      const params: unknown[] = opts.asOf ? [projectHash, opts.asOf] : [projectHash];
       const res = await this.pool.query<MemoryFact>(
-        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
-         FROM working_memory WHERE project_hash = $1 AND agent_id = 'default' AND valid_to IS NULL
+        `SELECT ${COLS}
+         FROM working_memory WHERE project_hash = $1 AND agent_id = 'default' AND ${live}
          ORDER BY importance DESC, created_at DESC`,
-        [projectHash]
+        params
       );
       rows = res.rows;
     } else {
       // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
+      const live = opts.asOf ? `created_at <= $3 AND (valid_to IS NULL OR valid_to > $3)` : `valid_to IS NULL`;
+      const params: unknown[] = opts.asOf ? [projectHash, safeAgent, opts.asOf] : [projectHash, safeAgent];
       const res = await this.pool.query<MemoryFact>(
-        `SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
+        `SELECT ${COLS}
          FROM working_memory
-         WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND valid_to IS NULL
+         WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND ${live}
          ORDER BY
            CASE WHEN agent_id = $2 THEN 0 ELSE 1 END,
            importance DESC,
            created_at DESC`,
-        [projectHash, safeAgent]
+        params
       );
       rows = res.rows;
     }
@@ -383,6 +402,56 @@ export class PostgresStore implements Store {
           WHERE w.project_hash = $1 AND w.key = t.key AND w.agent_id = t.agent_id`,
         [projectHash, rows.map((r) => r.key), rows.map((r) => r.agent_id ?? safeAgent)]
       ).catch(() => undefined);
+    }
+
+    // M1 (v0.41.0) — FOCUSED recall: with a focus string, re-rank live facts by
+    // blended relevance to the agent's CURRENT task (the M0 benchmark showed
+    // task-relevant facts ranking 74-79/81 under importance-only ordering).
+    //   score = RECALL_W_REL·cosine + RECALL_W_IMP·(importance/5) + RECALL_W_SAL·salience
+    // Missing vectors ⇒ rel=0 (importance still ranks them — graceful until the
+    // backfill lands). Ollama down ⇒ unfocused order unchanged. No focus ⇒ byte-identical.
+    if (opts.focus && opts.focus.trim() && rows.length > 0) {
+      try {
+        const qEmbed = await getEmbedding(opts.focus.slice(0, 2000));
+        if (qEmbed) {
+          const sources = rows.map((r) => `memory:${r.agent_id ?? safeAgent}:${r.key}`);
+          const embRes = await this.pool.query<{ source: string; vector: string }>(
+            `SELECT source, vector::text FROM embeddings
+             WHERE project_hash = $1 AND model_name = $2 AND source = ANY($3)`,
+            [projectHash, ACTIVE_MODEL, sources]
+          );
+          const vecMap = new Map(embRes.rows.map((r) => [r.source, r.vector]));
+          const now = Date.now();
+          const scoreOf = (r: MemoryFact): number => {
+            const vs = vecMap.get(`memory:${r.agent_id ?? safeAgent}:${r.key}`);
+            let rel = 0;
+            if (vs) {
+              const nums = vs.slice(1, -1).split(",").map(Number);
+              rel = Math.max(0, cosineSimilarity(new Float32Array(nums), qEmbed.vector));
+            }
+            const sal = computeSalience(r.access_count, r.last_retrieved_at ?? null, now);
+            let score = Config.RECALL_W_REL * rel + Config.RECALL_W_IMP * (r.importance / 5) + Config.RECALL_W_SAL * sal;
+            // M3 — temporal window bonus: event-time (valid_at, else created_at)
+            // inside the parsed window ranks the fact above topic-only matches.
+            if (opts.from || opts.to) {
+              const evRaw = (r as MemoryFact & { valid_at?: string | Date | null }).valid_at ?? r.created_at;
+              const ev = evRaw instanceof Date ? evRaw.getTime() : Date.parse(String(evRaw));
+              const inWindow =
+                Number.isFinite(ev) &&
+                (!opts.from || ev >= opts.from.getTime()) &&
+                (!opts.to   || ev <= opts.to.getTime());
+              if (inWindow) score += Config.RECALL_W_TEMPORAL;
+            }
+            return score;
+          };
+          const scores = new Map(rows.map((r) => [r, scoreOf(r)]));
+          rows = [...rows].sort((a, b) =>
+            (scores.get(b)! - scores.get(a)!) ||
+            (b.importance - a.importance) ||
+            (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
+          );
+        }
+      } catch { /* focus ranking is best-effort — fall back to unfocused order */ }
     }
     return rows;
   }
@@ -598,9 +667,8 @@ export class PostgresStore implements Store {
     const queryText = queries.join(" ");
 
     // BM25 candidates via ts_rank (PostgreSQL full-text)
-    const bm25Res = await this.pool.query<{
-      source: string; content: string; rank: number; source_type: string;
-    }>(`
+    type CandRow = { source: string; content: string; rank: number; source_type: string; synthetic?: boolean };
+    const bm25Res = await this.pool.query<CandRow>(`
       SELECT ke.source, ke.content,
              ts_rank(to_tsvector('english', ke.content), plainto_tsquery('english', $2)) AS rank,
              COALESCE(sm.source_type, 'internal') as source_type
@@ -612,7 +680,60 @@ export class PostgresStore implements Store {
       LIMIT  $3
     `, [projectHash, queryText, candidates]);
 
-    if (bm25Res.rows.length === 0) return [];
+    // M1 (v0.41.0) — candidate-pool fix. plainto_tsquery is implicit-AND: one word the
+    // target doc lacks ("what is the retry SCHEDULE…") returned ZERO results and the
+    // vector index was never consulted (the M0 benchmark's day-one finding). Two new
+    // channels fill the pool; ZC_BM25_OR_FALLBACK=0 / ZC_VECTOR_CANDIDATES=0 restore
+    // the legacy BM25-gated behaviour exactly.
+    const candMap = new Map<string, CandRow>(bm25Res.rows.map((r) => [r.source, r]));
+
+    // (a) OR-fallback keyword pass — any-term matches join when the AND pass under-fills.
+    if (Config.BM25_OR_FALLBACK && candMap.size < candidates) {
+      const terms = [...new Set(queryText.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3))].slice(0, 12);
+      if (terms.length >= 2) {
+        try {
+          const orRes = await this.pool.query<CandRow>(`
+            SELECT ke.source, ke.content,
+                   ts_rank(to_tsvector('english', ke.content), to_tsquery('english', $2)) AS rank,
+                   COALESCE(sm.source_type, 'internal') as source_type
+            FROM   knowledge_entries ke
+            LEFT JOIN source_meta sm ON sm.project_hash = ke.project_hash AND sm.source = ke.source
+            WHERE  ke.project_hash = $1
+              AND  to_tsvector('english', ke.content) @@ to_tsquery('english', $2)
+            ORDER  BY rank DESC
+            LIMIT  $3
+          `, [projectHash, terms.join(" | "), candidates]);
+          for (const r of orRes.rows) if (!candMap.has(r.source)) candMap.set(r.source, r);
+        } catch { /* malformed tsquery — AND results only */ }
+      }
+    }
+
+    // (b) Independent vector candidates — nearest stored vectors join the pool even with
+    // zero keyword overlap (synthetic: they score via the cosine/graph channels only).
+    let qEmbedEarly: Awaited<ReturnType<typeof getEmbedding>> = null;
+    if (Config.VECTOR_CANDIDATES > 0) {
+      try {
+        qEmbedEarly = await getEmbedding(queryText);
+        if (qEmbedEarly) {
+          const qVecStr = "[" + qEmbedEarly.vector.join(",") + "]";
+          const vecRes = await this.pool.query<CandRow>(`
+            SELECT ke.source, ke.content, 0 AS rank,
+                   COALESCE(sm.source_type, 'internal') as source_type
+            FROM   embeddings e
+            JOIN   knowledge_entries ke ON ke.project_hash = e.project_hash AND ke.source = e.source
+            LEFT JOIN source_meta sm ON sm.project_hash = ke.project_hash AND sm.source = ke.source
+            WHERE  e.project_hash = $1 AND e.model_name = $2
+              AND  (e.vector <=> $3::vector) <= $5
+            ORDER  BY e.vector <=> $3::vector
+            LIMIT  $4
+          `, [projectHash, ACTIVE_MODEL, qVecStr, Config.VECTOR_CANDIDATES, 1 - Config.VECTOR_MIN_SIM]);
+          for (const r of vecRes.rows) if (!candMap.has(r.source)) candMap.set(r.source, { ...r, synthetic: true });
+        }
+      } catch { /* pgvector unavailable — keyword candidates only */ }
+    }
+
+    if (candMap.size === 0) return [];
+    const candRows = [...candMap.values()];
 
     // Tier-1 A: backlink in-degree boost (PG mirror). ONE batched lookup, shared by the
     // vector path AND the BM25 fallback. Empty when W_BACKLINK=0 / no rows / pre-migration
@@ -622,7 +743,7 @@ export class PostgresStore implements Store {
       try {
         const blRes = await this.pool.query<{ source: string; weighted_in: number }>(
           `SELECT source, weighted_in FROM kb_backlinks_pg WHERE project_hash = $1 AND source = ANY($2)`,
-          [projectHash, bm25Res.rows.map(r => r.source)]
+          [projectHash, candRows.map(r => r.source)]
         );
         for (const r of blRes.rows) blMap.set(r.source, r.weighted_in);
       } catch { /* kb_backlinks_pg absent (pre-migration) — leave map empty */ }
@@ -635,12 +756,12 @@ export class PostgresStore implements Store {
     // Try vector reranking
     let results: KnowledgeEntry[] = [];
     try {
-      const qEmbed = await getEmbedding(queryText);
+      const qEmbed = qEmbedEarly ?? await getEmbedding(queryText);
       if (qEmbed) {
         const qVec = "[" + qEmbed.vector.join(",") + "]";
-        const sources = bm25Res.rows.map(r => r.source);
+        const sources = candRows.map(r => r.source);
 
-        // Get stored embeddings for BM25 candidates
+        // Get stored embeddings for ALL candidates (keyword + OR-fallback + vector-injected)
         const embRes = await this.pool.query<{ source: string; vector: string }>(
           `SELECT source, vector::text FROM embeddings
            WHERE project_hash = $1 AND source = ANY($2) AND model_name = $3`,
@@ -648,10 +769,10 @@ export class PostgresStore implements Store {
         );
 
         const embMap = new Map(embRes.rows.map(r => [r.source, r.vector]));
-        const maxBm25 = Math.max(...bm25Res.rows.map(r => r.rank), 1);
+        const maxBm25 = Math.max(...candRows.map(r => r.rank), 1);
 
-        // Compute cosine for every BM25 candidate up front (needed by both fusion modes).
-        const withCos = bm25Res.rows.map(row => {
+        // Compute cosine for every candidate up front (needed by both fusion modes).
+        const withCos = candRows.map(row => {
           let cosScore = 0;
           const storedVecStr = embMap.get(row.source);
           if (storedVecStr) {
@@ -665,15 +786,17 @@ export class PostgresStore implements Store {
         // Tier-2 #3: RRF fuses per-list RANK positions (scale-free); weighted fuses
         // normalized scores + additive backlink boost (byte-identical to v0.31.0).
         const useRRF = Config.RETRIEVAL_FUSION === "rrf";
-        // BM25 rank = position in bm25Res.rows (already ORDER BY rank DESC).
-        const bm25RankMap = new Map(bm25Res.rows.map((r, i) => [r.source, i + 1]));
+        // BM25 rank list: keyword-evidence candidates ONLY (synthetic vector-injected
+        // rows have no keyword signal — they score via the cosine/graph channels).
+        const bm25RankMap = new Map(candRows.filter(r => !r.synthetic)
+          .sort((a, b) => b.rank - a.rank).map((r, i) => [r.source, i + 1]));
         let cosRankMap: Map<string, number> | null = null;
         let blRankMap:  Map<string, number> | null = null;
         let graphRankMap: Map<string, number> | null = null;
         if (useRRF) {
           cosRankMap = new Map([...withCos].sort((a, b) => b.cosScore - a.cosScore).map((x, i) => [x.row.source, i + 1]));
           if (Config.W_BACKLINK > 0 && blMap.size > 0) {
-            blRankMap = new Map(bm25Res.rows.map(r => ({ s: r.source, w: blMap.get(r.source) ?? 0 }))
+            blRankMap = new Map(candRows.map(r => ({ s: r.source, w: blMap.get(r.source) ?? 0 }))
               .filter(x => x.w > 0).sort((a, b) => b.w - a.w).map((x, i) => [x.s, i + 1]));
           }
           // v0.37.0 — 4th list: graph neighbor expansion (SQLite parity). 1-hop kb_edges_pg
@@ -681,23 +804,35 @@ export class PostgresStore implements Store {
           // (KB sources + live memory facts) are pulled into the candidate pool.
           if (Config.RRF_W_GRAPH > 0) {
             try {
-              const topSeeds = bm25Res.rows.slice(0, Config.GRAPH_EXPAND_TOP_K).map(r => r.source);
+              const topSeeds = candRows.slice(0, Config.GRAPH_EXPAND_TOP_K).map(r => r.source);
               if (topSeeds.length > 0) {
-                const eRows = (await this.pool.query<{ a: string; b: string; weight: number }>(
-                  `SELECT from_source AS a, to_source AS b, weight FROM kb_edges_pg
-                   WHERE project_hash = $1 AND (from_source = ANY($2) OR to_source = ANY($2))`,
-                  [projectHash, topSeeds])).rows;
+                // M4 (v0.41.0) — bounded multi-hop BFS (was 1-hop). A doc chain
+                // A→B→C where only A matches the query now surfaces C at depth 2,
+                // with per-hop weight decay so nearer neighbors dominate.
                 const seeds = new Set(topSeeds);
                 const nScore = new Map<string, number>();
-                for (const e of eRows) {
-                  const nb = seeds.has(e.a) ? e.b : (seeds.has(e.b) ? e.a : null);
-                  if (!nb || seeds.has(nb)) continue;
-                  nScore.set(nb, (nScore.get(nb) ?? 0) + (e.weight ?? 1));
+                let frontier = topSeeds;
+                const visited = new Set(topSeeds);
+                for (let depth = 1; depth <= Math.max(1, Config.GRAPH_MAX_DEPTH) && frontier.length > 0; depth++) {
+                  const decay = Math.pow(Config.GRAPH_HOP_DECAY, depth - 1);
+                  const eRows = (await this.pool.query<{ a: string; b: string; weight: number }>(
+                    `SELECT from_source AS a, to_source AS b, weight FROM kb_edges_pg
+                     WHERE project_hash = $1 AND (from_source = ANY($2) OR to_source = ANY($2))`,
+                    [projectHash, frontier])).rows;
+                  const frontierSet = new Set(frontier);
+                  const next: string[] = [];
+                  for (const e of eRows) {
+                    const nb = frontierSet.has(e.a) ? e.b : (frontierSet.has(e.b) ? e.a : null);
+                    if (!nb || seeds.has(nb)) continue;
+                    nScore.set(nb, (nScore.get(nb) ?? 0) + (e.weight ?? 1) * decay);
+                    if (!visited.has(nb)) { visited.add(nb); next.push(nb); }
+                  }
+                  frontier = next;
                 }
                 const rankedN = [...nScore.entries()].sort((x, y) => y[1] - x[1]).slice(0, Config.GRAPH_EXPAND_MAX);
                 if (rankedN.length > 0) {
                   graphRankMap = new Map(rankedN.map(([s], i) => [s, i + 1]));
-                  const inSet = new Set(bm25Res.rows.map(r => r.source));
+                  const inSet = new Set(candRows.map(r => r.source));
                   const missing = rankedN.map(([s]) => s).filter(s => !inSet.has(s));
                   const kbMissing  = missing.filter(s => !s.startsWith("memory:"));
                   const memMissing = missing.filter(s => s.startsWith("memory:"));
@@ -760,8 +895,9 @@ export class PostgresStore implements Store {
     if (results.length === 0) {
       // BM25-only fallback (Ollama down). Tier-1 A: same backlink boost. W_BACKLINK=0
       // ⇒ boost=0 ⇒ re-sort the already-rank-sorted rows by raw ts_rank ⇒ byte-identical.
-      const maxBm25Fb = Math.max(...bm25Res.rows.map(r => r.rank), 1);
-      const fb = bm25Res.rows.map(r => {
+      const kwRows = candRows.filter(r => !r.synthetic);
+      const maxBm25Fb = Math.max(...kwRows.map(r => r.rank), 1);
+      const fb = kwRows.map(r => {
         const boost = blBoost(r.source);
         const rank  = Config.W_BACKLINK > 0 ? (r.rank / maxBm25Fb) + boost : r.rank;
         return { r, rank, boost };
@@ -1035,11 +1171,18 @@ export class PostgresStore implements Store {
        ORDER BY importance DESC, created_at DESC LIMIT $3`, params)).rows;
     if (facts.length < 2) return { scanned: facts.length, flagged: 0, ollamaAvailable: true };
 
+    // M5 hardening (v0.41.0): a single null embed (transient blip) used to ABORT the
+    // whole scan and report "Ollama unavailable" while everything else worked. Now:
+    // skip the failing fact and continue — only an all-null run means Ollama is down.
     const vectors = new Map<string, Float32Array>();
+    let embFails = 0;
     for (const f of facts) {
       const emb = await getEmbedding(f.value);
-      if (!emb) return { scanned: facts.length, flagged: 0, ollamaAvailable: false };
+      if (!emb) { embFails++; continue; }
       vectors.set(f.key, emb.vector);
+    }
+    if (vectors.size < 2) {
+      return { scanned: facts.length, flagged: 0, ollamaAvailable: embFails < facts.length };
     }
     const found: Array<{ ka: string; kb: string; sim: number; reason: string; detail: string; victim: string | null }> = [];
     for (let i = 0; i < facts.length; i++) {
@@ -1169,7 +1312,106 @@ export class PostgresStore implements Store {
         if (re.ollamaDown) ollamaDown = true;
       } catch { /* best-effort */ }
     }
+    // M1 (v0.41.0) — backfill embeddings for LIVE working-memory facts that predate
+    // remember-time embedding (budgeted). Focused recall degrades gracefully without
+    // them (rel=0), but each cycle closes more of the gap.
+    if (!ollamaDown) {
+      try { await this._backfillFactEmbeddings(40); } catch { /* best-effort */ }
+    }
+    // M2 (v0.41.0) — memory consolidation: merge near-duplicate facts (budgeted,
+    // conservative, revivable). See src/consolidation.ts for the full contract.
+    if (!ollamaDown) {
+      try { await this.consolidateMemory(); } catch { /* best-effort */ }
+    }
     return { projects: projects.length, flagged, backfilledProjects, ollamaDown, entities };
+  }
+
+  /**
+   * M2 (v0.41.0) — one consolidation pass: for each (project, agent) namespace with
+   * live facts, find paraphrase-level near-duplicate pairs (cosine ≥ CONSOLIDATE_SIM,
+   * same kind, no conflict signal), LLM-merge them into a canonical statement on the
+   * survivor (higher importance wins; tie → older key survives), and RETIRE the loser
+   * (superseded_by=survivor, retired_reason='consolidated' — revivable like any
+   * retirement). Budgeted to CONSOLIDATE_MAX_PER_CYCLE merges per cycle.
+   */
+  async consolidateMemory(): Promise<{ merged: number; examined: number }> {
+    const { CONSOLIDATE_ENABLED, CONSOLIDATE_MAX_PER_CYCLE, selectMergePairs, pickSurvivor, llmMergeFacts } =
+      await import("./consolidation.js");
+    if (!CONSOLIDATE_ENABLED) return { merged: 0, examined: 0 };
+
+    // Namespaces with enough live facts to bother (cheapest projects first is fine).
+    const namespaces = (await this.pool.query<{ project_hash: string; agent_id: string; n: string }>(
+      `SELECT project_hash, agent_id, COUNT(*)::text AS n FROM working_memory
+        WHERE valid_to IS NULL GROUP BY project_hash, agent_id HAVING COUNT(*) >= 4
+        ORDER BY COUNT(*) DESC LIMIT 20`)).rows;
+
+    let merged = 0, examined = 0;
+    for (const ns of namespaces) {
+      if (merged >= CONSOLIDATE_MAX_PER_CYCLE) break;
+      const facts = (await this.pool.query<{ key: string; value: string; importance: number; kind: string | null; created_at: Date; agent_id: string }>(
+        `SELECT key, value, importance, kind, created_at, agent_id FROM working_memory
+          WHERE project_hash = $1 AND agent_id = $2 AND valid_to IS NULL
+          ORDER BY created_at DESC LIMIT 250`, [ns.project_hash, ns.agent_id])).rows;
+      const embRes = (await this.pool.query<{ source: string; vector: string }>(
+        `SELECT source, vector::text FROM embeddings
+          WHERE project_hash = $1 AND model_name = $2 AND source = ANY($3)`,
+        [ns.project_hash, ACTIVE_MODEL, facts.map((f) => `memory:${f.agent_id}:${f.key}`)])).rows;
+      const vectors = new Map<string, Float32Array>();
+      for (const e of embRes) {
+        const key = e.source.split(":").slice(2).join(":");
+        vectors.set(key, new Float32Array(e.vector.slice(1, -1).split(",").map(Number)));
+      }
+      examined += facts.length;
+
+      const pairs = selectMergePairs(facts, vectors, cosineSimilarity);
+      for (const p of pairs) {
+        if (merged >= CONSOLIDATE_MAX_PER_CYCLE) break;
+        const mergedText = await llmMergeFacts(p.a.value, p.b.value);
+        if (!mergedText) continue; // LLM unavailable / vetoed (NOT_DUPLICATE) / junk — skip
+        const { survivor, loser } = pickSurvivor(p.a, p.b);
+        // 1. survivor gets the canonical merged text (+ re-embed, content-hash aware)
+        await this.pool.query(
+          `UPDATE working_memory SET value = $4 WHERE project_hash = $1 AND agent_id = $2 AND key = $3`,
+          [ns.project_hash, ns.agent_id, survivor.key, mergedText.slice(0, 500)]);
+        void this._storeEmbedding(ns.project_hash, mergedText.slice(0, 500), `memory:${ns.agent_id}:${survivor.key}`);
+        // 2. loser is retired — out of recall, revivable, purged after RETIRE_PURGE_DAYS
+        await this.pool.query(
+          `UPDATE working_memory SET valid_to = NOW(), superseded_by = $4, retired_reason = 'consolidated'
+            WHERE project_hash = $1 AND agent_id = $2 AND key = $3`,
+          [ns.project_hash, ns.agent_id, loser.key, survivor.key]);
+        merged++;
+        const { logger } = await import("./logger.js");
+        logger.info("memory", "facts_consolidated", {
+          project_hash: ns.project_hash, agent_id: ns.agent_id,
+          survivor: survivor.key, retired: loser.key, sim: +p.sim.toFixed(3),
+        });
+      }
+    }
+    return { merged, examined };
+  }
+
+  /**
+   * M1 (v0.41.0) — embed live working-memory facts that don't yet have a vector
+   * under their memory:<agent>:<key> source. Budgeted per enrichment cycle.
+   */
+  private async _backfillFactEmbeddings(budget: number): Promise<number> {
+    const rows = (await this.pool.query<{ project_hash: string; agent_id: string; key: string; value: string }>(
+      `SELECT wm.project_hash, wm.agent_id, wm.key, wm.value
+         FROM working_memory wm
+         LEFT JOIN embeddings e
+           ON e.project_hash = wm.project_hash
+          AND e.source = 'memory:' || wm.agent_id || ':' || wm.key
+          AND e.model_name = $1
+        WHERE wm.valid_to IS NULL AND e.source IS NULL
+        LIMIT $2`, [ACTIVE_MODEL, budget])).rows;
+    let done = 0;
+    for (const r of rows) {
+      try {
+        await this._storeEmbedding(r.project_hash, r.value, `memory:${r.agent_id}:${r.key}`);
+        done++;
+      } catch { /* skip — retried next cycle */ }
+    }
+    return done;
   }
 
   /**

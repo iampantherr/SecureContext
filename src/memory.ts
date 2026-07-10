@@ -373,6 +373,14 @@ export function rememberFact(
   // import keeps the memory↔knowledge↔backlinks module graph cycle-free at load time.
   void import("./indexing/backlinks.js").then((m) => m.rebuildBacklinksAsync(projectPath)).catch(() => undefined);
 
+  // M1 (v0.41.0) — embed the LIVE fact at remember-time (fire-and-forget, content-hash
+  // deduped) so focused recall can rank facts by relevance to the agent's current task.
+  // Same `memory:<agent>:<key>` source the eviction archive uses, so the vector is
+  // reused if the fact is later archived. Dynamic import: cycle-proof.
+  void import("./knowledge.js")
+    .then((m) => m.storeEmbeddingAsync(projectPath, safeValue, `memory:${safeAgent}:${safeKey}`))
+    .catch(() => undefined);
+
   // Evict if over limit — evict lowest importance + oldest first (MemGPT eviction policy)
   // Limit is dynamically sized based on project complexity (see getWorkingMemoryLimits)
   // v0.37.0 — retired facts (valid_to set) don't count against the bound and are never
@@ -491,6 +499,93 @@ export function recallWorkingMemory(
 }
 
 /**
+ * M1 (v0.41.0) — FOCUSED recall: re-rank live working-memory facts by blended
+ * relevance to the agent's CURRENT task instead of raw importance.
+ *
+ * Why: importance-ordered recall answers "what are this project's most
+ * important facts", not "which facts matter for what I'm doing right now" —
+ * the M0 benchmark showed task-relevant facts ranking 74-79th of 81 behind
+ * high-importance work-log noise. With a focus string, ordering becomes
+ *   score = RECALL_W_REL·cosine(focus, fact) + RECALL_W_IMP·(importance/5)
+ *         + RECALL_W_SAL·salience
+ * Facts without a stored vector fall back to rel=0 (they still rank via
+ * importance — graceful before the embedding backfill completes). If the
+ * focus embedding itself fails (Ollama down), the unfocused order is
+ * returned unchanged. Without focus, behaviour is byte-identical.
+ */
+export async function recallWorkingMemoryFocused(
+  projectPath: string,
+  agentId: string,
+  focus: string,
+  win: { from?: Date; to?: Date; asOf?: Date } = {},   // M3 — temporal window / as-of
+): Promise<MemoryFact[]> {
+  let rows: MemoryFact[];
+  if (win.asOf) {
+    // M3 — AS-OF time travel over the transaction timeline: what was live THEN
+    // (includes facts retired since; excludes facts created after).
+    const db = openDb(projectPath);
+    try {
+      ensureAgentIdColumn(db);
+      ensureEpistemologyColumns(db);
+      const safeAgent = sanitize(agentId, 64);
+      const iso = win.asOf.toISOString();
+      rows = db.prepare(`
+        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
+        FROM working_memory
+        WHERE (agent_id = ? OR agent_id = 'default')
+          AND created_at <= ? AND (valid_to IS NULL OR valid_to > ?)
+        ORDER BY importance DESC, created_at DESC
+      `).all(safeAgent, iso, iso) as unknown as MemoryFact[];
+    } finally { db.close(); }
+  } else {
+    rows = recallWorkingMemory(projectPath, agentId);
+  }
+  if (!focus.trim() || rows.length === 0) return rows;
+
+  const { getEmbedding, cosineSimilarity, deserializeVector, ACTIVE_MODEL } = await import("./embedder.js");
+  const qEmbed = await getEmbedding(focus.slice(0, 2000));
+  if (!qEmbed) return rows; // Ollama down — degrade to unfocused order
+
+  // One batched read of the live facts' vectors (source = memory:<agent>:<key>).
+  const vecMap = new Map<string, Float32Array>();
+  try {
+    const db = openDb(projectPath);
+    try {
+      const sources = rows.map((r) => `memory:${r.agent_id ?? agentId}:${r.key}`);
+      const ph = sources.map(() => "?").join(",");
+      const embRows = db.prepare(
+        `SELECT source, vector FROM embeddings WHERE model_name = ? AND source IN (${ph})`
+      ).all(ACTIVE_MODEL, ...sources) as Array<{ source: string; vector: Buffer }>;
+      for (const e of embRows) vecMap.set(e.source, deserializeVector(e.vector));
+    } finally { db.close(); }
+  } catch { /* embeddings table absent — rel=0 for all, order falls back to importance */ }
+
+  const now = Date.now();
+  const scored = rows.map((r) => {
+    const v   = vecMap.get(`memory:${r.agent_id ?? agentId}:${r.key}`);
+    const rel = v ? Math.max(0, cosineSimilarity(qEmbed.vector, v)) : 0;
+    const sal = computeSalience(r.access_count, r.last_retrieved_at, now);
+    let score = Config.RECALL_W_REL * rel + Config.RECALL_W_IMP * (r.importance / 5) + Config.RECALL_W_SAL * sal;
+    // M3 — temporal window bonus (event-time valid_at falls back to created_at)
+    if (win.from || win.to) {
+      const evRaw = (r as MemoryFact & { valid_at?: string | null }).valid_at ?? r.created_at;
+      const ev = Date.parse(String(evRaw));
+      const inWindow = Number.isFinite(ev) &&
+        (!win.from || ev >= win.from.getTime()) &&
+        (!win.to   || ev <= win.to.getTime());
+      if (inWindow) score += Config.RECALL_W_TEMPORAL;
+    }
+    return { r, score };
+  });
+  scored.sort((a, b) =>
+    b.score - a.score ||
+    b.r.importance - a.r.importance ||
+    (a.r.created_at < b.r.created_at ? 1 : a.r.created_at > b.r.created_at ? -1 : 0)
+  );
+  return scored.map((x) => x.r);
+}
+
+/**
  * MemGPT operation: ARCHIVE SESSION SUMMARY.
  * Stored with 'summary' retention tier — kept for 365 days.
  */
@@ -590,6 +685,7 @@ export function formatWorkingMemoryForContext(
   agentId: string = "default",
   max: number = Config.WORKING_MEMORY_MAX,
   cite: boolean = false,  // v0.38.0 — per-claim citation chips (opt-in; recall stays lean by default)
+  focused: boolean = false, // M1 (v0.41.0) — facts arrive RELEVANCE-ordered; render flat, don't regroup by ★
 ): string {
   if (facts.length === 0) return "## Working Memory\nEmpty — no facts stored yet.";
 
@@ -598,7 +694,7 @@ export function formatWorkingMemoryForContext(
   const ephemeral = facts.filter((f) => f.importance <= 2);
 
   const lines: string[] = [
-    `## Working Memory (${facts.length}/${max} facts${agentId !== "default" ? ` · agent: ${agentId}` : ""})`,
+    `## Working Memory (${facts.length}/${max} facts${agentId !== "default" ? ` · agent: ${agentId}` : ""}${focused ? " · ranked by task relevance" : ""})`,
   ];
 
   // v0.31.0: plain facts render byte-identical; non-fact / resolved claims get an inline badge.
@@ -619,6 +715,13 @@ export function formatWorkingMemoryForContext(
     else if (f.resolution_status === "resolved_partial")   tags.push("~ partial");
     return (tags.length ? `${base}  ⟨${tags.join(" · ")}⟩` : base) + citeChip(f);
   };
+
+  // M1 — focused recall is RELEVANCE-ordered top-to-bottom; regrouping into ★ tiers
+  // would destroy exactly the ordering the caller asked for. Render flat instead.
+  if (focused) {
+    for (const f of facts) lines.push(fmtFact(f));
+    return lines.join("\n");
+  }
 
   if (critical.length > 0) {
     lines.push("\n**Critical [★4-5]**");

@@ -1217,6 +1217,153 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ── Skills git sync (versioning + off-machine backup) ──────────────────────
+  // One-click stage+commit+push of ~/.claude/skills to its git remote, plus a
+  // per-skill view of what is committed/pushed vs modified vs new-uncommitted.
+  async function runGit(args: string[], cwd: string): Promise<{ ok: boolean; out: string; err: string }> {
+    const { execFile } = await import("node:child_process");
+    // The skills repo is bind-mounted from the host, so its owner UID differs
+    // from the container user — mark it safe to avoid git's "dubious ownership" block.
+    // core.autocrlf=input: the host (Windows) checks out CRLF; without this the
+    // Linux container git would see every file as modified (CRLF vs LF blob) and
+    // could commit line-ending-only noise. `input` normalizes CRLF->LF on commit
+    // and never rewrites the working tree, so status matches the host.
+    const full = ["-c", `safe.directory=${cwd}`, "-c", "core.autocrlf=input", ...args];
+    return new Promise((resolve) => {
+      execFile("git", full, { cwd, timeout: 30_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+        (error, stdout, stderr) => resolve({ ok: !error, out: String(stdout ?? ""), err: String(stderr ?? "") }));
+    });
+  }
+  async function skillsDirPath(): Promise<string> {
+    const { homedir } = await import("node:os");
+    const { join } = await import("node:path");
+    return join(homedir(), ".claude", "skills");
+  }
+  async function renderSkillsGitStatusHtml(): Promise<string> {
+    const dir = await skillsDirPath();
+    const isRepo = await runGit(["rev-parse", "--is-inside-work-tree"], dir);
+    if (!isRepo.ok || isRepo.out.trim() !== "true") {
+      const noGit = /ENOENT|not found|not recognized/i.test(isRepo.err);
+      const msg = noGit
+        ? `Git is not available on the dashboard server. Add <code>git</code> to the image (alpine: <code>apk add git</code>) and rebuild.`
+        : `Not a git repo: <code>${escapeHtml(dir)}</code>. Run <code>git init</code> to enable versioning.`;
+      return `<div class="git-sync-status"><p class="empty" style="color:#94a3b8">${msg}</p></div>`;
+    }
+    const [statusR, logR, remoteR] = await Promise.all([
+      runGit(["status", "--porcelain=v1", "--branch"], dir),
+      runGit(["log", "-1", "--format=%h%cr%s"], dir),
+      runGit(["remote", "get-url", "origin"], dir),
+    ]);
+    let branchLine = "";
+    const entries: { x: string; y: string; path: string }[] = [];
+    for (const l of statusR.out.split("\n").filter((s) => s.length > 0)) {
+      if (l.startsWith("## ")) { branchLine = l.slice(3); continue; }
+      entries.push({ x: l[0], y: l[1], path: l.slice(3) });
+    }
+    let ahead = 0;
+    const am = branchLine.match(/ahead (\d+)/); if (am) ahead = +am[1];
+    const bySkill = new Map<string, { modified: number; untracked: number; staged: number }>();
+    for (const e of entries) {
+      const top = e.path.replace(/^"|"$/g, "").split("/")[0];
+      if (top === ".gitignore" || top.startsWith(".git")) continue;
+      const g = bySkill.get(top) ?? { modified: 0, untracked: 0, staged: 0 };
+      if (e.x === "?" && e.y === "?") g.untracked++;
+      else { if (e.x !== " " && e.x !== "?") g.staged++; if (e.y !== " ") g.modified++; }
+      bySkill.set(top, g);
+    }
+    const dirty = [...bySkill.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const remote = remoteR.ok ? remoteR.out.trim() : "";
+    const [h, cr, subj] = (logR.ok ? logR.out.trim() : "").split("");
+    const pushPill = !remote
+      ? `<span class="git-pill git-pill-warn">no remote</span>`
+      : (ahead > 0 ? `<span class="git-pill git-pill-warn">${ahead} commit${ahead === 1 ? "" : "s"} to push</span>` : `<span class="git-pill git-pill-ok">pushed</span>`);
+    const dirtyPill = dirty.length === 0
+      ? `<span class="git-pill git-pill-ok">working tree clean</span>`
+      : `<span class="git-pill git-pill-dirty">${dirty.length} skill${dirty.length === 1 ? "" : "s"} uncommitted</span>`;
+    const rows = dirty.length === 0
+      ? `<tr><td colspan="3" style="color:#10b981">✅ Every skill is committed.</td></tr>`
+      : dirty.map(([name, g]) => {
+          const isNew = g.untracked > 0 && g.modified === 0 && g.staged === 0;
+          const badge = isNew ? `<span class="git-pill git-pill-new">NEW · uncommitted</span>` : `<span class="git-pill git-pill-dirty">MODIFIED</span>`;
+          const detail = isNew ? `${g.untracked} new file${g.untracked === 1 ? "" : "s"}` : `${g.modified} changed${g.staged ? `, ${g.staged} staged` : ""}`;
+          return `<tr><td><code>${escapeHtml(name)}</code></td><td>${badge}</td><td style="color:#94a3b8;font-size:.82rem">${escapeHtml(detail)}</td></tr>`;
+        }).join("");
+    const canSync = dirty.length > 0 || ahead > 0;
+    return `
+      <div class="git-sync-status">
+        <div class="git-sync-row">
+          <div class="git-sync-pills">${dirtyPill} ${pushPill}</div>
+          <button class="git-sync-btn" hx-post="/dashboard/fs-skills/git-sync" hx-target="#fs-git-sync" hx-swap="innerHTML"
+                  hx-confirm="Commit all skill changes and push to ${escapeHtml(remote || "the remote")}?" ${canSync ? "" : "disabled"}>${canSync ? "⬆ Sync skills to git" : "✓ In sync"}</button>
+        </div>
+        <div class="git-sync-meta">
+          <code>${escapeHtml(dir)}</code>${remote ? ` → <code>${escapeHtml(remote)}</code>` : ""}
+          ${h ? ` · last commit <code>${escapeHtml(h)}</code> <span style="color:#94a3b8">${escapeHtml(cr || "")}</span> — ${escapeHtml((subj || "").slice(0, 60))}` : ""}
+        </div>
+        <table class="fs-quarantine-table" style="margin-top:8px">
+          <thead><tr><th>Skill</th><th>State</th><th>Detail</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+  app.get("/dashboard/fs-skills/git-status", async (_request, reply) => {
+    try { reply.type("text/html").send(await renderSkillsGitStatusHtml()); }
+    catch (e) { reply.type("text/html").send(`<div class="error">Git status failed: ${escapeHtml((e as Error).message)}</div>`); }
+  });
+  app.post("/dashboard/fs-skills/git-sync", async (_request, reply) => {
+    try {
+      const dir = await skillsDirPath();
+      const isRepo = await runGit(["rev-parse", "--is-inside-work-tree"], dir);
+      if (!isRepo.ok || isRepo.out.trim() !== "true") { reply.type("text/html").send(`<div class="error">Not a git repo: ${escapeHtml(dir)}</div>`); return; }
+      const before = await runGit(["status", "--porcelain=v1", "--branch"], dir);
+      const dirty = before.out.split("\n").some((l) => l.length > 0 && !l.startsWith("## "));
+      const wasAhead = /\[ahead \d+/.test(before.out);
+      const steps: string[] = [];
+      if (dirty) {
+        const add = await runGit(["add", "-A"], dir);
+        if (!add.ok) throw new Error("git add failed: " + add.err);
+        const ts = new Date().toISOString().slice(0, 19).replace("T", " ");
+        const commit = await runGit(["-c", "user.name=Amit", "-c", "user.email=iamkoppad@gmail.com", "commit", "-m", `dashboard sync: skills updated ${ts}`], dir);
+        if (!commit.ok && !/nothing to commit/.test(commit.out + commit.err)) throw new Error("git commit failed: " + (commit.err || commit.out));
+        steps.push("committed");
+      }
+      const hasRemote = (await runGit(["remote"], dir)).out.trim();
+      let ok = false, pushMsg = "";
+      if (hasRemote) {
+        const token = process.env.GIT_PUSH_TOKEN || process.env.GITHUB_TOKEN || "";
+        const originUrl = (await runGit(["remote", "get-url", "origin"], dir)).out.trim();
+        let push;
+        if (token && /^https:\/\/github\.com\//.test(originUrl)) {
+          const authUrl = originUrl.replace("https://github.com/", `https://x-access-token:${token}@github.com/`);
+          push = await runGit(["push", authUrl, "HEAD"], dir);
+        } else {
+          push = await runGit(["push"], dir);
+        }
+        // never leak the token into the dashboard HTML
+        const redact = (s: string) => (token ? s.split(token).join("***") : s).replace(/x-access-token:[^@]*@/g, "x-access-token:***@");
+        ok = push.ok;
+        pushMsg = push.ok
+          ? "pushed to remote"
+          : ("push failed" + (token ? "" : " — commit saved locally; set GIT_PUSH_TOKEN/GITHUB_TOKEN on the server to enable push") + ": " + redact((push.err || push.out).split("\n").filter(Boolean).slice(-2).join(" ")).slice(0, 200));
+        if (push.ok) {
+          // Pushing to an explicit auth-URL doesn't advance the local
+          // remote-tracking ref, so status would still read "ahead". Sync it.
+          const br = (await runGit(["rev-parse", "--abbrev-ref", "HEAD"], dir)).out.trim();
+          if (br && br !== "HEAD") await runGit(["update-ref", `refs/remotes/origin/${br}`, "HEAD"], dir);
+          steps.push("pushed");
+        }
+      } else { ok = steps.includes("committed"); pushMsg = "no remote configured — committed locally only"; }
+      const banner = (ok)
+        ? `<div class="chain-banner chain-ok" style="margin-bottom:8px"><span class="chain-status">✅ SYNCED</span><span class="chain-detail">${escapeHtml(steps.join(" + ") || "up to date")}. ${escapeHtml(pushMsg)}</span></div>`
+        : (!dirty && !wasAhead)
+          ? `<div class="chain-banner chain-ok" style="margin-bottom:8px"><span class="chain-status">✓ ALREADY IN SYNC</span><span class="chain-detail">Nothing to commit or push.</span></div>`
+          : `<div class="chain-banner chain-broken" style="margin-bottom:8px"><span class="chain-status">⚠️ SYNC INCOMPLETE</span><span class="chain-detail">${escapeHtml(pushMsg)}</span></div>`;
+      reply.type("text/html").send(banner + await renderSkillsGitStatusHtml());
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Sync failed: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   app.get("/dashboard/skills/edit", async (request, reply) => {
     const skillId = String((request.query as Record<string, unknown>)?.skill_id ?? "");
     if (!skillId) {
@@ -3003,9 +3150,30 @@ export async function createApiServer(storeOverride?: Store) {
 
   app.get("/api/v1/recall", async (request, reply) => {
     try {
-      const { projectPath, agentId = "default", role } = request.query as Record<string, unknown>;
+      const { projectPath, agentId = "default", role, focus, dateFrom, dateTo, asOf } = request.query as Record<string, unknown>;
       const pp    = validateProjectPath(projectPath);
-      const facts = await store.recall(pp, String(agentId));
+      // M1 (v0.41.0) — optional focus: re-rank live facts by relevance to the caller's
+      // current task (blended with importance + salience). Absent ⇒ ordering unchanged.
+      // M3 (v0.41.0) — natural-language time expressions inside the focus ("last week",
+      // "as of one month ago") are parsed into a structured window; structured
+      // dateFrom/dateTo/asOf params are also accepted directly (Graphiti parity).
+      const recallOpts: { focus?: string; from?: Date; to?: Date; asOf?: Date } = {};
+      if (typeof focus === "string" && focus.trim()) {
+        const { parseTemporalQuery } = await import("./temporal_parse.js");
+        const w = parseTemporalQuery(focus.slice(0, 2000));
+        recallOpts.focus = (w.cleaned.trim() || focus).slice(0, 2000); // purely-temporal query → keep original for embedding
+        if (w.from) recallOpts.from = w.from;
+        if (w.to)   recallOpts.to   = w.to;
+        if (w.asOf) recallOpts.asOf = w.asOf;
+      }
+      const asDate = (v: unknown): Date | undefined => {
+        if (typeof v !== "string" || !v.trim()) return undefined;
+        const d = new Date(v); return Number.isFinite(d.getTime()) ? d : undefined;
+      };
+      recallOpts.from = asDate(dateFrom) ?? recallOpts.from;
+      recallOpts.to   = asDate(dateTo)   ?? recallOpts.to;
+      recallOpts.asOf = asDate(asOf)     ?? recallOpts.asOf;
+      const facts = await store.recall(pp, String(agentId), recallOpts);
       const lims  = await store.getWorkingMemoryLimits(pp, true);
 
       // v0.31.0 — kick a BACKGROUND contradiction scan once per (project,agent) per process,

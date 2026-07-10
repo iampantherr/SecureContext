@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.40.1",
+  VERSION: "0.41.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -91,6 +91,41 @@ export const Config = {
   RRF_W_GRAPH:       parseFloat(env["ZC_RRF_W_GRAPH"] ?? "0.5"),
   GRAPH_EXPAND_TOP_K: parseInt(env["ZC_GRAPH_EXPAND_TOP_K"] ?? "5", 10),
   GRAPH_EXPAND_MAX:   parseInt(env["ZC_GRAPH_EXPAND_MAX"] ?? "20", 10),
+  // M4 (v0.41.0) — bounded multi-hop BFS: the graph channel now walks up to
+  // GRAPH_MAX_DEPTH hops from the top candidates (Graphiti-parity bfs_max_depth),
+  // with per-hop weight decay so distant neighbors rank below direct ones.
+  // =1 restores the previous single-hop behaviour exactly.
+  GRAPH_MAX_DEPTH:    parseInt(env["ZC_GRAPH_MAX_DEPTH"] ?? "2", 10),
+  GRAPH_HOP_DECAY:    parseFloat(env["ZC_GRAPH_HOP_DECAY"] ?? "0.5"),
+
+  // ── M1 (v0.41.0) — retrieval candidate generation + focused recall ────────
+  // The M0 benchmark exposed a hard gate: BM25 was the ONLY candidate source, and
+  // plainto_tsquery/FTS5 AND-semantics meant one non-matching word in a natural-
+  // language question returned ZERO results (embeddings never consulted).
+  // VECTOR_CANDIDATES makes the vector index an INDEPENDENT candidate channel
+  // (top-N nearest neighbors join the pool even with zero keyword overlap);
+  // BM25_OR_FALLBACK adds an any-term keyword pass when the AND pass under-fills.
+  // Kill-switches: ZC_VECTOR_CANDIDATES=0 / ZC_BM25_OR_FALLBACK=0 restore the
+  // legacy BM25-gated behaviour byte-for-byte.
+  VECTOR_CANDIDATES:  parseInt(env["ZC_VECTOR_CANDIDATES"] ?? "20", 10),
+  // Similarity floor for vector-injected candidates: below this, a "nearest"
+  // neighbor is just the least-unrelated garbage — injecting it pollutes
+  // results for no-answer queries and breaks abstention behaviour.
+  // Calibrated for nomic-embed-text (compressed similarity range): unrelated
+  // content measures ~0.41-0.49, true matches ~0.75. 0.55 splits with margin.
+  VECTOR_MIN_SIM:     parseFloat(env["ZC_VECTOR_MIN_SIM"] ?? "0.55"),
+  BM25_OR_FALLBACK:   env["ZC_BM25_OR_FALLBACK"] !== "0",
+  // Focused working-memory recall: when zc_recall_context is given a `focus`
+  // string, live facts are re-ranked by blended relevance instead of raw
+  // importance. Without focus the ordering is unchanged (backward-compatible).
+  RECALL_W_REL:       parseFloat(env["ZC_RECALL_W_REL"] ?? "0.60"),
+  RECALL_W_IMP:       parseFloat(env["ZC_RECALL_W_IMP"] ?? "0.25"),
+  RECALL_W_SAL:       parseFloat(env["ZC_RECALL_W_SAL"] ?? "0.15"),
+  // M3 (v0.41.0) — additive bonus for facts whose event-time (valid_at, falling
+  // back to created_at) lies inside a temporal window parsed from the query
+  // ("last week", "about six weeks ago"). Strong enough to outrank pure
+  // relevance ties; facts outside the window still appear below.
+  RECALL_W_TEMPORAL:  parseFloat(env["ZC_RECALL_W_TEMPORAL"] ?? "0.60"),
 
   // ── Self-correcting memory v2 (v0.37.0) ──────────────────────────────────
   // Temporal fact retirement + contradiction auto-resolution. When the scan flags a

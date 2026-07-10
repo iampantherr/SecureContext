@@ -1098,6 +1098,15 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 37,
+    description: "M3 (v0.41.0): bi-temporal-lite — optional EVENT-time valid_at/invalid_at on working_memory (when the fact was true in the world), alongside the TRANSACTION timeline (created_at/valid_to). Nullable: most conversational facts carry no explicit event date (mirrors PG migration 35)",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE working_memory ADD COLUMN valid_at TEXT`); } catch { /* exists */ }
+      try { db.exec(`ALTER TABLE working_memory ADD COLUMN invalid_at TEXT`); } catch { /* exists */ }
+    },
+  },
+
 ];
 
 /**

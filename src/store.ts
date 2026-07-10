@@ -142,7 +142,10 @@ export interface Store {
   // ── Working Memory ──────────────────────────────────────────────────────────
   remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi?: EpistemicOpts): Promise<void>;
   forget(projectPath: string, key: string, agentId: string): Promise<boolean>;
-  recall(projectPath: string, agentId: string): Promise<MemoryFact[]>;
+  // M1 (v0.41.0): optional focus re-ranks live facts by blended relevance to the
+  // agent's current task; without it, ordering is unchanged (backward-compatible).
+  // M3 (v0.41.0): from/to = temporal-window bonus; asOf = point-in-time reconstruction.
+  recall(projectPath: string, agentId: string, opts?: { focus?: string; from?: Date; to?: Date; asOf?: Date }): Promise<MemoryFact[]>;
   archiveSummary(projectPath: string, summary: string): Promise<void>;
   getMemoryStats(projectPath: string, agentId: string): Promise<MemoryStats>;
   getWorkingMemoryLimits(projectPath: string, forceRecompute?: boolean): Promise<MemoryLimits>;

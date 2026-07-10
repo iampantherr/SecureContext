@@ -984,6 +984,15 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 35,
+    description: "M3 (v0.41.0): bi-temporal-lite — optional EVENT-time valid_at/invalid_at on working_memory alongside the transaction timeline (mirrors SQLite migration 37)",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS valid_at TIMESTAMPTZ`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS invalid_at TIMESTAMPTZ`);
+    },
+  },
+
 ];
 
 /**
