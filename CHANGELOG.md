@@ -4,6 +4,52 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.42.0] — 2026-07-10 — Refinements: TTL memories, numeric-conflict triage, multimodal ingestion, KB temporal filters, LongMemEval
+
+Follow-up round to the M-program closing the remaining competitive gaps (Mem0 TTL,
+LightRAG multimodal, public-benchmark comparability). Verified with a 13/13
+full-functionality live terminal-agent E2E covering every feature family, suite
+865/868 (exact prior baseline), and bench parity with v0.41.0 (hit@10 75% / MRR 0.571).
+
+### Added
+- **R1 — Expiring memories (TTL).** `zc_remember {ttl_days}` / API `expiresAt` sets
+  `expires_at` (SQLite mig 38 / PG mig 36). Recall excludes expired facts live; the
+  enrichment cron retires them as `retired_reason='expired'` (revivable, never deleted).
+  Closes the Mem0 `expiration_date` gap.
+- **R2 — Numeric-conflict detection.** `detectConflict` now receives the pair's cosine
+  similarity; near-identical claims (sim ≥ `ZC_NUMERIC_CONFLICT_SIM`, default 0.85) that
+  disagree on a number are flagged `numeric_conflict` and routed to operator triage
+  **only** — never auto-resolved, since a number flip is either a legitimate update or an
+  error and only the operator can tell. `numbersDiffer` moved to
+  `contradiction_heuristics.ts` (re-exported from `consolidation.ts`).
+- **R4 — Temporal filters in KB search.** Natural-language time windows now work in
+  `zc_search` (both stores), not just recall: "last week", "since March", "as of 3 months
+  ago" are parsed out and applied as `created_at` candidate filters; the cleaned query
+  text is what gets matched.
+- **R5 — Multimodal ingestion.** New `zc_index_file` tool (`src/ingest/extract_file.ts`):
+  **PDF** via pdfjs-dist (legacy build, 200-page/50k-char caps), **DOCX** via a zero-dep
+  ZIP central-directory reader (tolerates backslash entry names from PowerShell-created
+  archives), **images** via any local Ollama vision model (auto-probes llava/qwen-vl/
+  moondream/…, `ZC_VISION_MODEL` override; graceful skip with install hint when none is
+  present). Project-root path-traversal guard, 25 MB cap. Closes the LightRAG multimodal
+  gap local-first.
+- **R6 — LongMemEval adapter.** `node scripts/memory-bench.mjs --longmemeval <file>
+  [--limit N]` ingests the public benchmark's haystack sessions with backdated
+  `created_at` and scores retrieval per question type — SecureContext numbers are now
+  directly comparable to published Zep/Mem0 results.
+
+### Changed
+- **R3 — Temporal-bonus gating: measured no-ship.** Both a hard relevance gate and a
+  proportional bonus were benchmarked against the flat in-window bonus and **lost**
+  (gold/noise relevance ranges overlap; TR hit@5 regressed 37.5→25 under the gate).
+  Shipped as a default-off knob (`ZC_RECALL_TEMPORAL_REL_GATE=0`) with the rationale
+  documented in `config.ts`.
+- Freshly-indexed content ranks keyword-only for a few seconds until its fire-and-forget
+  embedding lands — documented behavior.
+
+### Dependencies
+- `pdfjs-dist@4` (Mozilla) added for PDF extraction.
+
 ## [0.41.0] — 2026-07-10 — Memory-quality program: benchmark, focused recall, consolidation, temporal queries, multi-hop
 
 The Zep/Graphiti-research-driven M0–M5 program. Every stage benchmarked against a

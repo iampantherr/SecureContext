@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.41.0",
+  VERSION: "0.42.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -126,6 +126,12 @@ export const Config = {
   // ("last week", "about six weeks ago"). Strong enough to outrank pure
   // relevance ties; facts outside the window still appear below.
   RECALL_W_TEMPORAL:  parseFloat(env["ZC_RECALL_W_TEMPORAL"] ?? "0.60"),
+  // R3 (v0.42.0) — the window bonus only applies to facts at least somewhat ON-TOPIC
+  // (relevance >= gate). Without this, high-importance noise that merely falls inside
+  // the window ("worklog from 3 days ago") jumps above the topical answer.
+  // Default 0 (flat bonus): measured on the labeled corpus, gating LOST to flat
+  // (gold/noise relevance ranges overlap; the gate clipped real answers).
+  RECALL_TEMPORAL_REL_GATE: parseFloat(env["ZC_RECALL_TEMPORAL_REL_GATE"] ?? "0"),
 
   // ── Self-correcting memory v2 (v0.37.0) ──────────────────────────────────
   // Temporal fact retirement + contradiction auto-resolution. When the scan flags a

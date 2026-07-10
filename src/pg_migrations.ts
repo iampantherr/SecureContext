@@ -993,6 +993,14 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 36,
+    description: "R1 (v0.42.0): per-fact TTL — nullable expires_at on working_memory (mirrors SQLite migration 38)",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`);
+    },
+  },
+
 ];
 
 /**

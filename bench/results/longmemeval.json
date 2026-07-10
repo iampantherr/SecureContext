@@ -1,0 +1,17 @@
+{
+  "scoredAt": "2026-07-10T16:55:18.643Z",
+  "byType": {
+    "single-session-user": {
+      "n": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1
+    },
+    "multi-session": {
+      "n": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1
+    }
+  }
+}

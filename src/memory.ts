@@ -266,6 +266,9 @@ function ensureEpistemologyColumns(db: DatabaseSync): void {
   add("superseded_by",     `TEXT`);
   add("retired_reason",    `TEXT`);
   add("origin",            `TEXT`);
+  add("valid_at",          `TEXT`);   // M3 event-time
+  add("invalid_at",        `TEXT`);   // M3 event-time
+  add("expires_at",        `TEXT`);   // R1 TTL
 }
 
 /**
@@ -285,6 +288,9 @@ export interface EpistemicOpts {
   /** v0.38.0 — per-claim citation: WHAT created the fact ("zc_remember", "compact:<session>",
    *  "broadcast:REJECT:<task>", …). Surfaced by recall {cite:true} + the dashboard. */
   origin?:     string | null;
+  /** R1 (v0.42.0) — per-fact TTL: ISO timestamp after which the fact is excluded from
+   *  recall and retired ('expired', revivable) by the enrichment sweep. Null = never. */
+  expiresAt?:  string | null;
 }
 
 /**
@@ -349,9 +355,16 @@ export function rememberFact(
   // ON CONFLICT path: also update provenance + epistemic columns. Re-asserting a
   // prediction's key with resolution='resolved_incorrect' RESOLVES it in place —
   // this is the resolution mechanism (no separate tool needed).
+  // R1 — optional TTL: validate ISO, must be in the future; invalid values are dropped.
+  const safeExpires: string | null = (() => {
+    if (!epi.expiresAt) return null;
+    const t = Date.parse(String(epi.expiresAt));
+    return Number.isFinite(t) && t > Date.now() ? new Date(t).toISOString() : null;
+  })();
+
   db.prepare(`
-    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at, origin)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at, origin, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key, agent_id) DO UPDATE SET
       value             = excluded.value,
       importance        = excluded.importance,
@@ -362,10 +375,11 @@ export function rememberFact(
       resolution_status = excluded.resolution_status,
       resolved_at       = excluded.resolved_at,
       origin            = excluded.origin,
+      expires_at        = excluded.expires_at,
       valid_to          = NULL,
       superseded_by     = NULL,
       retired_reason    = NULL
-  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember");
+  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires);
   // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
   // v0.36.0 — memory facts are co-reference sources (memory-aware edge extraction), so a
@@ -457,6 +471,7 @@ export function recallWorkingMemory(
       SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
       FROM working_memory
       WHERE agent_id = 'default' AND valid_to IS NULL
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY importance DESC, created_at DESC
     `).all() as unknown as MemoryFact[];
   } else {
@@ -464,6 +479,7 @@ export function recallWorkingMemory(
       SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
       FROM working_memory
       WHERE (agent_id = ? OR agent_id = 'default') AND valid_to IS NULL
+        AND (expires_at IS NULL OR expires_at > datetime('now'))
       ORDER BY
         CASE WHEN agent_id = ? THEN 0 ELSE 1 END,
         importance DESC,
@@ -573,7 +589,13 @@ export async function recallWorkingMemoryFocused(
       const inWindow = Number.isFinite(ev) &&
         (!win.from || ev >= win.from.getTime()) &&
         (!win.to   || ev <= win.to.getTime());
-      if (inWindow) score += Config.RECALL_W_TEMPORAL;
+      // R3 — flat bonus by default; gate only when explicitly configured
+      // (see store-postgres.ts for the measured rationale).
+      if (inWindow) {
+        score += Config.RECALL_TEMPORAL_REL_GATE > 0
+          ? (rel >= Config.RECALL_TEMPORAL_REL_GATE ? Config.RECALL_W_TEMPORAL : 0)
+          : Config.RECALL_W_TEMPORAL;
+      }
     }
     return { r, score };
   });

@@ -66,8 +66,31 @@ export function tokenJaccard(a: string, b: string): number {
   return inter / (ta.size + tb.size - inter);
 }
 
-/** Returns the conflict signal for a (already-similar) pair, or null if there's no conflict. */
-export function detectConflict(a: FactLite, b: FactLite): { reason: string; detail: string } | null {
+/**
+ * R2 (v0.42.0) — deterministic numeric divergence: two claims carrying DIFFERENT
+ * number tokens (TTLs, limits, versions, ports) are different claims. Shared by
+ * the consolidation cycle (as a merge VETO) and the contradiction detector (as a
+ * flag REASON): measured on a labeled corpus, contradicting same-topic facts hit
+ * cosine 0.947 — ABOVE the paraphrase range — so similarity alone can't catch them.
+ */
+export function numbersDiffer(a: string, b: string): boolean {
+  const nums = (s: string) => new Set((s.match(/\d+(?:\.\d+)?/g) ?? []).map(Number));
+  const na = nums(a), nb = nums(b);
+  if (na.size === 0 && nb.size === 0) return false;
+  if (na.size !== nb.size) return true;
+  for (const n of na) if (!nb.has(n)) return true;
+  return false;
+}
+
+/** Similarity floor for the numeric_conflict signal — higher than SIM_HIGH because
+ *  differing numbers in merely-related facts (two different limits on two different
+ *  things) are normal; only near-identical claims disagreeing on the NUMBER are
+ *  contradictions ("cache TTL is 15 min" vs "cache TTL is 60 min"). */
+export const NUMERIC_CONFLICT_SIM = parseFloat(process.env["ZC_NUMERIC_CONFLICT_SIM"] ?? "0.85");
+
+/** Returns the conflict signal for a (already-similar) pair, or null if there's no conflict.
+ *  `sim` (optional): the pair's cosine similarity — enables the numeric_conflict signal. */
+export function detectConflict(a: FactLite, b: FactLite, sim?: number): { reason: string; detail: string } | null {
   const aFalsified = a.resolution_status === "resolved_incorrect";
   const bFalsified = b.resolution_status === "resolved_incorrect";
   const aLive = !a.resolution_status || a.resolution_status === "open";
@@ -80,6 +103,12 @@ export function detectConflict(a: FactLite, b: FactLite): { reason: string; deta
   }
   if (hasNegation(a.value) !== hasNegation(b.value)) {
     return { reason: "semantic_conflict", detail: "Highly similar claims with opposite polarity (one negates what the other asserts)." };
+  }
+  // R2 — numeric conflict: near-identical claims that disagree on the NUMBER.
+  // Never auto-resolved (autoResolveVictim only handles semantic_conflict /
+  // decision_reversal) — these go to the operator triage dashboard.
+  if (typeof sim === "number" && sim >= NUMERIC_CONFLICT_SIM && numbersDiffer(a.value, b.value)) {
+    return { reason: "numeric_conflict", detail: "Near-identical claims that disagree on a number (limit/TTL/version) — likely one superseded the other." };
   }
   return null;
 }

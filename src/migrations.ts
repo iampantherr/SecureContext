@@ -1107,6 +1107,14 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 38,
+    description: "R1 (v0.42.0): per-fact TTL — nullable expires_at on working_memory. Expired facts are excluded from recall and retired ('expired', revivable) by the enrichment sweep (mirrors PG migration 36)",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE working_memory ADD COLUMN expires_at TEXT`); } catch { /* exists */ }
+    },
+  },
+
 ];
 
 /**

@@ -194,9 +194,16 @@ export class PostgresStore implements Store {
     const safeRes  = epi.resolution && RES.includes(epi.resolution) ? epi.resolution : null;
     const resolvedAt = (safeRes && safeRes !== "open") ? now : null;
 
+    // R1 — optional TTL: validate ISO, must be in the future; invalid values dropped.
+    const safeExpires: string | null = (() => {
+      if (!epi.expiresAt) return null;
+      const t = Date.parse(String(epi.expiresAt));
+      return Number.isFinite(t) && t > Date.now() ? new Date(t).toISOString() : null;
+    })();
+
     await this.pool.query(`
-      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT(project_hash, key, agent_id) DO UPDATE SET
         value             = EXCLUDED.value,
         importance        = EXCLUDED.importance,
@@ -206,10 +213,11 @@ export class PostgresStore implements Store {
         resolution_status = EXCLUDED.resolution_status,
         resolved_at       = EXCLUDED.resolved_at,
         origin            = EXCLUDED.origin,
+        expires_at        = EXCLUDED.expires_at,
         valid_to          = NULL,
         superseded_by     = NULL,
         retired_reason    = NULL
-    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember"]);
+    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires]);
     // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
     // v0.36.0 — memory facts are now co-reference sources, so a memory WRITE must refresh
@@ -355,7 +363,8 @@ export class PostgresStore implements Store {
     let rows: MemoryFact[];
     const COLS = `key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at`;
     if (safeAgent === "default") {
-      const live = opts.asOf ? `created_at <= $2 AND (valid_to IS NULL OR valid_to > $2)` : `valid_to IS NULL`;
+      // R1 — expired facts are excluded from live recall (the sweep formally retires them).
+      const live = opts.asOf ? `created_at <= $2 AND (valid_to IS NULL OR valid_to > $2)` : `valid_to IS NULL AND (expires_at IS NULL OR expires_at > NOW())`;
       const params: unknown[] = opts.asOf ? [projectHash, opts.asOf] : [projectHash];
       const res = await this.pool.query<MemoryFact>(
         `SELECT ${COLS}
@@ -366,7 +375,7 @@ export class PostgresStore implements Store {
       rows = res.rows;
     } else {
       // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
-      const live = opts.asOf ? `created_at <= $3 AND (valid_to IS NULL OR valid_to > $3)` : `valid_to IS NULL`;
+      const live = opts.asOf ? `created_at <= $3 AND (valid_to IS NULL OR valid_to > $3)` : `valid_to IS NULL AND (expires_at IS NULL OR expires_at > NOW())`;
       const params: unknown[] = opts.asOf ? [projectHash, safeAgent, opts.asOf] : [projectHash, safeAgent];
       const res = await this.pool.query<MemoryFact>(
         `SELECT ${COLS}
@@ -440,7 +449,16 @@ export class PostgresStore implements Store {
                 Number.isFinite(ev) &&
                 (!opts.from || ev >= opts.from.getTime()) &&
                 (!opts.to   || ev <= opts.to.getTime());
-              if (inWindow) score += Config.RECALL_W_TEMPORAL;
+              // R3 — measured verdict: on the labeled corpus BOTH a hard relevance
+              // gate and a proportional bonus scored WORSE than the flat bonus
+              // (gold/noise relevance ranges overlap). Flat is the default;
+              // ZC_RECALL_TEMPORAL_REL_GATE>0 re-enables gating for corpora
+              // where the ranges separate.
+              if (inWindow) {
+                score += Config.RECALL_TEMPORAL_REL_GATE > 0
+                  ? (rel >= Config.RECALL_TEMPORAL_REL_GATE ? Config.RECALL_W_TEMPORAL : 0)
+                  : Config.RECALL_W_TEMPORAL;
+              }
             }
             return score;
           };
@@ -664,12 +682,19 @@ export class PostgresStore implements Store {
     const candidates  = Config.BM25_CANDIDATES;
 
     // Merge all query terms into one tsvector query
-    const queryText = queries.join(" ");
+    const rawQueryText = queries.join(" ");
+
+    // R4 (v0.42.0) — NL temporal window in KB search: "docs indexed last week about X"
+    // constrains candidates by created_at; the cleaned text (time phrase removed)
+    // does the matching so keyword/vector relevance concentrates on the topic.
+    const { parseTemporalQuery: parseTQ } = await import("./temporal_parse.js");
+    const tw = parseTQ(rawQueryText);
+    const queryText = (tw.from || tw.to) && tw.cleaned.trim() ? tw.cleaned : rawQueryText;
 
     // BM25 candidates via ts_rank (PostgreSQL full-text)
-    type CandRow = { source: string; content: string; rank: number; source_type: string; synthetic?: boolean };
+    type CandRow = { source: string; content: string; rank: number; source_type: string; synthetic?: boolean; created_at?: string | Date };
     const bm25Res = await this.pool.query<CandRow>(`
-      SELECT ke.source, ke.content,
+      SELECT ke.source, ke.content, ke.created_at,
              ts_rank(to_tsvector('english', ke.content), plainto_tsquery('english', $2)) AS rank,
              COALESCE(sm.source_type, 'internal') as source_type
       FROM   knowledge_entries ke
@@ -693,7 +718,7 @@ export class PostgresStore implements Store {
       if (terms.length >= 2) {
         try {
           const orRes = await this.pool.query<CandRow>(`
-            SELECT ke.source, ke.content,
+            SELECT ke.source, ke.content, ke.created_at,
                    ts_rank(to_tsvector('english', ke.content), to_tsquery('english', $2)) AS rank,
                    COALESCE(sm.source_type, 'internal') as source_type
             FROM   knowledge_entries ke
@@ -717,7 +742,7 @@ export class PostgresStore implements Store {
         if (qEmbedEarly) {
           const qVecStr = "[" + qEmbedEarly.vector.join(",") + "]";
           const vecRes = await this.pool.query<CandRow>(`
-            SELECT ke.source, ke.content, 0 AS rank,
+            SELECT ke.source, ke.content, ke.created_at, 0 AS rank,
                    COALESCE(sm.source_type, 'internal') as source_type
             FROM   embeddings e
             JOIN   knowledge_entries ke ON ke.project_hash = e.project_hash AND ke.source = e.source
@@ -733,7 +758,17 @@ export class PostgresStore implements Store {
     }
 
     if (candMap.size === 0) return [];
-    const candRows = [...candMap.values()];
+    let candRows = [...candMap.values()];
+    // R4 — apply the temporal window to candidates (created_at range).
+    if (tw.from || tw.to) {
+      candRows = candRows.filter((r) => {
+        const t = r.created_at instanceof Date ? r.created_at.getTime() : Date.parse(String(r.created_at ?? ""));
+        return Number.isFinite(t) &&
+          (!tw.from || t >= tw.from.getTime()) &&
+          (!tw.to   || t <= tw.to.getTime());
+      });
+      if (candRows.length === 0) return [];
+    }
 
     // Tier-1 A: backlink in-degree boost (PG mirror). ONE batched lookup, shared by the
     // vector path AND the BM25 fallback. Empty when W_BACKLINK=0 / no rows / pre-migration
@@ -1192,7 +1227,7 @@ export class PostgresStore implements Store {
         if (!va || !vb) continue;
         const sim = cosineSimilarity(va, vb);
         if (sim < SIM_HIGH) continue;
-        const conflict = detectConflict(a, b);
+        const conflict = detectConflict(a, b, sim); // R2 — sim enables numeric_conflict
         if (!conflict) continue;
         const [ka, kb] = a.key < b.key ? [a.key, b.key] : [b.key, a.key];
         // v0.37.0 — clear supersession ⇒ auto-resolve (retire the stale side); else open triage.
@@ -1323,6 +1358,14 @@ export class PostgresStore implements Store {
     if (!ollamaDown) {
       try { await this.consolidateMemory(); } catch { /* best-effort */ }
     }
+    // R1 (v0.42.0) — TTL sweep: formally retire facts past their expires_at
+    // ('expired', revivable for RETIRE_PURGE_DAYS like any retirement). Recall
+    // already excludes them; the sweep keeps the table + dashboard honest.
+    try {
+      await this.pool.query(
+        `UPDATE working_memory SET valid_to = NOW(), retired_reason = 'expired'
+          WHERE expires_at IS NOT NULL AND expires_at <= NOW() AND valid_to IS NULL`);
+    } catch { /* pre-migration — next cycle */ }
     return { projects: projects.length, flagged, backfilledProjects, ollamaDown, entities };
   }
 

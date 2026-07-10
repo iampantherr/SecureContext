@@ -3117,6 +3117,12 @@ export async function createApiServer(storeOverride?: Store) {
       if (typeof origin === "string" && /^(auto-extract|compact|broadcast)[:a-zA-Z0-9_-]*$/.test(origin) && origin.length <= 80) {
         epi.origin = origin;
       }
+      // R1 (v0.42.0) — TTL: expiresAt (ISO) or ttl_days (number). Validated downstream.
+      const { expiresAt, ttl_days } = request.body as Record<string, unknown>;
+      if (typeof expiresAt === "string") epi.expiresAt = expiresAt;
+      else if (typeof ttl_days === "number" && ttl_days > 0) {
+        epi.expiresAt = new Date(Date.now() + ttl_days * 86_400_000).toISOString();
+      }
       await store.remember(pp, key, value, Number(importance), String(agentId), epi);
       // v0.31.0 — re-arm the contradiction scan for this project. A new fact can form
       // a contradiction with an existing one, so the next recall must re-scan. Without

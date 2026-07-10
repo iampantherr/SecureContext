@@ -94,7 +94,7 @@ export async function detectContradictions(
       if (!va || !vb) continue;
       const sim = cosineSimilarity(va, vb);
       if (sim < SIM_HIGH) continue;
-      const conflict = detectConflict(a, b);
+      const conflict = detectConflict(a, b, sim); // R2 — sim enables numeric_conflict
       if (!conflict) continue;
       // v0.37.0 — clear supersession ⇒ auto-resolve (retire the stale side); else open triage.
       const victim = Config.AUTO_RESOLVE ? autoResolveVictim(a, b, conflict.reason) : null;

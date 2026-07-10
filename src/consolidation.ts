@@ -24,7 +24,11 @@
  */
 
 import { Config } from "./config.js";
-import { detectConflict } from "./contradiction_heuristics.js";
+import { detectConflict, numbersDiffer } from "./contradiction_heuristics.js";
+
+// R2 (v0.42.0): numbersDiffer moved to contradiction_heuristics (shared with the
+// contradiction detector's numeric_conflict signal); re-exported for existing users.
+export { numbersDiffer };
 
 export const CONSOLIDATE_ENABLED = process.env["ZC_CONSOLIDATE"] !== "0";
 // Calibrated on nomic-embed-text against a labeled corpus: true paraphrases
@@ -35,20 +39,7 @@ export const CONSOLIDATE_ENABLED = process.env["ZC_CONSOLIDATE"] !== "0";
 export const CONSOLIDATE_SIM = parseFloat(process.env["ZC_CONSOLIDATE_SIM"] ?? "0.75");
 export const CONSOLIDATE_MAX_PER_CYCLE = parseInt(process.env["ZC_CONSOLIDATE_MAX"] ?? "5", 10);
 
-/**
- * Deterministic numeric guard: facts carrying DIFFERENT number tokens are
- * different claims (TTLs, limits, versions, ports), never paraphrases —
- * regardless of how high their embedding similarity is. This is the guard the
- * cache-TTL case demands; it must not depend on the merge LLM's judgment.
- */
-export function numbersDiffer(a: string, b: string): boolean {
-  const nums = (s: string) => new Set((s.match(/\d+(?:\.\d+)?/g) ?? []).map(Number));
-  const na = nums(a), nb = nums(b);
-  if (na.size === 0 && nb.size === 0) return false;
-  if (na.size !== nb.size) return true;
-  for (const n of na) if (!nb.has(n)) return true;
-  return false;
-}
+// (numbersDiffer lives in contradiction_heuristics.ts since R2 — imported above.)
 
 const MERGE_MODEL = process.env["ZC_ENTITY_MODEL"] ?? process.env["ZC_HYDE_MODEL"] ?? "qwen2.5-coder:14b";
 

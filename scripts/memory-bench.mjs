@@ -219,6 +219,74 @@ function compare(a, b) {
   console.table(rows);
 }
 
+// ── R6 (v0.42.0): LongMemEval-format adapter ─────────────────────────────────
+// Runs the PUBLIC LongMemEval dataset (arXiv 2410.10813) against SecureContext.
+// Usage: node scripts/memory-bench.mjs --longmemeval <dataset.json> [--limit N]
+//
+// Ingests each question's haystack sessions as KB entries (source `session:<id>`,
+// created_at backdated to the session date) into a dedicated project, then scores
+// a RETRIEVAL PROXY: for each question, does zc_search(question) surface one of
+// the labeled answer sessions in the top-K? (The official metric needs an
+// LLM-judge over generated answers; retrieval recall is the memory-system share
+// of that pipeline and is deterministic + reproducible.)
+const LME_PROJECT = "C:/Users/Amit/AI_projects/ZZ_LME";
+
+async function runLongMemEval(file, limit) {
+  const data = JSON.parse(readFileSync(file, "utf8"));
+  const questions = (Array.isArray(data) ? data : data.questions).slice(0, limit || 50);
+  console.log(`LongMemEval: ${questions.length} questions (of ${Array.isArray(data) ? data.length : "?"})`);
+
+  // Ingest the union of haystack sessions (deduped by session id).
+  const seen = new Set();
+  let ingested = 0;
+  for (const q of questions) {
+    const ids   = q.haystack_session_ids ?? [];
+    const dates = q.haystack_dates ?? [];
+    const sess  = q.haystack_sessions ?? [];
+    for (let i = 0; i < ids.length; i++) {
+      const sid = ids[i];
+      if (seen.has(sid)) continue;
+      seen.add(sid);
+      const turns = (sess[i] ?? []).map((t) => `${t.role}: ${t.content}`).join("\n").slice(0, 45_000);
+      if (!turns.trim()) continue;
+      await api("POST", "/api/v1/index", { projectPath: LME_PROJECT, content: turns, source: `session:${sid}`, sourceType: "internal" });
+      if (dates[i]) {
+        const d = new Date(dates[i]);
+        if (Number.isFinite(d.getTime())) {
+          const h = psql(`SELECT project_hash FROM knowledge_entries WHERE source='session:${sid}' ORDER BY created_at DESC LIMIT 1`);
+          if (/^[0-9a-f]{16}$/.test(h)) psql(`UPDATE knowledge_entries SET created_at='${d.toISOString()}' WHERE project_hash='${h}' AND source='session:${sid}'`);
+        }
+      }
+      ingested++;
+      if (ingested % 20 === 0) process.stdout.write(`\ringested ${ingested} sessions…`);
+    }
+  }
+  console.log(`\ringested ${ingested} sessions. waiting 10s for embeddings…`);
+  await new Promise((r) => setTimeout(r, 10_000));
+
+  // Score retrieval proxy per question type.
+  const byType = {};
+  for (const q of questions) {
+    const goldSet = new Set((q.answer_session_ids ?? []).map((s) => `session:${s}`));
+    if (goldSet.size === 0) continue;
+    const r = await api("POST", "/api/v1/search", { projectPath: LME_PROJECT, queries: [q.question] });
+    const sources = (r.results ?? []).map((x) => x.source);
+    const rank = sources.findIndex((s) => goldSet.has(s)) + 1; // 0 = miss
+    const t = (byType[q.question_type ?? "unknown"] ??= { n: 0, hit5: 0, hit10: 0, mrr: 0 });
+    t.n++; if (rank && rank <= 5) t.hit5++; if (rank && rank <= 10) t.hit10++; if (rank) t.mrr += 1 / rank;
+    await new Promise((r2) => setTimeout(r2, 400));
+    process.stdout.write(".");
+  }
+  console.log("\n=== LongMemEval retrieval proxy (answer-session recall) ===");
+  const pct = (x, n) => (n ? +(100 * x / n).toFixed(1) : 0);
+  console.table(Object.fromEntries(Object.entries(byType).map(([k, t]) =>
+    [k, { n: t.n, "hit@5%": pct(t.hit5, t.n), "hit@10%": pct(t.hit10, t.n), mrr: +(t.mrr / (t.n || 1)).toFixed(3) }])));
+  const dir = new URL("../bench/results/", import.meta.url);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(new URL(`longmemeval.json`, dir), JSON.stringify({ scoredAt: new Date().toISOString(), byType }, null, 2));
+  console.log("saved bench/results/longmemeval.json");
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -228,4 +296,5 @@ if (has("--purge")) await purge();
 else if (has("--seed")) await seed();
 else if (has("--score")) await score(val("--stage") ?? "baseline");
 else if (has("--compare")) { const [a, b] = args.slice(args.indexOf("--compare") + 1); compare(a, b); }
-else console.log("usage: --seed | --score --stage <name> | --compare <a> <b> | --purge");
+else if (has("--longmemeval")) await runLongMemEval(val("--longmemeval"), parseInt(val("--limit") ?? "50", 10));
+else console.log("usage: --seed | --score --stage <name> | --compare <a> <b> | --purge | --longmemeval <dataset.json> [--limit N]");

@@ -310,8 +310,25 @@ const TOOLS: Tool[] = [
         kind:       { type: "string", enum: ["fact", "decision", "hypothesis", "prediction"], description: "Epistemic kind. fact=observed; decision=chosen approach; hypothesis=tentative; prediction=falsifiable future claim. Default 'fact' (auto-classified from text if omitted)." },
         confidence: { type: "number", minimum: 0, maximum: 1, description: "0.0–1.0 subjective probability for predictions/hypotheses. Omit for plain facts." },
         resolution: { type: "string", enum: ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"], description: "Set 'open' when recording a prediction; later re-remember the same key with a resolved_* value to close it." },
+        ttl_days:   { type: "number", minimum: 0.01, description: "R1 (v0.42.0) — auto-expire this fact after N days (e.g. 7 for a sprint-scoped note, 0.5 for a same-day reminder). Expired facts leave recall and are retired (revivable for 30 days). Omit for permanent facts." },
       },
       required: ["key", "value"],
+    },
+  },
+  {
+    name: "zc_index_file",
+    description:
+      "R5 (v0.42.0) — Index a MULTIMODAL file into the knowledge base: PDF (text extracted), " +
+      "DOCX (text extracted), or image (described by a local Ollama vision model when one is " +
+      "installed — llava/qwen-vl/minicpm-v/moondream). The extracted text flows through the " +
+      "normal indexing pipeline: searchable via zc_search, summarized, embedded, graph-linked. " +
+      "For plain text/code files use zc_index_project or zc_index instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path (absolute, or relative to the project root). Supported: .pdf, .docx, .png, .jpg, .jpeg, .gif, .webp, .bmp" },
+      },
+      required: ["path"],
     },
   },
   {
@@ -1355,6 +1372,10 @@ async function _handleRemoteTool(
           kind:        body["kind"],
           confidence:  body["confidence"],
           resolution:  body["resolution"],
+          // R1 (v0.42.0) — TTL: ttl_days → absolute expiry timestamp.
+          ...(typeof body["ttl_days"] === "number" && (body["ttl_days"] as number) > 0
+            ? { expiresAt: new Date(Date.now() + (body["ttl_days"] as number) * 86_400_000).toISOString() }
+            : {}),
         });
         return { content: [{ type: "text", text: `Remembered under agent_id='${body["agent_id"] ?? AGENT_ID}'. Working memory: ${result["count"]}/${result["max"]} facts` }] };
 
@@ -2280,6 +2301,33 @@ async function dispatchToolCall(
       }
 
       // ── v0.10.0 Harness Engineering ──────────────────────────────────────────
+      case "zc_index_file": {
+        // R5 (v0.42.0) — multimodal ingestion (PDF/DOCX/images). Extraction is local
+        // (pdfjs / zero-dep docx / Ollama vision); indexing uses the normal pipeline.
+        const { path: rawPath } = args as { path: string };
+        const { isAbsolute: absIF, join: joinIF, relative: relIF } = await import("node:path");
+        const absPath = absIF(rawPath) ? rawPath : joinIF(PROJECT_PATH, rawPath);
+        // SECURITY: never index outside the project root.
+        const relPath = relIF(PROJECT_PATH, absPath);
+        if (relPath.startsWith("..")) {
+          return { content: [{ type: "text", text: `✗ Refused: '${rawPath}' resolves outside the project root.` }] };
+        }
+        const { extractFile } = await import("./ingest/extract_file.js");
+        let ex;
+        try { ex = await extractFile(absPath); }
+        catch (e) { return { content: [{ type: "text", text: `✗ Extraction failed: ${(e as Error).message}` }] }; }
+        if (ex.kind === "unsupported") {
+          return { content: [{ type: "text", text: `✗ Unsupported extension. Supported: .pdf .docx .png .jpg .jpeg .gif .webp .bmp (plain text/code → zc_index_project).` }] };
+        }
+        if (ex.kind === "image" && ex.text === null) {
+          return { content: [{ type: "text", text: `⚠ No local vision model installed — image skipped. Install one (e.g. 'ollama pull llava' or set ZC_VISION_MODEL) and retry.` }] };
+        }
+        const src = `file:${relPath.replace(/\\/g, "/")}`;
+        indexContent(PROJECT_PATH, ex.text as string, src, "internal", "internal");
+        const preview = (ex.text as string).slice(0, 160).replace(/\s+/g, " ");
+        return { content: [{ type: "text", text: `✓ Indexed ${ex.kind.toUpperCase()} → ${src} (${(ex.text as string).length} chars extracted).\nPreview: ${preview}…\nSearchable via zc_search; summary/embedding/graph update in the background.` }] };
+      }
+
       case "zc_index_project": {
         const { excludes, extensions, max_bytes } = args as {
           excludes?: string[]; extensions?: string[]; max_bytes?: number;

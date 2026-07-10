@@ -1,7 +1,7 @@
 {
   "name": "zc-ctx",
-  "version": "0.41.0",
-  "description": "Secure memory & context optimization MCP plugin for Claude Code \u2014 drop-in replacement for context-mode with credential isolation, SSRF protection, MemGPT-style persistent memory, and A2A multi-agent broadcast channel",
+  "version": "0.42.0",
+  "description": "Secure memory & context optimization MCP plugin for Claude Code — drop-in replacement for context-mode with credential isolation, SSRF protection, MemGPT-style persistent memory, and A2A multi-agent broadcast channel",
   "keywords": [
     "claude-code",
     "claude-code-plugin",
@@ -85,6 +85,7 @@
     "fastify": "^5.8.4",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
+    "pdfjs-dist": "^4.10.38",
     "pg": "^8.20.0",
     "web-tree-sitter": "^0.26.8"
   },

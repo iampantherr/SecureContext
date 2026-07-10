@@ -40,6 +40,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { Config } from "./config.js";
+import { parseTemporalQuery } from "./temporal_parse.js";
 import { runMigrations } from "./migrations.js";
 import { getEmbedding, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
 import { rebuildBacklinksAsync } from "./indexing/backlinks.js";
@@ -445,6 +446,11 @@ function _searchDb(
 ): KnowledgeEntry[] {
   const seen = new Set<string>();
 
+  // R4 (v0.42.0) — NL temporal window: constrain candidates by created_at and
+  // match on the cleaned (time-phrase-stripped) text. No time expression = no change.
+  const _tw = parseTemporalQuery(queries.join(" "));
+  if ((_tw.from || _tw.to) && _tw.cleaned.trim()) queries = [_tw.cleaned];
+
   type BM25Row  = { source: string; content: string; rank: number };
   type EmbedRow = { source: string; vector: Buffer; model_name: string };
   type MetaRow  = { source: string; source_type: string };
@@ -456,7 +462,7 @@ function _searchDb(
     let rows: BM25Row[];
     try {
       rows = db.prepare(
-        `SELECT source, content, rank
+        `SELECT source, content, rank, created_at
          FROM knowledge
          WHERE knowledge MATCH ?
          ORDER BY rank
@@ -483,7 +489,7 @@ function _searchDb(
     if (terms.length >= 2) {
       try {
         const orRows = db.prepare(
-          `SELECT source, content, rank FROM knowledge WHERE knowledge MATCH ? ORDER BY rank LIMIT ?`
+          `SELECT source, content, rank, created_at FROM knowledge WHERE knowledge MATCH ? ORDER BY rank LIMIT ?`
         ).all(terms.map((t) => `"${t}"`).join(" OR "), Config.BM25_CANDIDATES) as BM25Row[];
         for (const row of orRows) {
           if (!candidateMap.has(row.source)) candidateMap.set(row.source, row);
@@ -513,11 +519,22 @@ function _searchDb(
       scored.sort((a, b) => b.cos - a.cos);
       const worstRank = Math.max(0, ...[...candidateMap.values()].map((r) => r.rank));
       for (const s of scored.slice(0, Config.VECTOR_CANDIDATES)) {
-        const row = db.prepare(`SELECT source, content FROM knowledge WHERE source = ?`).get(s.source) as
-          | { source: string; content: string } | undefined;
+        const row = db.prepare(`SELECT source, content, created_at FROM knowledge WHERE source = ?`).get(s.source) as
+          | { source: string; content: string; created_at?: string } | undefined;
         if (row) candidateMap.set(row.source, { ...row, rank: worstRank, synthetic: true });
       }
     } catch { /* embeddings table absent/pre-migration — keyword candidates only */ }
+  }
+
+  // R4 — apply the temporal window (created_at range) to all candidates.
+  if (_tw.from || _tw.to) {
+    for (const [src, row] of [...candidateMap]) {
+      const t = Date.parse(String((row as { created_at?: string }).created_at ?? ""));
+      const ok = Number.isFinite(t) &&
+        (!_tw.from || t >= _tw.from.getTime()) &&
+        (!_tw.to   || t <= _tw.to.getTime());
+      if (!ok) candidateMap.delete(src);
+    }
   }
 
   if (candidateMap.size === 0) return [];
