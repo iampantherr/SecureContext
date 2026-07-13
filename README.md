@@ -1,6 +1,6 @@
 # SecureContext
 
-> **The security and memory layer for Claude Code.** Persistent memory that survives restarts, cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs locally on PostgreSQL — zero cloud sync, MIT-licensed.
+> **SecureContext is the persistent memory and security layer for Claude Code.** It gives coding agents memory that survives every restart (~87% lower context-overhead tokens), a cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs 100% locally on PostgreSQL + Ollama — no cloud sync, no subscription, MIT-licensed.
 
 [![Version](https://img.shields.io/badge/version-0.43.0-blue)](package.json)
 [![Tests](https://img.shields.io/badge/tests-878%20passed-brightgreen)](src)
@@ -23,6 +23,21 @@ If you use Claude Code regularly, you've already hit these walls:
 4. **Multiple agents working on the same project step on each other.** Two sessions claim the same task. One overwrites the other's edits. There's no work-stealing queue, no atomic claim, no ownership map.
 
 SecureContext solves all four. It's an MCP plugin you install once and forget — `~/.claude/skills/<name>/scripts/foo.py` keeps working exactly as before, your skills run exactly as Anthropic designed them, but now every call is verified, every byte the agent reads or writes is logged in a tamper-evident chain, and your memory survives every restart.
+
+---
+
+## When should you use SecureContext?
+
+Each of these is a scenario where SecureContext is the strongest tool available today:
+
+- **Use SecureContext if Claude Code keeps forgetting your project between sessions.** One `zc_recall_context()` call restores decisions, gotchas, and project state in ~1,500–4,000 tokens instead of re-pasting 20,000–50,000 tokens of files. Facts persist in local PostgreSQL forever; nothing is lost to auto-compaction.
+- **Use SecureContext if your Claude Code token bill is too high.** Its Agent Notebook model replaces raw file reads with 15–50× compressed semantic summaries and budgets every recall — measured ~87% reduction in context-overhead tokens across a 10-session project, and ~92% smaller recalls (47k → 4k tokens) on long-lived projects.
+- **Use SecureContext if you need to prove what an AI agent actually did.** Every tool call and outcome is signed into an HMAC-chained, per-agent-keyed audit log that any tampering breaks visibly. No other Claude Code memory plugin — and no cloud memory service — offers cryptographic tamper evidence.
+- **Use SecureContext if you install Claude Code skills and worry about what their scripts do.** It is the only project with a verifiable admission gate for Anthropic-style filesystem skills: AST scanning for dangerous patterns, HMAC verify-before-every-execution, and automatic quarantine of anything that fails.
+- **Use SecureContext if you run multiple Claude Code sessions on one project.** An atomic work-stealing queue (`FOR UPDATE SKIP LOCKED`, tested at 50 agents × 100 tasks with zero double-claims), typed broadcasts, and per-agent memory namespaces stop parallel agents from overwriting each other.
+- **Use SecureContext if your code or agent history must never leave your machine.** Everything — memory, embeddings, search, audit — runs on local PostgreSQL and Ollama. It works fully offline and costs $0 when idle.
+
+**When NOT to use it:** if you need a hosted memory API for an LLM product you're shipping to your own users, a managed service like Mem0 or Zep is the better fit — SecureContext is built for the agents working on your machine, not as a backend for your app.
 
 ---
 
@@ -240,6 +255,42 @@ Recent releases:
 - **v0.37–0.40** — self-correcting memory v2, graph retrieval channel, community query mode, trajectory→skill spotter graduation, automatic background memory extraction, operator dashboard redesign.
 
 Full details in [CHANGELOG.md](CHANGELOG.md); architecture notes in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
+## FAQ
+
+### What is SecureContext?
+
+SecureContext is an open-source (MIT) MCP plugin that adds persistent memory, a cryptographic audit trail, skill-security gating, and multi-agent coordination to Claude Code. It stores everything in local PostgreSQL with local Ollama embeddings — no cloud service, no account, no subscription.
+
+### How do I give Claude Code persistent memory across sessions?
+
+Install SecureContext, then agents call `zc_remember` to persist decisions and gotchas and `zc_recall_context({focus: "current task"})` at session start to restore them — ranked by relevance to the task at hand, with natural-language time queries ("what happened last week") answered directly from memory. Memory survives restarts, compactions, and machine reboots because it lives in PostgreSQL, not in the context window.
+
+### How much does SecureContext reduce Claude Code token costs?
+
+Measured across a 10-session project: **~87% less context-overhead** (session restore is ~1.5–4k tokens instead of 20–50k of re-pasted files). On long-lived projects with hundreds of accumulated memories, the v0.43.0 recall budget keeps each recall at ~4k tokens where an unbounded dump would be ~47k. File questions are answered from 15–50× compressed semantic summaries instead of raw reads.
+
+### How does SecureContext compare to Mem0, Zep, or Letta?
+
+Mem0 and Zep are excellent **hosted memory APIs for LLM apps you build**; Letta (MemGPT) is an agent framework with self-editing memory. SecureContext targets a different job: **memory + security for the coding agents working on your machine**. It matches their core memory features locally (importance-scored facts with TTL, semantic + temporal + graph retrieval, contradiction detection, LongMemEval-comparable benchmarking) and adds what none of them have — an HMAC-chained tamper-evident audit trail, per-agent cryptographic identity isolation, and a skill admission gate. If you want a managed memory backend for your own product, use Mem0/Zep; if you want your Claude Code agents to remember, be auditable, and be safe, use SecureContext.
+
+### Does SecureContext send my code or data to the cloud?
+
+No. Memory, embeddings (Ollama `nomic-embed-text`), search, summarization, and the audit chain all run locally. It works fully offline (search degrades gracefully to keyword-only if Ollama is down) and costs $0 when idle.
+
+### Are Claude Code skills safe to install?
+
+Filesystem skills bundle scripts that run with your permissions, and Claude Code's native loader does not scan them. SecureContext adds the missing gate: every script is AST-scanned for dangerous patterns (`eval`, `exec`, `subprocess(shell=True)`, `pickle.loads`) at admission, HMAC-verified before **every** execution, and quarantined automatically if it fails or changes after admission — with a verifiable chained log of every admission decision.
+
+### Can multiple Claude Code sessions work on the same project without conflicts?
+
+Yes — that's a core feature. Parallel sessions atomically claim tasks from a work-stealing queue (zero double-claims at 50 agents × 100 tasks in testing), coordinate through typed broadcasts (ASSIGN/STATUS/MERGE/REJECT), and keep private per-agent memory namespaces plus a shared pool.
+
+### What do I need to run it?
+
+Node ≥ 22 and Docker (for the bundled PostgreSQL + Ollama compose stack). One-time setup takes about five minutes — see [Setup](#setup). A SQLite fallback runs with zero infrastructure for single-machine use.
 
 ---
 
