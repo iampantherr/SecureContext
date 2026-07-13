@@ -2,14 +2,14 @@
 
 > **The security and memory layer for Claude Code.** Persistent memory that survives restarts, cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs locally on PostgreSQL — zero cloud sync, MIT-licensed.
 
-[![Version](https://img.shields.io/badge/version-0.41.0-blue)](package.json)
-[![Tests](https://img.shields.io/badge/tests-865%20passed-brightgreen)](src)
+[![Version](https://img.shields.io/badge/version-0.43.0-blue)](package.json)
+[![Tests](https://img.shields.io/badge/tests-878%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
-> ⚠️ **Note on the "SafeSkill 20/100 Blocked" PR comment:** that score is a false positive from a regex-based scanner that doesn't understand the difference between *defending against* a pattern and *using* it. See [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) for the line-by-line refutation. The actual project has 786 passing tests including 60+ red-team attack IDs verified against a real threat model.
+> ⚠️ **Note on the "SafeSkill 20/100 Blocked" PR comment:** that score is a false positive from a regex-based scanner that doesn't understand the difference between *defending against* a pattern and *using* it. See [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) for the line-by-line refutation. The actual project has 878 passing tests including 60+ red-team attack IDs verified against a real threat model.
 
 ---
 
@@ -162,7 +162,9 @@ For per-project skills under `<project>/.claude/skills/<name>/`, bind-mount the 
 | Token overhead per session (vs. native Claude re-paste) | **~87% lower** |
 | Claude Opus cost per session (tool-call overhead only) | **~$0.16** vs. ~$2–5 native |
 | Recall cache hit saves | **~800 tokens per call** (~$0.06 on Opus) |
-| Unit + integration tests | **786 passing** |
+| Recall on a mature project (237 facts, v0.43.0 budget) | **~47k → ~4k tokens per recall (~92% lower)** |
+| Memory-retrieval benchmark (LongMemEval-style, v0.40 → v0.43) | **hit@10 0% → 78%** |
+| Unit + integration tests | **878 passing** |
 | Red-team attack IDs verified | **60+ (RT-S0 through RT-S4)** |
 | Hash-chain forgery resistance | Cryptographic (per-agent HKDF subkey) |
 | Atomic work-stealing tested | **50 agents × 100 tasks, zero double-claims** |
@@ -228,13 +230,16 @@ The `machine_secret` is generated once on first boot, mode 0600, lives inside th
 
 ---
 
-## What's coming (v0.28.0)
+## What's new (v0.43.0)
 
-`v0.28.0-α` (this release) ships the **skill spotter** dry-run mode — a detector library that mines `tool_calls_pg` and `pretool_events_pg` for repeated procedural patterns across sessions. No LLM yet; just structured signals the operator can review on the dashboard. `POST /api/v1/skills/spotter/dry-run` → see what patterns the agents are repeating.
+**Recall is now a bounded digest.** Measured failure this release fixes: a mature project accumulated 237 working-memory facts and `zc_recall_context` rendered ~47k tokens — agents started spawning subagents to "digest" their own memory. Now the top-ranked facts render in full up to a budget (`ZC_RECALL_MAX_CHARS`, default ≈4k tokens) and the tail collapses into a grouped, fully-retrievable index. Time-scoped questions ("what happened last week") get in-window facts first with explicit overflow reporting — never silent truncation. Stale facts decay (selective-rehearsal salience), and `zc_remember` pushes back on importance inflation with a ★5 soft quota.
 
-Upcoming:
-- **v0.28.0-β** — LLM-driven spotter agent (Sonnet 4.6 + high-effort extended thinking). Takes the signals, applies the four Anthropic skill-quality gates (procedural-not-factual, clear-trigger, ≥3-repeats, has-progressive-disclosure-leverage), files candidates to `skill_candidates_pg` for operator review.
-- **v0.28.0-γ** — remaining 4 detectors (external script invocation, uncredited high-cost tasks, rejected-mutation clusters, repeated prompt fragments) + optional cron schedule.
+Recent releases:
+- **v0.42.0** — TTL memories (`ttl_days`), numeric-conflict triage, temporal filters in KB search, multimodal ingestion (`zc_index_file`: PDF / DOCX / images via local vision models), LongMemEval public-benchmark adapter.
+- **v0.41.0** — memory-quality program: LongMemEval-style benchmark harness, focused recall (`focus` re-ranking), semantic consolidation, bi-temporal event-time + natural-language time windows, multi-hop graph retrieval. Bench: hit@10 0% → 75%.
+- **v0.37–0.40** — self-correcting memory v2, graph retrieval channel, community query mode, trajectory→skill spotter graduation, automatic background memory extraction, operator dashboard redesign.
+
+Full details in [CHANGELOG.md](CHANGELOG.md); architecture notes in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

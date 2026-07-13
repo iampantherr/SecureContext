@@ -46,6 +46,7 @@ import {
 } from "./access-control.js";
 import { computeRowHash, getLastHash, verifyChain } from "./chain.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
+import { budgetFacts, effectiveImportance, type TemporalWindow } from "./recall_budget.js";
 
 /** v0.31.0 epistemology layer — WHAT kind of claim a fact is. */
 export type MemoryKind = "fact" | "decision" | "hypothesis" | "prediction";
@@ -488,26 +489,42 @@ export function recallWorkingMemory(
   }
 
   // Tier-2 #4: fold recency/salience in as a SECONDARY key (importance stays primary),
-  // then best-effort bump access_count/last_retrieved_at for the retrieved facts. Fully
-  // inert when W_SALIENCE=0 — no re-sort, no writes (byte-identical recall + the kill-switch).
-  if (salienceEnabled() && rows.length > 0) {
+  // then best-effort bump access_count/last_retrieved_at. Fully inert when
+  // W_SALIENCE=0 — no re-sort, no writes (byte-identical recall + the kill-switch).
+  // R8 (v0.43.0): the sort key is now EFFECTIVE importance (staleness-demoted; see
+  // recall_budget.ts — inert when ZC_RECALL_STALE_DEMOTE=0), and the access bump
+  // covers only the facts that will RENDER under the recall budget. Bumping every
+  // returned row (the old behaviour) reset last_retrieved_at project-wide on every
+  // recall, which made "stale" undetectable — rehearsal must be selective to decay.
+  const demoteStale = Config.RECALL_STALE_DEMOTE > 0;
+  if ((salienceEnabled() || demoteStale) && rows.length > 0) {
     const now = Date.now();
-    const k   = (r: MemoryFact) => `${r.key} ${r.agent_id ?? ""}`;
-    const sal = new Map(rows.map((r) => [k(r), computeSalience(r.access_count, r.last_retrieved_at, now)]));
+    const k   = (r: MemoryFact) => `${r.key}\u0000${r.agent_id ?? ""}`;
+    const sal = salienceEnabled()
+      ? new Map(rows.map((r) => [k(r), computeSalience(r.access_count, r.last_retrieved_at, now)]))
+      : null;
     const prio = (r: MemoryFact) => (safeAgent !== "default" && r.agent_id === safeAgent ? 0 : 1);
+    const eff  = (r: MemoryFact) => (demoteStale ? effectiveImportance(r, now) : r.importance);
     rows = [...rows].sort((a, b) =>
       prio(a) - prio(b) ||
-      b.importance - a.importance ||
-      (sal.get(k(b)) ?? 0) - (sal.get(k(a)) ?? 0) ||
+      eff(b) - eff(a) ||
+      (sal ? (sal.get(k(b)) ?? 0) - (sal.get(k(a)) ?? 0) : 0) ||
       (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
     );
-    try {
-      const nowIso = new Date().toISOString();
-      const bump = db.prepare(`UPDATE working_memory SET access_count = COALESCE(access_count,0) + 1, last_retrieved_at = ? WHERE key = ? AND agent_id = ?`);
-      db.exec("BEGIN");
-      for (const r of rows) bump.run(nowIso, r.key, r.agent_id ?? safeAgent);
-      db.exec("COMMIT");
-    } catch { try { db.exec("ROLLBACK"); } catch { /* no-op */ } /* pre-migration DB — skip */ }
+    if (salienceEnabled()) {
+      try {
+        // R8 — bump ONLY the facts that will render under the recall budget.
+        // Bumping every returned row reset last_retrieved_at project-wide on each
+        // recall, which made staleness undetectable; selective rehearsal lets
+        // collapsed facts genuinely decay while surfaced facts stay fresh.
+        const toBump = budgetFacts(rows).rendered;
+        const nowIso = new Date().toISOString();
+        const bump = db.prepare(`UPDATE working_memory SET access_count = COALESCE(access_count,0) + 1, last_retrieved_at = ? WHERE key = ? AND agent_id = ?`);
+        db.exec("BEGIN");
+        for (const r of toBump) bump.run(nowIso, r.key, r.agent_id ?? safeAgent);
+        db.exec("COMMIT");
+      } catch { try { db.exec("ROLLBACK"); } catch { /* no-op */ } /* pre-migration DB — skip */ }
+    }
   }
 
   db.close();
@@ -708,15 +725,26 @@ export function formatWorkingMemoryForContext(
   max: number = Config.WORKING_MEMORY_MAX,
   cite: boolean = false,  // v0.38.0 — per-claim citation chips (opt-in; recall stays lean by default)
   focused: boolean = false, // M1 (v0.41.0) — facts arrive RELEVANCE-ordered; render flat, don't regroup by ★
+  win?: TemporalWindow,     // R8 (v0.43.0) — parsed time window from the focus: in-window facts get tier-1 priority under the budget
 ): string {
   if (facts.length === 0) return "## Working Memory\nEmpty — no facts stored yet.";
 
-  const critical  = facts.filter((f) => f.importance >= 4);
-  const normal    = facts.filter((f) => f.importance === 3);
-  const ephemeral = facts.filter((f) => f.importance <= 2);
+  // R8 (v0.43.0) — recall output budget. Measured on a mature project: 237 facts
+  // rendered ~47k tokens and agents started spawning subagents to "digest" the
+  // recall. Top-ranked facts render fully; the tail collapses into a grouped,
+  // retrievable index. Small projects fit entirely → byte-identical output.
+  const budget = budgetFacts(facts, { win });
+  const shown  = budget.rendered;
 
+  const critical  = shown.filter((f) => f.importance >= 4);
+  const normal    = shown.filter((f) => f.importance === 3);
+  const ephemeral = shown.filter((f) => f.importance <= 2);
+
+  const headCount = budget.collapsed.length > 0
+    ? `${facts.length}/${max} facts · top ${shown.length} rendered`
+    : `${facts.length}/${max} facts`;
   const lines: string[] = [
-    `## Working Memory (${facts.length}/${max} facts${agentId !== "default" ? ` · agent: ${agentId}` : ""}${focused ? " · ranked by task relevance" : ""})`,
+    `## Working Memory (${headCount}${agentId !== "default" ? ` · agent: ${agentId}` : ""}${focused ? " · ranked by task relevance" : ""})`,
   ];
 
   // v0.31.0: plain facts render byte-identical; non-fact / resolved claims get an inline badge.
@@ -741,7 +769,8 @@ export function formatWorkingMemoryForContext(
   // M1 — focused recall is RELEVANCE-ordered top-to-bottom; regrouping into ★ tiers
   // would destroy exactly the ordering the caller asked for. Render flat instead.
   if (focused) {
-    for (const f of facts) lines.push(fmtFact(f));
+    for (const f of shown) lines.push(fmtFact(f));
+    if (budget.tailNotice) lines.push(budget.tailNotice);
     return lines.join("\n");
   }
 
@@ -757,8 +786,30 @@ export function formatWorkingMemoryForContext(
     lines.push("\n**Ephemeral [★1-2]**");
     for (const f of ephemeral) lines.push(fmtFact(f));
   }
+  if (budget.tailNotice) lines.push(budget.tailNotice);
 
   return lines.join("\n");
+}
+
+/**
+ * R8c (v0.43.0) — count live importance-5 facts in a namespace. Used by the
+ * zc_remember soft-quota nudge: beyond Config.IMP5_SOFT_CAP the tool response
+ * warns (never blocks) that "critical" is being diluted. Measured trigger: a
+ * mature project had 207/237 facts at ★5 — when everything is critical,
+ * eviction and ranking lose all discriminating power.
+ */
+export function countImportance5(projectPath: string, agentId: string = "default"): number {
+  const db        = openDb(projectPath);
+  const safeAgent = sanitize(agentId, 64);
+  try {
+    return (db.prepare(
+      "SELECT COUNT(*) as n FROM working_memory WHERE agent_id = ? AND importance = 5 AND valid_to IS NULL"
+    ).get(safeAgent) as { n: number }).n;
+  } catch {
+    return 0; // pre-migration DB — nudge silently disabled
+  } finally {
+    db.close();
+  }
 }
 
 /** Returns working memory stats for the zc_status tool, including dynamic limit and complexity profile */

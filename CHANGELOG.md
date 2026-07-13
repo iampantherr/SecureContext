@@ -4,6 +4,56 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.43.0] — 2026-07-13 — Recall budget: bounded digest, staleness decay, importance discipline
+
+Fixes a measured failure on a mature project: 237 accumulated working-memory facts (87%
+importance-5) made `zc_recall_context` render ~47k tokens, and agents responded by spawning
+subagents to "digest" their own memory — slower, lossier, and more expensive than reading it.
+Recall is now a bounded digest (~4k tokens default) with honest progressive disclosure.
+Verified: 13 new unit tests, suite 878/881 (same 3 pre-existing fixtures), a new recall-size
+regression gate (7/7), bench ≥ prior stage on every category, and live terminal-agent E2Es on
+both a fresh and a seeded mature project (temporal "what happened last week" answered from
+recall directly; zero subagent usage in telemetry).
+
+### Added
+- **Recall output budget** (`src/recall_budget.ts`, shared by the SQLite formatter and the PG
+  proxy renderer): top-ranked facts render in full up to `ZC_RECALL_MAX_CHARS` (default 16000
+  chars ≈ 4k tokens); the tail collapses into a grouped index by key prefix
+  (`…140 more facts: OWNERSHIP_* (46) · STATE_* (19) · …`) with an explicit pointer to pull
+  specifics via `focus` or `zc_search`. Nothing is deleted. `ZC_RECALL_MIN_FACTS` (10) floors
+  the render; `ZC_RECALL_MAX_CHARS=0` disables (kill-switch). Small projects render
+  byte-identically.
+- **Temporal tier-1 contract**: facts inside a time window parsed from the focus get absolute
+  priority under the budget, and any in-window overflow is reported explicitly
+  (`⚠ N of the collapsed facts are INSIDE your requested time window — narrow the focus or
+  raise ZC_RECALL_MAX_CHARS`). Never silent truncation.
+- **Staleness demotion**: in classic (unfocused) ordering, a fact neither created nor retrieved
+  within `ZC_RECALL_STALE_DAYS` (30) sorts as `importance − ZC_RECALL_STALE_DEMOTE` (2) — a
+  stale ★5 ranks below a fresh ★3+ and collapses first. Stored importance is never mutated;
+  `=0` restores byte-identical ordering.
+- **Importance-inflation soft quota**: `zc_remember` warns (never blocks) when a namespace
+  exceeds `ZC_IMP5_SOFT_CAP` (25) importance-5 facts, on both SQLite and PG paths
+  (`Store.countImportance5`). Tool descriptions now prescribe ★5-only-for-breaking-facts and
+  `ttl_days` for per-task notes.
+- **Regression scaffolding**: `scripts/seed-mature-memory.mjs` (permanent ZZ_MATURE fixture —
+  ~250 facts shaped like a real 8-week-old project, deterministic, re-pristinable) and
+  `scripts/recall-size-check.mjs` (budget / tail-engagement / temporal-priority / honesty
+  gate). Closes the test-design gap where features were only ever E2E'd on fresh projects.
+
+### Changed
+- **Selective-rehearsal access bump**: the salience bump now touches only the facts that
+  actually render under the budget. Previously every recall bumped `last_retrieved_at` on
+  every returned row, which reset staleness project-wide and made decay undetectable.
+- **Contradiction-scan coverage honesty** (found by this release's E2E): a scan that
+  transiently skipped facts (embedder busy) now returns a `skipped` count and the tool message
+  says coverage is incomplete with a re-run hint — instead of a confident "no contradictions ✓"
+  while an unscanned numeric conflict sat unflagged.
+- `zc_recall_context` description now states: always pass `focus`; the output IS the digest —
+  never spawn a subagent to summarize it. Header reports honest counts
+  (`237/101 facts · top 29 rendered`) when the budget engages.
+- Fixed a raw NUL byte embedded in a `memory.ts` template literal (made grep treat the file
+  as binary); now the 6-character backslash-u-0000 escape sequence.
+
 ## [0.42.0] — 2026-07-10 — Refinements: TTL memories, numeric-conflict triage, multimodal ingestion, KB temporal filters, LongMemEval
 
 Follow-up round to the M-program closing the remaining competitive gaps (Mem0 TTL,

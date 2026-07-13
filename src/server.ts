@@ -298,7 +298,11 @@ const TOOLS: Tool[] = [
     description:
       "Store a key-value fact in working memory (MemGPT-style). " +
       "Working memory is bounded (100 facts base, scales up to 250 by project complexity) — lowest-importance facts auto-evict to archival KB. " +
-      "Use importance 5 for critical facts, 1 for ephemeral notes. Use agent_id to namespace facts for parallel agent use. " +
+      "IMPORTANCE DISCIPLINE (v0.43.0): ★5 is ONLY for facts whose loss breaks future sessions (service names, " +
+      "irreversible decisions, credentials-locations, breaking gotchas) — a soft quota warns past " +
+      "25 ★5 facts per namespace. Work-log entries and findings are ★3-4; per-task notes " +
+      "(ownership markers, task state) should ALSO set ttl_days so they expire when the task is long done. " +
+      "Use agent_id to namespace facts for parallel agent use. " +
       "EPISTEMOLOGY (v0.31.0) — TYPE YOUR CLAIMS: recording a falsifiable claim about the FUTURE? set kind='prediction' + confidence (0–1) + resolution='open', then later re-remember the SAME key with resolution='resolved_correct'/'resolved_incorrect' to close it. Recording a CHOSEN approach? set kind='decision'. A tentative/unverified claim? kind='hypothesis'. Plain observed facts need nothing (kind defaults to 'fact'; the system also auto-classifies from the text). Typed claims power contradiction detection + self-calibration.",
     inputSchema: {
       type: "object",
@@ -370,9 +374,14 @@ const TOOLS: Tool[] = [
       "Recall working memory and recent session events. " +
       "Call this at the start of every session to restore project context. " +
       "Returns structured sections: Working Memory · Session Events · System Status. " +
-      "WHEN YOU HAVE A SPECIFIC TASK, pass focus:'<one line describing it>' — facts are then " +
-      "ranked by relevance to YOUR task instead of raw importance (v0.41.0), which surfaces " +
-      "the gotchas/decisions that actually matter for the work at hand. " +
+      "ALWAYS pass focus:'<one line describing your current task>' when you have one — facts are then " +
+      "ranked by relevance to YOUR task instead of raw importance (v0.41.0), and time expressions in the " +
+      "focus ('last week', 'since March') select facts from that window with priority. " +
+      "v0.43.0: output is BUDGETED — the top-ranked facts render in full and the tail collapses into a " +
+      "grouped index (nothing is deleted; pull collapsed facts with a narrower focus or zc_search). " +
+      "The recall output IS already the digest: NEVER spawn a subagent to summarize it — that is slower, " +
+      "loses exact keys/hashes/numbers, and costs more than reading it directly. If it feels too broad, " +
+      "re-call with a tighter focus instead. " +
       "v0.17.1: repeat calls within 60s by the same agent/project return a cached response " +
       "(unchanged if no new memory / broadcasts / events have landed), saving ~$0.06 per cached call. " +
       "Pass force:true to bypass the cache.",
@@ -1317,11 +1326,17 @@ async function _handleMemoryContradictions(
       const n = (r["reviewed"] as number) ?? 0;
       return { content: [{ type: "text", text: n > 0 ? `Marked ${args["key_a"]} ⇄ ${args["key_b"]} as ${action}.` : "No matching open contradiction found." }] };
     }
-    const scan = r["scan"] as { ollamaAvailable: boolean } | null;
+    const scan = r["scan"] as { ollamaAvailable: boolean; skipped?: number } | null;
     if (args["run"] && scan && !scan.ollamaAvailable) {
       return { content: [{ type: "text", text: "Contradiction scan skipped — Ollama embeddings unavailable." }] };
     }
-    return { content: [{ type: "text", text: _fmtContradictionsList((r["contradictions"] as ContraRow[]) ?? []) }] };
+    // R8 — a scan that transiently skipped facts is INCOMPLETE, not clean: say so
+    // instead of implying full coverage (measured E2E failure: unflagged numeric
+    // conflict + a confident "no contradictions ✓").
+    const skipNote = args["run"] && scan && (scan.skipped ?? 0) > 0
+      ? `\n⚠ ${scan.skipped} fact(s) skipped this scan (embedder busy) — coverage is incomplete; re-run zc_memory_contradictions {run:true} in ~1 minute.`
+      : "";
+    return { content: [{ type: "text", text: _fmtContradictionsList((r["contradictions"] as ContraRow[]) ?? []) + skipNote }] };
   }
 
   // In-process mode → local SQLite.
@@ -1331,13 +1346,18 @@ async function _handleMemoryContradictions(
     const n = reviewContradiction(PROJECT_PATH, agentId, String(args["key_a"]), String(args["key_b"]), st as "dismissed" | "acknowledged" | "resolved");
     return { content: [{ type: "text", text: n > 0 ? `Marked ${args["key_a"]} ⇄ ${args["key_b"]} as ${st}.` : "No matching open contradiction found." }] };
   }
+  let inprocSkipNote = "";
   if (args["run"]) {
     const res = await detectContradictions(PROJECT_PATH, agentId, "manual");
     if (!res.ollamaAvailable) {
       return { content: [{ type: "text", text: "Contradiction scan skipped — Ollama embeddings unavailable. Start Ollama (`ollama serve`) and retry." }] };
     }
+    // R8 — incomplete-coverage disclosure (see proxy branch above for rationale).
+    if ((res.skipped ?? 0) > 0) {
+      inprocSkipNote = `\n⚠ ${res.skipped} fact(s) skipped this scan (embedder busy) — coverage is incomplete; re-run zc_memory_contradictions {run:true} in ~1 minute.`;
+    }
   }
-  return { content: [{ type: "text", text: _fmtContradictionsList(listOpenContradictions(PROJECT_PATH, agentId)) }] };
+  return { content: [{ type: "text", text: _fmtContradictionsList(listOpenContradictions(PROJECT_PATH, agentId)) + inprocSkipNote }] };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1377,7 +1397,17 @@ async function _handleRemoteTool(
             ? { expiresAt: new Date(Date.now() + (body["ttl_days"] as number) * 86_400_000).toISOString() }
             : {}),
         });
-        return { content: [{ type: "text", text: `Remembered under agent_id='${body["agent_id"] ?? AGENT_ID}'. Working memory: ${result["count"]}/${result["max"]} facts` }] };
+        {
+          // R8c — importance-inflation nudge (never blocks): the API counts live ★5
+          // facts in the namespace when this write was ★5.
+          const n5 = typeof result["imp5Count"] === "number" ? (result["imp5Count"] as number) : 0;
+          const imp5Note = n5 > Config.IMP5_SOFT_CAP && Config.IMP5_SOFT_CAP > 0
+            ? `\n⚠ This namespace now has ${n5} importance-5 facts (soft cap ${Config.IMP5_SOFT_CAP}). ` +
+              `When everything is critical, nothing is — reserve ★5 for facts whose loss breaks future sessions; ` +
+              `use ★3-4 for work-log entries, or add ttl_days for per-task notes.`
+            : "";
+          return { content: [{ type: "text", text: `Remembered under agent_id='${body["agent_id"] ?? AGENT_ID}'. Working memory: ${result["count"]}/${result["max"]} facts${imp5Note}` }] };
+        }
 
       case "zc_memory_contradictions":
         return await _handleMemoryContradictions(args);
@@ -1424,7 +1454,7 @@ async function _handleRemoteTool(
         const recallFocus = typeof body["focus"] === "string" && (body["focus"] as string).trim()
           ? `&focus=${encodeURIComponent((body["focus"] as string).slice(0, 2000))}` : "";
         const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}${recallFocus}`);
-        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null; agent_id?: string; created_at?: string; origin?: string | null }> ?? [];
+        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null; agent_id?: string; created_at?: string; valid_at?: string | null; origin?: string | null }> ?? [];
         // v0.38.0 — per-claim citations, opt-in ({cite:true}) so default recall stays lean.
         const wantCite = body["cite"] === true;
         const citeChip = (f: { agent_id?: string; created_at?: string; origin?: string | null }): string => {
@@ -1434,7 +1464,25 @@ async function _handleRemoteTool(
         };
         const skills    = recallRes["skills"] as Array<{ skill_id: string; name: string; description: string }> ?? [];
         const max       = recallRes["max"] as number ?? 50;
-        const lines     = [`## Working Memory (${facts.length}/${max} facts)`];
+        // R8 (v0.43.0) — recall output budget. The API returns the full ranked list;
+        // the proxy renders the top under ZC_RECALL_MAX_CHARS and collapses the tail
+        // into a grouped, retrievable index (see recall_budget.ts — measured trigger:
+        // 237 facts rendered ~47k tokens and agents spawned subagents to digest it).
+        const { budgetFacts: bFacts } = await import("./recall_budget.js");
+        let bWin: { from?: Date; to?: Date } | undefined;
+        if (recallFocus) {
+          try {
+            const { parseTemporalQuery: bParse } = await import("./temporal_parse.js");
+            const bw = bParse(String(body["focus"] ?? ""));
+            if (bw.from || bw.to) bWin = { from: bw.from, to: bw.to };
+          } catch { /* window detection is best-effort */ }
+        }
+        const fBudget    = bFacts(facts, { win: bWin });
+        const shownFacts = fBudget.rendered;
+        const headCount  = fBudget.collapsed.length > 0
+          ? `${facts.length}/${max} facts · top ${shownFacts.length} rendered`
+          : `${facts.length}/${max} facts`;
+        const lines     = [`## Working Memory (${headCount})`];
         // v0.31.0 — plain facts render byte-identical; typed/resolved claims get an inline badge.
         const epiBadge = (f: { kind?: string; confidence?: number | null; resolution_status?: string | null }): string => {
           if ((!f.kind || f.kind === "fact") && !f.resolution_status) return "";
@@ -1449,13 +1497,14 @@ async function _handleRemoteTool(
         };
         if (recallFocus) {
           // M1 — facts arrive RELEVANCE-ordered; regrouping by ★ would undo the ranking.
-          lines[0] = `## Working Memory (${facts.length}/${max} facts · ranked by task relevance)`;
-          for (const f of facts) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          lines[0] = `## Working Memory (${headCount} · ranked by task relevance)`;
+          for (const f of shownFacts) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
         } else {
-          for (const f of facts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
-          for (const f of facts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
-          for (const f of facts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          for (const f of shownFacts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          for (const f of shownFacts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          for (const f of shownFacts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
         }
+        if (fBudget.tailNotice) lines.push(fBudget.tailNotice);
         // v0.21.0 — append skill inventory so the agent sees what's available
         // every time they recall context. Skip the section if no skills match
         // the role (avoids noise for projects that haven't authored any skills).
@@ -1811,10 +1860,23 @@ async function dispatchToolCall(
         void import("./memory_contradictions.js").then((m) => m.rearmContradictionScan(PROJECT_PATH, agent_id)).catch(() => undefined);
         const stats = getMemoryStats(PROJECT_PATH, agent_id);
         const epiTag = kind && kind !== "fact" ? ` · ${kind}${typeof confidence === "number" ? ` p=${confidence}` : ""}${resolution ? ` [${resolution}]` : ""}` : "";
+        // R8c — importance-inflation nudge: warn (never block) past the ★5 soft quota.
+        let imp5Note = "";
+        if ((importance ?? 3) === 5 && Config.IMP5_SOFT_CAP > 0) {
+          try {
+            const { countImportance5 } = await import("./memory.js");
+            const n5 = countImportance5(PROJECT_PATH, agent_id ?? "default");
+            if (n5 > Config.IMP5_SOFT_CAP) {
+              imp5Note = `\n⚠ This namespace now has ${n5} importance-5 facts (soft cap ${Config.IMP5_SOFT_CAP}). ` +
+                `When everything is critical, nothing is — reserve ★5 for facts whose loss breaks future sessions; ` +
+                `use ★3-4 for work-log entries, or add ttl_days for per-task notes.`;
+            }
+          } catch { /* nudge is best-effort */ }
+        }
         return {
           content: [{
             type: "text",
-            text: `Remembered: [★${importance ?? 3}] ${key}${epiTag}\nWorking memory: ${stats.count}/${stats.max} facts`,
+            text: `Remembered: [★${importance ?? 3}] ${key}${epiTag}\nWorking memory: ${stats.count}/${stats.max} facts${imp5Note}`,
           }],
         };
       }
@@ -1870,10 +1932,15 @@ async function dispatchToolCall(
         }
 
         let wm: ReturnType<typeof recallWorkingMemory>;
+        // R8 — the parsed temporal window is also handed to the renderer so
+        // in-window facts get tier-1 priority under the recall budget and any
+        // in-window overflow is reported explicitly (never silently truncated).
+        let recallWin: { from?: Date; to?: Date } | undefined;
         if (hasFocus) {
           // M3 — parse NL time expressions in the focus into a structured window/as-of.
           const { parseTemporalQuery } = await import("./temporal_parse.js");
           const w = parseTemporalQuery(focus!);
+          if (w.from || w.to) recallWin = { from: w.from, to: w.to };
           wm = await (await import("./memory.js")).recallWorkingMemoryFocused(
             PROJECT_PATH, agent_id ?? "default", (w.cleaned.trim() || focus!),
             { from: w.from, to: w.to, asOf: w.asOf });
@@ -1897,7 +1964,7 @@ async function dispatchToolCall(
 
         // Section 1: Working Memory (structured by priority — limit is project-aware;
         // M1: relevance-ordered flat list when a focus was given)
-        parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit, (args as { cite?: boolean })?.cite === true, hasFocus));
+        parts.push(formatWorkingMemoryForContext(wm, agent_id, complexity.computedLimit, (args as { cite?: boolean })?.cite === true, hasFocus, recallWin));
 
         // Section 1b (v0.31.0): suspected contradictions (background scan once/session; local SQLite).
         const { formatContradictionsSection: fmtContraInproc } = await import("./memory_contradictions.js");

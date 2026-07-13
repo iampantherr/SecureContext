@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.42.0",
+  VERSION: "0.43.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -132,6 +132,32 @@ export const Config = {
   // Default 0 (flat bonus): measured on the labeled corpus, gating LOST to flat
   // (gold/noise relevance ranges overlap; the gate clipped real answers).
   RECALL_TEMPORAL_REL_GATE: parseFloat(env["ZC_RECALL_TEMPORAL_REL_GATE"] ?? "0"),
+
+  // ── R8 (v0.43.0) — recall output budget + staleness demotion ─────────────
+  // Measured failure: a mature project accumulated 237 live facts (87% marked
+  // importance-5) and zc_recall_context rendered ~47k TOKENS — agents responded
+  // by spawning subagents to "digest" the recall, which is slower, lossier, and
+  // costs more than it saves. The budget makes recall a DIGEST again: top-ranked
+  // facts render in full up to RECALL_MAX_CHARS; the tail collapses into a
+  // grouped one-line index (counts by key prefix) that stays retrievable via
+  // focus/zc_search. Facts inside a parsed temporal window get absolute priority
+  // and any in-window overflow is reported explicitly (never silently truncated).
+  // Kill-switch: ZC_RECALL_MAX_CHARS=0 renders everything (pre-R8 behaviour).
+  RECALL_MAX_CHARS:   parseInt(env["ZC_RECALL_MAX_CHARS"] ?? "16000", 10),
+  // Floor: always render at least this many facts even under a tiny budget, so
+  // a misconfigured budget can never blank the recall entirely.
+  RECALL_MIN_FACTS:   parseInt(env["ZC_RECALL_MIN_FACTS"] ?? "10", 10),
+  // Staleness demotion (classic/unfocused ordering only): a fact not retrieved
+  // (nor created) within STALE_DAYS sorts as importance - STALE_DEMOTE, so a
+  // stale ★5 ranks below a fresh ★3+ and falls past the budget into the
+  // collapsed tail. Counters importance inflation (87% ★5 on the live project)
+  // without ever mutating the stored importance. ZC_RECALL_STALE_DEMOTE=0 ⇒
+  // ordering byte-identical (the kill-switch).
+  RECALL_STALE_DAYS:   parseInt(env["ZC_RECALL_STALE_DAYS"] ?? "30", 10),
+  RECALL_STALE_DEMOTE: parseFloat(env["ZC_RECALL_STALE_DEMOTE"] ?? "2"),
+  // Soft quota for importance-5 facts per namespace: zc_remember warns (never
+  // blocks) beyond this count. "When everything is critical, nothing is."
+  IMP5_SOFT_CAP:       parseInt(env["ZC_IMP5_SOFT_CAP"] ?? "25", 10),
 
   // ── Self-correcting memory v2 (v0.37.0) ──────────────────────────────────
   // Temporal fact retirement + contradiction auto-resolution. When the scan flags a

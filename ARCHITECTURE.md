@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.31.0)
+# SecureContext — Architecture Reference (v0.43.0)
 
 ## Overview
 
@@ -72,6 +72,65 @@ Migrations are idempotent and re-runnable; absent tables degrade silently to bas
   production use of that primitive) and runs `runEnrichment` on an interval — recent-fact
   contradiction re-scan of each project's `default` pool + empty-graph backlink backfill.
   On by default (`ZC_ENRICHMENT_CRON=0` disables).
+
+### Memory-quality program (v0.41.0, "M0–M5")
+
+Benchmark-driven round against a permanent LongMemEval-style yardstick
+(`scripts/memory-bench.mjs`, corpus in `bench/`): retrieval went from **hit@10 0% → 75%+**.
+
+- **Focused recall (M1):** `zc_recall_context {focus}` re-ranks live facts by
+  `cosine(focus) × importance × salience` instead of raw importance.
+- **Consolidation (M2):** the enrichment cron merges near-duplicate paraphrase facts
+  (survivor keeps the higher importance; losers retire revivably; numeric disagreements are
+  vetoed — those are contradictions, not duplicates).
+- **Bi-temporal-lite (M3):** `valid_at` event-time vs `created_at` transaction-time;
+  natural-language time windows in the focus ("last week", "as of 3 months ago") parse into
+  structured windows (`temporal_parse.ts`, zero-dep) with an in-window ranking bonus and
+  as-of point-in-time reconstruction.
+- **Multi-hop graph retrieval (M4):** the RRF graph channel walks bounded BFS
+  (`GRAPH_MAX_DEPTH`, per-hop decay) instead of single-hop.
+
+### Refinements (v0.42.0, "R1–R6")
+
+- **TTL memories (R1):** `zc_remember {ttl_days}` → `expires_at`; recall excludes expired live;
+  the cron retires them as `expired` (revivable, never deleted).
+- **Numeric-conflict triage (R2):** near-identical claims (cosine ≥ 0.85) that disagree on a
+  number flag as `numeric_conflict` — operator-triage only, never auto-resolved.
+- **KB temporal filters (R4):** the same NL time windows apply to `zc_search` in both stores.
+- **Multimodal ingestion (R5):** `zc_index_file` — PDF (pdfjs-dist), DOCX (zero-dep ZIP reader),
+  images via local Ollama vision models (graceful skip when none installed).
+- **LongMemEval adapter (R6):** `memory-bench.mjs --longmemeval <file>` runs the public
+  benchmark for directly comparable numbers.
+
+### Recall budget & importance discipline (v0.43.0, "R8")
+
+Measured failure this round fixes: a mature project accumulated 237 live facts (87% ★5) and
+`zc_recall_context` rendered ~47k tokens — agents began spawning subagents to "digest" the
+recall (slower, lossier, and more expensive than reading it). Recall is now a bounded digest:
+
+- **Output budget** (`recall_budget.ts`, shared by the SQLite formatter and the PG proxy
+  renderer): top-ranked facts render in full up to `ZC_RECALL_MAX_CHARS` (default 16k chars
+  ≈ 4k tokens); the tail collapses into a grouped index by key prefix
+  (`…140 more facts: OWNERSHIP_* (46) · …`). Nothing is deleted — collapsed facts stay
+  retrievable via a tighter focus or `zc_search`. `=0` disables (kill-switch); small projects
+  render byte-identically.
+- **Temporal contract:** facts inside a parsed time window get absolute tier-1 priority under
+  the budget, and any in-window overflow is reported explicitly
+  (`⚠ N of the collapsed facts are INSIDE your requested time window…`) — progressive
+  disclosure, never silent truncation.
+- **Staleness demotion:** for classic (unfocused) ordering, a fact neither created nor
+  retrieved within `ZC_RECALL_STALE_DAYS` (30) sorts as `importance − ZC_RECALL_STALE_DEMOTE`
+  (2) — a stale ★5 ranks below a fresh ★3+ and collapses first. Enabled by a bump-semantics
+  fix: the salience access-bump now touches only the facts that actually RENDER (selective
+  rehearsal), where it previously reset `last_retrieved_at` project-wide on every recall.
+- **Importance-inflation counter:** `zc_remember` warns (never blocks) past a soft quota of
+  ★5 facts per namespace (`ZC_IMP5_SOFT_CAP`, 25); tool descriptions + the session-ritual
+  guidance now prescribe ★5-only-for-breaking-facts and `ttl_days` for per-task notes.
+- **Scan-coverage honesty:** a contradiction scan that transiently skipped facts (embedder
+  busy) reports the skip count instead of implying a clean full-coverage result.
+- **Regression scaffolding:** `scripts/seed-mature-memory.mjs` (permanent ZZ_MATURE fixture,
+  ~250 live-shaped facts backdated 8 weeks) + `scripts/recall-size-check.mjs` (budget / tail /
+  temporal-priority / honesty gate).
 
 ---
 

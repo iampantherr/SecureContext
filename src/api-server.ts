@@ -3131,7 +3131,13 @@ export async function createApiServer(storeOverride?: Store) {
       // re-scans (contradictions are cross-namespace via the shared 'default' pool).
       for (const k of contraScanned) if (k.startsWith(pp + "::")) contraScanned.delete(k);
       const stats = await store.getMemoryStats(pp, String(agentId));
-      return { ok: true, count: stats.count, max: stats.max };
+      // R8c — importance-inflation signal: when this write was ★5, return the
+      // namespace's live ★5 count so the client can nudge past the soft quota.
+      let imp5Count = 0;
+      if (Number(importance) === 5) {
+        try { imp5Count = await store.countImportance5(pp, String(agentId)); } catch { /* best-effort */ }
+      }
+      return { ok: true, count: stats.count, max: stats.max, imp5Count };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

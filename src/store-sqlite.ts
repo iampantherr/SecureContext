@@ -32,6 +32,7 @@ import {
   recallWorkingMemory,
   archiveSessionSummary,
   getMemoryStats as _getMemoryStats,
+  countImportance5 as _countImportance5,
   getWorkingMemoryLimits as _getWorkingMemoryLimits,
   computeProjectComplexity,
   broadcastFact,
@@ -163,6 +164,10 @@ export class SqliteStore implements Store {
     return _getMemoryStats(projectPath, agentId);
   }
 
+  async countImportance5(projectPath: string, agentId: string): Promise<number> {
+    return _countImportance5(projectPath, agentId);
+  }
+
   async getWorkingMemoryLimits(projectPath: string, forceRecompute = false): Promise<MemoryLimits> {
     const db = openProjectDb(projectPath);
     try {
@@ -259,7 +264,7 @@ export class SqliteStore implements Store {
   }
 
   // ── Memory contradictions (Tier-1 B) ──────────────────────────────────────
-  async scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
+  async scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean; skipped?: number }> {
     return detectContradictions(projectPath, agentId, "manual");
   }
 

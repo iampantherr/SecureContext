@@ -37,6 +37,7 @@ import { computeRowHash } from "./chain.js";
 import { getEmbedding, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
 import { classifyFactKind, type EpistemicOpts } from "./memory.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
+import { budgetFacts, effectiveImportance } from "./recall_budget.js";
 import { extractCoReferences, classifyRelation } from "./indexing/community.js";
 import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict, autoResolveVictim } from "./contradiction_heuristics.js";
 import { llmExtractEntities, entityEdgesFor, ENTITY_EXTRACT_ENABLED, ENTITY_BUDGET } from "./indexing/entity_extract.js";
@@ -393,24 +394,35 @@ export class PostgresStore implements Store {
     // Tier-2 #4: secondary salience re-sort (importance stays primary) + best-effort
     // access bump (single batched UPDATE via unnest, fire-and-forget). Inert when
     // W_SALIENCE=0 — byte-identical ordering, no writes (the kill-switch).
-    if (salienceEnabled() && rows.length > 0) {
+    // R8 (v0.43.0): sort key is EFFECTIVE importance (staleness-demoted, see
+    // recall_budget.ts; inert when ZC_RECALL_STALE_DEMOTE=0) and the bump covers
+    // only the facts that will RENDER under the recall budget — bumping every row
+    // reset last_retrieved_at project-wide each recall, making "stale" undetectable.
+    const demoteStale = Config.RECALL_STALE_DEMOTE > 0;
+    if ((salienceEnabled() || demoteStale) && rows.length > 0) {
       const now = Date.now();
       const k    = (r: MemoryFact) => `${r.key} ${r.agent_id ?? ""}`;
-      const sal  = new Map(rows.map((r) => [k(r), computeSalience(r.access_count, r.last_retrieved_at ?? null, now)]));
+      const sal  = salienceEnabled()
+        ? new Map(rows.map((r) => [k(r), computeSalience(r.access_count, r.last_retrieved_at ?? null, now)]))
+        : null;
       const prio = (r: MemoryFact) => (safeAgent !== "default" && r.agent_id === safeAgent ? 0 : 1);
+      const eff  = (r: MemoryFact) => (demoteStale ? effectiveImportance(r, now) : r.importance);
       rows = [...rows].sort((a, b) =>
         prio(a) - prio(b) ||
-        b.importance - a.importance ||
-        (sal.get(k(b)) ?? 0) - (sal.get(k(a)) ?? 0) ||
+        eff(b) - eff(a) ||
+        (sal ? (sal.get(k(b)) ?? 0) - (sal.get(k(a)) ?? 0) : 0) ||
         (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
       );
-      void this.pool.query(
-        `UPDATE working_memory AS w
-            SET access_count = COALESCE(w.access_count,0) + 1, last_retrieved_at = NOW()
-           FROM unnest($2::text[], $3::text[]) AS t(key, agent_id)
-          WHERE w.project_hash = $1 AND w.key = t.key AND w.agent_id = t.agent_id`,
-        [projectHash, rows.map((r) => r.key), rows.map((r) => r.agent_id ?? safeAgent)]
-      ).catch(() => undefined);
+      if (salienceEnabled()) {
+        const toBump = budgetFacts(rows).rendered;
+        void this.pool.query(
+          `UPDATE working_memory AS w
+              SET access_count = COALESCE(w.access_count,0) + 1, last_retrieved_at = NOW()
+             FROM unnest($2::text[], $3::text[]) AS t(key, agent_id)
+            WHERE w.project_hash = $1 AND w.key = t.key AND w.agent_id = t.agent_id`,
+          [projectHash, toBump.map((r) => r.key), toBump.map((r) => r.agent_id ?? safeAgent)]
+        ).catch(() => undefined);
+      }
     }
 
     // M1 (v0.41.0) — FOCUSED recall: with a focus string, re-rank live facts by
@@ -503,6 +515,14 @@ export class PostgresStore implements Store {
       criticalCount: parseInt(critRes.rows[0]!.n, 10),
       complexity:    limits.profile,
     };
+  }
+
+  async countImportance5(projectPath: string, agentId: string): Promise<number> {
+    const res = await this.pool.query<{ n: string }>(
+      "SELECT COUNT(*) as n FROM working_memory WHERE project_hash = $1 AND agent_id = $2 AND importance = 5 AND valid_to IS NULL",
+      [ph(projectPath), sanitize(agentId, 64)]
+    );
+    return parseInt(res.rows[0]!.n, 10);
   }
 
   async getWorkingMemoryLimits(projectPath: string, forceRecompute = false): Promise<MemoryLimits> {
@@ -1186,11 +1206,11 @@ export class PostgresStore implements Store {
   }
 
   // ── Memory contradictions (Tier-1 B, PG-native) ───────────────────────────
-  async scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
+  async scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean; skipped?: number }> {
     return this._scanContradictionsByHash(ph(projectPath), sanitize(agentId, 64));
   }
 
-  private async _scanContradictionsByHash(projectHash: string, safeAgent: string, sinceDays?: number): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
+  private async _scanContradictionsByHash(projectHash: string, safeAgent: string, sinceDays?: number): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean; skipped?: number }> {
     // sinceDays (cron only) restricts the scan to RECENT facts so the periodic sweep flags fresh
     // conflicts rather than re-embedding + re-flagging years of accumulated history every cycle.
     // The recall-time path passes nothing ⇒ scans all facts (unchanged).
@@ -1217,7 +1237,7 @@ export class PostgresStore implements Store {
       vectors.set(f.key, emb.vector);
     }
     if (vectors.size < 2) {
-      return { scanned: facts.length, flagged: 0, ollamaAvailable: embFails < facts.length };
+      return { scanned: facts.length, flagged: 0, ollamaAvailable: embFails < facts.length, skipped: embFails };
     }
     const found: Array<{ ka: string; kb: string; sim: number; reason: string; detail: string; victim: string | null }> = [];
     for (let i = 0; i < facts.length; i++) {
@@ -1271,7 +1291,8 @@ export class PostgresStore implements Store {
         [projectHash, safeAgent, f.ka, f.kb, f.sim, f.reason, f.detail]);
       flagged++;
     }
-    return { scanned: facts.length, flagged, ollamaAvailable: true };
+    // R8 — surface transiently-skipped facts: a "clean" scan that skipped facts is incomplete.
+    return { scanned: facts.length, flagged, ollamaAvailable: true, skipped: embFails };
   }
 
   /**

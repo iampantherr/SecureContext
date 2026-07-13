@@ -149,6 +149,8 @@ export interface Store {
   archiveSummary(projectPath: string, summary: string): Promise<void>;
   getMemoryStats(projectPath: string, agentId: string): Promise<MemoryStats>;
   getWorkingMemoryLimits(projectPath: string, forceRecompute?: boolean): Promise<MemoryLimits>;
+  // R8c (v0.43.0): live ★5 count in a namespace — importance-inflation soft-quota nudge.
+  countImportance5(projectPath: string, agentId: string): Promise<number>;
 
   // ── Knowledge Base ──────────────────────────────────────────────────────────
   index(projectPath: string, content: string, source: string, sourceType?: "internal" | "external", retentionTier?: RetentionTier): Promise<void>;
@@ -179,7 +181,9 @@ export interface Store {
   reviveFact(projectPath: string, key: string, agentId: string): Promise<boolean>;
 
   // ── Memory contradictions (Tier-1 B) ─────────────────────────────────────────
-  scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }>;
+  // R8 (v0.43.0): `skipped` = facts whose embedding transiently failed (embedder busy) — the
+  // scan continued without them, so a clean result with skipped>0 is INCOMPLETE, not clean.
+  scanContradictions(projectPath: string, agentId: string): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean; skipped?: number }>;
   listContradictions(projectPath: string, agentId: string): Promise<Array<{ key_a: string; key_b: string; similarity: number; reason: string; detail: string }>>;
   reviewContradiction(projectPath: string, agentId: string, keyA: string, keyB: string, status: "dismissed" | "acknowledged" | "resolved", mode?: string): Promise<number>;
 

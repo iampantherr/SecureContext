@@ -67,7 +67,7 @@ export async function detectContradictions(
   projectPath: string,
   agentId: string,
   surfacedBy: "cron" | "manual" = "cron",
-): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean }> {
+): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean; skipped?: number }> {
   const facts = recallWorkingMemory(projectPath, agentId)
     .filter((f) => f.importance >= 3)
     .slice(0, MAX_SCAN_FACTS);
@@ -83,7 +83,7 @@ export async function detectContradictions(
     vectors.set(f.key, emb.vector);
   }
   if (vectors.size < 2) {
-    return { scanned: facts.length, flagged: 0, ollamaAvailable: embFails < facts.length };
+    return { scanned: facts.length, flagged: 0, ollamaAvailable: embFails < facts.length, skipped: embFails };
   }
 
   const found: Array<{ a: MemoryFact; b: MemoryFact; sim: number; reason: string; detail: string; victim: string | null }> = [];
@@ -154,7 +154,10 @@ export async function detectContradictions(
     return { ka, kb, sim: f.sim, reason: f.reason, detail: f.detail };
   }), surfacedBy).catch(() => undefined);
 
-  return { scanned: facts.length, flagged: found.length, ollamaAvailable: true };
+  // R8 — report transiently-skipped facts: a "clean" scan that skipped facts is
+  // INCOMPLETE (measured in the R8 E2E: a numeric conflict went unflagged because
+  // one fact's embed failed under load and the tool still said "no contradictions ✓").
+  return { scanned: facts.length, flagged: found.length, ollamaAvailable: true, skipped: embFails };
 }
 
 /**
