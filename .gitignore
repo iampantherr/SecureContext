@@ -20,3 +20,4 @@ docs/planning/
 
 # Scratch/diagnostic scripts (underscore prefix = local-only, never published)
 scripts/_*
+bench/data/

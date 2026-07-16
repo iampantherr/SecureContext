@@ -34,7 +34,7 @@ import pg from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
-import { getEmbedding, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
+import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
 import { classifyFactKind, type EpistemicOpts } from "./memory.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance } from "./recall_budget.js";
@@ -226,6 +226,13 @@ export class PostgresStore implements Store {
     // Debounced 5s + fire-and-forget: a burst of remembers still costs one rebuild.
     this._scheduleBacklinkRebuild(projectPath);
 
+    // S1 (v0.44.0) — WRITE-TIME embedding (PG parity with memory.ts). Found during the
+    // S1 bench: the PG path relied entirely on the 30-min enrichment cron backfill
+    // (40 facts/cycle), so focused recall ran with rel=0 on every fact for up to an
+    // hour after a write burst. Fire-and-forget; the cron backfill remains the healer
+    // for anything dropped here (Ollama down, transient failure).
+    this._embedFactAsync(projectHash, safeAgent, safeKey, safeValue);
+
     // M1 (v0.41.0) — embed the LIVE fact (fire-and-forget, content-hash deduped) so
     // focused recall can rank it by relevance. Same memory:<agent>:<key> source the
     // eviction archive uses.
@@ -363,10 +370,28 @@ export class PostgresStore implements Store {
     // (avoids redundant self-join).
     let rows: MemoryFact[];
     const COLS = `key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at`;
+    // S1 (v0.44.0) — historical WINDOW queries include RETIRED facts whose
+    // event-time falls inside the window. Once auto-supersession retires a stale
+    // fact, "what did we decide three weeks ago, before the change?" must still
+    // surface it — it was the truth THEN (Zep invalid_at semantics: superseded,
+    // not erased). Live-only remains the rule for unwindowed recall.
+    const windowClause = (base: number): { sql: string; params: unknown[] } => {
+      const parts: string[] = [];
+      const params: unknown[] = [];
+      let n = base;
+      if (opts.from) { params.push(opts.from); parts.push(`COALESCE(valid_at::timestamptz, created_at::timestamptz) >= $${n++}`); }
+      if (opts.to)   { params.push(opts.to);   parts.push(`COALESCE(valid_at::timestamptz, created_at::timestamptz) <= $${n++}`); }
+      return { sql: `(valid_to IS NOT NULL AND ${parts.join(" AND ")})`, params };
+    };
     if (safeAgent === "default") {
       // R1 — expired facts are excluded from live recall (the sweep formally retires them).
-      const live = opts.asOf ? `created_at <= $2 AND (valid_to IS NULL OR valid_to > $2)` : `valid_to IS NULL AND (expires_at IS NULL OR expires_at > NOW())`;
+      let live = opts.asOf ? `created_at <= $2 AND (valid_to IS NULL OR valid_to > $2)` : `valid_to IS NULL AND (expires_at IS NULL OR expires_at > NOW())`;
       const params: unknown[] = opts.asOf ? [projectHash, opts.asOf] : [projectHash];
+      if (!opts.asOf && (opts.from || opts.to)) {
+        const w = windowClause(params.length + 1);
+        live = `(${live} OR ${w.sql})`;
+        params.push(...w.params);
+      }
       const res = await this.pool.query<MemoryFact>(
         `SELECT ${COLS}
          FROM working_memory WHERE project_hash = $1 AND agent_id = 'default' AND ${live}
@@ -376,8 +401,13 @@ export class PostgresStore implements Store {
       rows = res.rows;
     } else {
       // For per-agent agentId: UNION (their private notebook) + (shared 'default' pool)
-      const live = opts.asOf ? `created_at <= $3 AND (valid_to IS NULL OR valid_to > $3)` : `valid_to IS NULL AND (expires_at IS NULL OR expires_at > NOW())`;
+      let live = opts.asOf ? `created_at <= $3 AND (valid_to IS NULL OR valid_to > $3)` : `valid_to IS NULL AND (expires_at IS NULL OR expires_at > NOW())`;
       const params: unknown[] = opts.asOf ? [projectHash, safeAgent, opts.asOf] : [projectHash, safeAgent];
+      if (!opts.asOf && (opts.from || opts.to)) {
+        const w = windowClause(params.length + 1);
+        live = `(${live} OR ${w.sql})`;
+        params.push(...w.params);
+      }
       const res = await this.pool.query<MemoryFact>(
         `SELECT ${COLS}
          FROM working_memory
@@ -475,11 +505,42 @@ export class PostgresStore implements Store {
             return score;
           };
           const scores = new Map(rows.map((r) => [r, scoreOf(r)]));
-          rows = [...rows].sort((a, b) =>
+          const bySorted = (a: MemoryFact, b: MemoryFact) =>
             (scores.get(b)! - scores.get(a)!) ||
             (b.importance - a.importance) ||
-            (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
-          );
+            (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0);
+          rows = [...rows].sort(bySorted);
+
+          // S1 (v0.44.0) — prefer-latest (mirrors memory.ts): among the top candidates,
+          // a near-identical conflicting pair demotes the OLDER fact below the newer.
+          // Skipped for temporal/as-of queries — historical questions want the old fact.
+          if (Config.PREFER_LATEST && !opts.from && !opts.to && !opts.asOf && rows.length > 1) {
+            const { preferLatestAdjust } = await import("./contradiction_heuristics.js");
+            const parseVec = (r: MemoryFact): Float32Array | undefined => {
+              const vs = vecMap.get(`memory:${r.agent_id ?? safeAgent}:${r.key}`);
+              return vs ? new Float32Array(vs.slice(1, -1).split(",").map(Number)) : undefined;
+            };
+            const evOf = (r: MemoryFact): number => {
+              const raw = (r as MemoryFact & { valid_at?: string | Date | null }).valid_at ?? r.created_at;
+              return raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
+            };
+            // Fixpoint loop: demoting a stale duplicate frees top-K slots that can
+            // expose NEW conflicting pairs (measured: 6 stale worklogs blocked the
+            // updated cache-TTL fact out of the window, so its stale twin was never
+            // co-examined). Re-slice and re-run until a pass adjusts nothing (≤3).
+            for (let pass = 0; pass < 3; pass++) {
+              const top = rows.slice(0, Config.PREFER_LATEST_TOPK).map((r) => ({
+                fact: r, score: scores.get(r)!, vec: parseVec(r), ev: evOf(r),
+              }));
+              const adjusted = preferLatestAdjust(top, cosineSimilarity, Config.PREFER_LATEST_MARGIN);
+              if (adjusted.size === 0) break;
+              for (const r of rows) {
+                const adj = adjusted.get(r.key);
+                if (adj !== undefined && adj < scores.get(r)!) scores.set(r, adj);
+              }
+              rows = [...rows].sort(bySorted);
+            }
+          }
         }
       } catch { /* focus ranking is best-effort — fall back to unfocused order */ }
     }
@@ -631,7 +692,7 @@ export class PostgresStore implements Store {
     this._scheduleBacklinkRebuild(projectPath);
   }
 
-  private async _storeEmbedding(projectHash: string, content: string, source: string): Promise<void> {
+  private async _storeEmbedding(projectHash: string, content: string, source: string): Promise<boolean> {
     try {
       // v0.39.0 — content-addressable dedup (SQLite parity): identical content + same model
       // ⇒ skip the Ollama call; hash-match with a DIFFERENT model ⇒ explicit re-embed.
@@ -640,11 +701,18 @@ export class PostgresStore implements Store {
         const existing = (await this.pool.query<{ content_hash: string | null; model_name: string }>(
           `SELECT content_hash, model_name FROM embeddings WHERE project_hash = $1 AND source = $2`,
           [projectHash, source])).rows[0];
-        if (existing && existing.content_hash === contentHash && existing.model_name === ACTIVE_MODEL) return;
+        if (existing && existing.content_hash === contentHash && existing.model_name === ACTIVE_MODEL) return true;
       } catch { /* content_hash column absent (pre-migration) — fall through */ }
 
-      const result = await getEmbedding(content);
-      if (!result) return;
+      const result = await getEmbeddingQueued(content); // S1 — background lane
+      if (!result) {
+        const now = Date.now();
+        if (now - PostgresStore._lastEmbedErrLog > 60_000) {
+          PostgresStore._lastEmbedErrLog = now;
+          console.error(`[embed] getEmbedding returned null for ${source} (Ollama down/breaker open)`);
+        }
+        return false;
+      }
       // pgvector expects "[x1,x2,...,xN]" string format
       const vectorStr = "[" + result.vector.join(",") + "]";
       await this.pool.query(`
@@ -657,10 +725,20 @@ export class PostgresStore implements Store {
           created_at   = EXCLUDED.created_at,
           content_hash = EXCLUDED.content_hash
       `, [projectHash, source, vectorStr, result.modelName, result.dimensions, new Date().toISOString(), contentHash]);
-    } catch {
-      // Embedding failure is non-fatal — falls back to BM25-only search
+      return true;
+    } catch (e) {
+      // Embedding failure is non-fatal — falls back to BM25-only search.
+      // S1: but never fully silent — five rounds of debugging were spent on a
+      // pipeline that failed without a single log line. Rate-limited to 1/min.
+      const now = Date.now();
+      if (now - PostgresStore._lastEmbedErrLog > 60_000) {
+        PostgresStore._lastEmbedErrLog = now;
+        console.error(`[embed] store failed for ${source}: ${(e as Error)?.message || (e as Error)?.name || "unknown"}`);
+      }
+      return false;
     }
   }
+  private static _lastEmbedErrLog = 0;
 
   /**
    * v0.39.0 — SAFE EMBEDDING-MODEL MIGRATION: budgeted re-embed of rows whose vectors were
@@ -683,7 +761,7 @@ export class PostgresStore implements Store {
         await this.pool.query(`DELETE FROM embeddings WHERE project_hash = $1 AND source = $2`, [s.project_hash, s.source]);
         continue;
       }
-      const emb = await getEmbedding(row.content);
+      const emb = await getEmbeddingQueued(row.content); // S1 — background lane
       if (!emb) return { reembedded, remaining: Number(remainingRes.rows[0]!.n) - reembedded, ollamaDown: true };
       const vectorStr = "[" + emb.vector.join(",") + "]";
       const contentHash = createHash("sha256").update(row.content).digest("hex");
@@ -1222,19 +1300,42 @@ export class PostgresStore implements Store {
     }
     const facts = (await this.pool.query<{ key: string; value: string; kind: string | null; resolution_status: string | null; created_at: Date; agent_id: string }>(
       `SELECT key, value, kind, resolution_status, created_at, agent_id FROM working_memory
-       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND importance >= 3 AND valid_to IS NULL${recencyClause}
-       ORDER BY importance DESC, created_at DESC LIMIT $3`, params)).rows;
+       WHERE project_hash = $1 AND (agent_id = $2 OR agent_id = 'default') AND importance >= 2 AND valid_to IS NULL${recencyClause}
+       ORDER BY created_at DESC, importance DESC LIMIT $3`, params)).rows;
+    // S1 — RECENT-first (was importance-first): on a mature project (~130 ★5 facts)
+    // the importance-ordered budget was consumed entirely by old facts scanned in
+    // every prior session, while NEW facts — the actual conflict candidates — never
+    // entered the window. Past pairs' verdicts persist in memory_contradictions_pg,
+    // so re-scanning old-vs-old adds nothing.
     if (facts.length < 2) return { scanned: facts.length, flagged: 0, ollamaAvailable: true };
 
-    // M5 hardening (v0.41.0): a single null embed (transient blip) used to ABORT the
-    // whole scan and report "Ollama unavailable" while everything else worked. Now:
-    // skip the failing fact and continue — only an all-null run means Ollama is down.
+    // S1 (v0.44.0) — the scan READS STORED VECTORS first (facts are embedded at
+    // write time since S1) and only embeds the missing few via the background
+    // lane. Re-embedding all 80 facts per scan took minutes once embeds were
+    // serialized (measured: the MCP proxy timed out with "fetch failed") and
+    // hammered Ollama for vectors that already existed.
     const vectors = new Map<string, Float32Array>();
     let embFails = 0;
+    const srcOf = (f: { agent_id: string; key: string }) => `memory:${f.agent_id}:${f.key}`;
+    try {
+      const stored = await this.pool.query<{ source: string; vector: string }>(
+        `SELECT source, vector::text FROM embeddings
+          WHERE project_hash = $1 AND model_name = $2 AND source = ANY($3)`,
+        [projectHash, ACTIVE_MODEL, facts.map(srcOf)]);
+      const bySource = new Map(stored.rows.map((r) => [r.source, r.vector]));
+      for (const f of facts) {
+        const vs = bySource.get(srcOf(f));
+        if (vs) vectors.set(f.key, new Float32Array(vs.slice(1, -1).split(",").map(Number)));
+      }
+    } catch { /* embeddings table absent — fall through to live embeds */ }
     for (const f of facts) {
-      const emb = await getEmbedding(f.value);
+      if (vectors.has(f.key)) continue;
+      const emb = await getEmbeddingQueued(f.value); // S1 — background lane
       if (!emb) { embFails++; continue; }
       vectors.set(f.key, emb.vector);
+      // Persist the vector we already computed so the NEXT scan (and focused
+      // recall) reads it for free — NOT via _storeEmbedding, which would re-embed.
+      void this._persistVector(projectHash, srcOf(f), f.value, emb).catch(() => undefined);
     }
     if (vectors.size < 2) {
       return { scanned: facts.length, flagged: 0, ollamaAvailable: embFails < facts.length, skipped: embFails };
@@ -1458,6 +1559,34 @@ export class PostgresStore implements Store {
    * M1 (v0.41.0) — embed live working-memory facts that don't yet have a vector
    * under their memory:<agent>:<key> source. Budgeted per enrichment cycle.
    */
+  /**
+   * S1 — write-time fact embedding, SERIALIZED through a promise chain.
+   * Measured failure: a burst of 81 rapid remembers fired 81 concurrent embed
+   * calls, saturated Ollama after ~12, tripped the embedder's failure breaker,
+   * and every remaining embed dropped (healed only by the 30-min cron). The
+   * chain drains one at a time in the background — a burst costs seconds, not
+   * an open breaker. Depth-capped as a runaway guard; drops heal via the cron.
+   */
+  /** S1 — persist an ALREADY-COMPUTED vector (no Ollama call). */
+  private async _persistVector(projectHash: string, source: string, content: string, emb: { vector: Float32Array; modelName: string; dimensions: number }): Promise<void> {
+    const contentHash = createHash("sha256").update(content).digest("hex");
+    await this.pool.query(`
+      INSERT INTO embeddings(project_hash, source, vector, model_name, dimensions, created_at, content_hash)
+      VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
+      ON CONFLICT(project_hash, source) DO UPDATE SET
+        vector = EXCLUDED.vector, model_name = EXCLUDED.model_name,
+        dimensions = EXCLUDED.dimensions, created_at = EXCLUDED.created_at,
+        content_hash = EXCLUDED.content_hash
+    `, [projectHash, source, "[" + emb.vector.join(",") + "]", emb.modelName, emb.dimensions, new Date().toISOString(), contentHash]);
+  }
+
+  private _embedFactAsync(projectHash: string, agentId: string, key: string, value: string): void {
+    // Serialization + per-item retry live in the embedder's global BACKGROUND
+    // lane (getEmbeddingQueued, used by _storeEmbedding) — shared with scans and
+    // backfills so no combination of callers can stampede Ollama.
+    void this._storeEmbedding(projectHash, value, `memory:${agentId}:${key}`).catch(() => undefined);
+  }
+
   private async _backfillFactEmbeddings(budget: number): Promise<number> {
     const rows = (await this.pool.query<{ project_hash: string; agent_id: string; key: string; value: string }>(
       `SELECT wm.project_hash, wm.agent_id, wm.key, wm.value

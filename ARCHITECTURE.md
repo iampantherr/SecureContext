@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.43.0)
+# SecureContext — Architecture Reference (v0.44.0)
 
 ## Overview
 
@@ -131,6 +131,24 @@ recall (slower, lossier, and more expensive than reading it). Recall is now a bo
 - **Regression scaffolding:** `scripts/seed-mature-memory.mjs` (permanent ZZ_MATURE fixture,
   ~250 live-shaped facts backdated 8 weeks) + `scripts/recall-size-check.mjs` (budget / tail /
   temporal-priority / honesty gate).
+
+### Temporal supersession & task graph (v0.44.0, "S1/S8")
+
+- **Temporal supersession (S1):** focused recall demotes the older side of a
+  near-identical conflicting pair below the newer (fixpoint, skipped for temporal/as-of
+  queries); the contradiction scan auto-retires numeric conflicts whose newer side
+  carries explicit update language (>60s apart; revivable; same-burst → triage);
+  historical windows include retired facts by event-time. Numeric-conflict detection is
+  structurally guarded (template/marker branches with calibrated per-branch floors,
+  series + enumerator + summary guards).
+- **Two-lane embedder:** all background embedding (scans, backfills, write-time fact
+  embeds) serializes through one global retry queue (`getEmbeddingQueued`); interactive
+  embeds (recall focus, search) bypass it. Facts embed at write time on the PG path;
+  scans read stored vectors and self-heal missing ones.
+- **Durable task graph (S8):** `task_queue_pg.depends_on[]` enforced strictly inside the
+  atomic claim (unknown deps block; failed prerequisites keep dependents blocked),
+  `plan_id` + `zc_plan_status` for crash-resumable multi-step plans, and unblock
+  notifications on `zc_complete_task`. The queue remains PG-only by design.
 
 ---
 

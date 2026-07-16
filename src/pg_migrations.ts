@@ -1001,6 +1001,16 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 37,
+    description: "S8 (v0.44.0): durable task graph — depends_on + plan_id on task_queue_pg. A task with unfinished dependencies is not claimable; completing the last dependency unblocks dependents automatically (no coordinator action). plan_id groups a multi-step plan so agents can resume it after a crash. NOTE: the task queue is inherently PG-only (multi-agent coordination requires the shared store) — no SQLite twin exists to mirror.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE task_queue_pg ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}'`);
+      await client.query(`ALTER TABLE task_queue_pg ADD COLUMN IF NOT EXISTS plan_id TEXT`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_tq_plan ON task_queue_pg(project_hash, plan_id) WHERE plan_id IS NOT NULL`);
+    },
+  },
+
 ];
 
 /**

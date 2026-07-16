@@ -2,14 +2,14 @@
 
 > **SecureContext is the persistent memory and security layer for Claude Code.** It gives coding agents memory that survives every restart (~87% lower context-overhead tokens), a cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs 100% locally on PostgreSQL + Ollama — no cloud sync, no subscription, MIT-licensed.
 
-[![Version](https://img.shields.io/badge/version-0.43.0-blue)](package.json)
-[![Tests](https://img.shields.io/badge/tests-878%20passed-brightgreen)](src)
+[![Version](https://img.shields.io/badge/version-0.44.0-blue)](package.json)
+[![Tests](https://img.shields.io/badge/tests-917%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
-> ⚠️ **Note on the "SafeSkill 20/100 Blocked" PR comment:** that score is a false positive from a regex-based scanner that doesn't understand the difference between *defending against* a pattern and *using* it. See [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) for the line-by-line refutation. The actual project has 878 passing tests including 60+ red-team attack IDs verified against a real threat model.
+> ⚠️ **Note on the "SafeSkill 20/100 Blocked" PR comment:** that score is a false positive from a regex-based scanner that doesn't understand the difference between *defending against* a pattern and *using* it. See [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) for the line-by-line refutation. The actual project has 917 passing tests including 60+ red-team attack IDs verified against a real threat model.
 
 ---
 
@@ -255,6 +255,23 @@ Recent releases:
 - **v0.37–0.40** — self-correcting memory v2, graph retrieval channel, community query mode, trajectory→skill spotter graduation, automatic background memory extraction, operator dashboard redesign.
 
 Full details in [CHANGELOG.md](CHANGELOG.md); architecture notes in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
+## LongMemEval (public benchmark)
+
+Retrieval recall on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (`longmemeval_s`), measured through SecureContext's live search API — the same path agents use. Runnable by anyone: `node scripts/memory-bench.mjs --longmemeval <longmemeval_s.json> --limit 15`.
+
+| Question type | n | recall@5 | recall@10 | MRR |
+|---|---|---|---|---|
+| knowledge-update | 15 | **66.7%** | **86.7%** | 0.419 |
+| single-session-assistant | 15 | 46.7% | 46.7% | 0.356 |
+| temporal-reasoning | 15 | 33.3% | 46.7% | 0.157 |
+| single-session-user | 13 | 30.8% | 46.2% | 0.178 |
+| multi-session | 15 | 26.7% | 33.3% | 0.128 |
+| single-session-preference | 15 | 20.0% | 20.0% | 0.113 |
+
+**Methodology (read before comparing):** this is a *retrieval* metric — whether the gold answer session appears in the top-K search results over a **5,674-session haystack** (the union of 90 stratified questions' haystacks, 15 per type; 2 questions dropped to API timeouts). It is **not** end-to-end QA accuracy, so it is not directly comparable to LLM-judged accuracy numbers in vendor papers. Embeddings are fully local (`nomic-embed-text`, 274 MB) — no cloud embedder. Knowledge-update is the strongest category because of v0.44's temporal supersession work (retrieval prefers current facts). Version: measured on v0.44.0-dev; results JSON in `bench/results/longmemeval.json`.
 
 ---
 

@@ -1195,8 +1195,26 @@ const TOOLS: Tool[] = [
         task_id:  { type: "string", description: "Unique task identifier (typically the ASSIGN broadcast task field)." },
         role:     { type: "string", description: "Role name — workers with matching role can claim (e.g. 'developer')." },
         payload:  { type: "object", description: "Task payload (full ASSIGN body as JSON). Workers receive this on claim." },
+        depends_on: { type: "array", items: { type: "string" }, description: "S8 (v0.44.0) — task ids that must be DONE before this task becomes claimable. Strict: every listed dependency must exist and be completed; completing the last one unblocks this task automatically. Use to encode multi-step plans (B depends on A) so parallel workers can never pick up a step before its prerequisites." },
+        plan_id:  { type: "string", description: "S8 — plan grouping id. Enqueue all steps of one plan with the same plan_id, then any agent (including one spawned after a crash) can call zc_plan_status to see done/ready/blocked steps and resume exactly where the plan left off." },
       },
       required: ["task_id", "role", "payload"],
+    },
+  },
+  {
+    name: "zc_plan_status",
+    description:
+      "S8 (v0.44.0) — status of a multi-step PLAN in the durable task graph: every task with " +
+      "state (queued/claimed/done/failed), its dependencies, who claimed it, and whether it is " +
+      "currently blocked. THE crash-resume primitive: after an interruption, call this instead of " +
+      "re-deriving the plan — it tells you exactly which step to claim next (summary.ready > 0 ⇒ " +
+      "zc_claim_task for your role).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        plan_id: { type: "string", description: "The plan id used at enqueue time." },
+      },
+      required: ["plan_id"],
     },
   },
   {
@@ -3959,21 +3977,35 @@ async function dispatchToolCall(
       // table lives in the same PG instance as tool_calls_pg / outcomes_pg
       // and is migrated via pg_migrations.ts id=5.
       case "zc_enqueue_task": {
-        const { task_id, role, payload } = args as {
+        const { task_id, role, payload, depends_on, plan_id } = args as {
           task_id: string; role: string; payload: Record<string, unknown>;
+          depends_on?: string[]; plan_id?: string;
         };
         if (!task_id || !role) {
           return { content: [{ type: "text", text: "Error: task_id and role are required" }], isError: true };
         }
         const { enqueueTask } = await import("./task_queue.js");
         const projectHashTq = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const deps = Array.isArray(depends_on) ? depends_on.filter((d) => typeof d === "string") : [];
         const inserted = await enqueueTask({
           taskId:      task_id,
           projectHash: projectHashTq,
           role,
           payload:     payload ?? {},
+          dependsOn:   deps,
+          planId:      typeof plan_id === "string" && plan_id.trim() ? plan_id.slice(0, 100) : null,
         });
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, inserted, task_id, role }) }] };
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, inserted, task_id, role, depends_on: deps, plan_id: plan_id ?? null }) }] };
+      }
+      case "zc_plan_status": {
+        const { plan_id } = args as { plan_id: string };
+        if (!plan_id) {
+          return { content: [{ type: "text", text: "Error: plan_id is required" }], isError: true };
+        }
+        const { getPlanStatus } = await import("./task_queue.js");
+        const projectHashPs = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const plan = await getPlanStatus(projectHashPs, plan_id.slice(0, 100));
+        return { content: [{ type: "text", text: JSON.stringify(plan) }] };
       }
       case "zc_claim_task": {
         const { role } = args as { role: string };
@@ -4000,10 +4032,21 @@ async function dispatchToolCall(
       case "zc_complete_task": {
         const { task_id } = args as { task_id: string };
         if (!task_id) return { content: [{ type: "text", text: "Error: task_id is required" }], isError: true };
-        const { completeTask } = await import("./task_queue.js");
+        const { completeTask, listUnblockedBy } = await import("./task_queue.js");
         const workerIdCp = process.env.ZC_AGENT_ID || "unknown-worker";
         const ok = await completeTask(task_id, workerIdCp);
-        return { content: [{ type: "text", text: JSON.stringify({ ok, task_id, worker_id: workerIdCp, note: ok ? "marked done" : "not owned or already terminal" }) }] };
+        // S8 — report what this completion UNBLOCKED so the news travels with the
+        // event: claim it yourself if it's your role, else broadcast so the right
+        // worker picks it up (a pull-only loop can go idle moments before the
+        // unblock — measured live in the s8 E2E).
+        let unblocked: Array<{ task_id: string; role: string; plan_id: string | null }> = [];
+        if (ok) {
+          try { unblocked = await listUnblockedBy(createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16), task_id); } catch { /* best-effort */ }
+        }
+        const unblockNote = unblocked.length > 0
+          ? ` UNBLOCKED: ${unblocked.map((u) => `${u.task_id} (role ${u.role})`).join(", ")} — claim it if it's your role, otherwise broadcast STATUS so that worker claims it.`
+          : "";
+        return { content: [{ type: "text", text: JSON.stringify({ ok, task_id, worker_id: workerIdCp, unblocked, note: (ok ? "marked done." : "not owned or already terminal.") + unblockNote }) }] };
       }
       case "zc_fail_task": {
         const { task_id, reason } = args as { task_id: string; reason: string };

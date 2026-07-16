@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.43.0",
+  VERSION: "0.44.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -158,6 +158,23 @@ export const Config = {
   // Soft quota for importance-5 facts per namespace: zc_remember warns (never
   // blocks) beyond this count. "When everything is critical, nothing is."
   IMP5_SOFT_CAP:       parseInt(env["ZC_IMP5_SOFT_CAP"] ?? "25", 10),
+
+  // ── S1 (v0.44.0) — temporal fact supersession (Zep/Graphiti parity) ───────
+  // Measured failure (bench KU): when a fact is updated under a new key and the
+  // old one is never retired, the OLD fact outranked its update 100% of the time
+  // (higher importance, similar relevance). Two layers:
+  //   PREFER_LATEST — at focused-recall time, a near-identical conflicting pair
+  //   (sim ≥ NUMERIC_CONFLICT_SIM + conflict signal) among the top candidates
+  //   demotes the OLDER fact to just below the newer one. Ranking-only, data
+  //   untouched, and SKIPPED whenever the query targets the past (temporal
+  //   window / as-of) — historical questions must still surface the old fact.
+  //   AUTO_RESOLVE_NUMERIC — the contradiction scan may auto-retire the older
+  //   side of a numeric_conflict when the NEWER value carries explicit update
+  //   language ("now", "changed to", "migrated to"...). Revivable retire +
+  //   dashboard Undo, same safety net as existing auto-resolution.
+  PREFER_LATEST:        env["ZC_PREFER_LATEST"] !== "0",
+  PREFER_LATEST_MARGIN: parseFloat(env["ZC_PREFER_LATEST_MARGIN"] ?? "0.05"),
+  PREFER_LATEST_TOPK:   parseInt(env["ZC_PREFER_LATEST_TOPK"] ?? "12", 10),
 
   // ── Self-correcting memory v2 (v0.37.0) ──────────────────────────────────
   // Temporal fact retirement + contradiction auto-resolution. When the scan flags a

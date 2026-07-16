@@ -3355,6 +3355,7 @@ export async function createApiServer(storeOverride?: Store) {
   // Knowledge Base
   // ─────────────────────────────────────────────────────────────────────────
 
+  let lastIndexErrLog = 0; // S4 — rate-limits the /index failure log below
   app.post("/api/v1/index", async (request, reply) => {
     try {
       const { projectPath, content, source, sourceType = "internal", retentionTier } = request.body as Record<string, unknown>;
@@ -3368,6 +3369,14 @@ export async function createApiServer(storeOverride?: Store) {
       return { ok: true, source };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      // S4 — never a silent 500: a batch ingest died on "Internal error" with zero
+      // server-side trace. Log the real cause (rate-limited) so transients are
+      // diagnosable; the client still gets the generic message.
+      const now = Date.now();
+      if (now - lastIndexErrLog > 60_000) {
+        lastIndexErrLog = now;
+        console.error(`[index] failed for ${String((request.body as Record<string, unknown>)?.["source"] ?? "?").slice(0, 80)}: ${(e as Error)?.message ?? "unknown"}`);
+      }
       return reply.status(500).send({ error: "Internal error" });
     }
   });

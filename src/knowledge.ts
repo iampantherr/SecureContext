@@ -42,7 +42,7 @@ import { join, basename } from "node:path";
 import { Config } from "./config.js";
 import { parseTemporalQuery } from "./temporal_parse.js";
 import { runMigrations } from "./migrations.js";
-import { getEmbedding, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
+import { getEmbedding, getEmbeddingQueued, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
 import { rebuildBacklinksAsync } from "./indexing/backlinks.js";
 
 export type RetentionTier = "external" | "internal" | "summary";
@@ -182,7 +182,7 @@ export async function storeEmbeddingAsync(
     finally { db0.close(); }
   }
 
-  const result = await getEmbedding(content);
+  const result = await getEmbeddingQueued(content); // S1 — background lane
   if (!result) return;
 
   const db = openDb(projectPath);

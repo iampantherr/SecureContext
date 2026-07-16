@@ -33,13 +33,26 @@ function readEnvKey() {
 }
 
 async function api(method, path, body) {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${KEY}` },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
+  // S4 — bounded timeout + one retry: an API stall under heavy background load
+  // (embed drain / summarizer) killed a run at undici's 300s default. 120s cap,
+  // retry once after a breather; callers add their own per-item resilience.
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`${API}${path}`, {
+        method,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${KEY}` },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      return res.json();
+    } catch (e) {
+      lastErr = e;
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 5_000));
+    }
+  }
+  throw lastErr;
 }
 
 function psql(sql) {
@@ -107,8 +120,22 @@ async function seed() {
   console.log("rebuilding co-reference graph…");
   await api("POST", "/api/v1/graph/rebuild", { projectPath: PROJECT });
 
-  // Give fire-and-forget embeddings a moment to land, then report state.
-  await new Promise((r) => setTimeout(r, 8000));
+  // S1 — WAIT for fact embeddings to land before declaring the corpus ready.
+  // Scoring a vector-less corpus silently produces baseline-shaped garbage
+  // (measured: overall 78% → 31% when scored 5s after seeding). Poll until
+  // ≥95% of live facts have a vector or 180s elapses — and say which.
+  const liveN = parseInt(psql(`SELECT COUNT(*) FROM working_memory WHERE project_hash='${h}' AND valid_to IS NULL`), 10);
+  const embCount = () => parseInt(psql(`SELECT COUNT(*) FROM embeddings WHERE project_hash='${h}' AND source LIKE 'memory:%'`), 10);
+  const deadline = Date.now() + 180_000;
+  let embedded = embCount();
+  while (embedded < Math.ceil(liveN * 0.95) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5000));
+    embedded = embCount();
+    console.log(`  embeddings: ${embedded}/${liveN}…`);
+  }
+  if (embedded < Math.ceil(liveN * 0.95)) {
+    console.warn(`  ⚠ only ${embedded}/${liveN} fact embeddings landed after 180s — scores will be degraded. Check Ollama.`);
+  }
   const live = psql(`SELECT COUNT(*) FROM working_memory WHERE project_hash='${h}' AND valid_to IS NULL`);
   const retired = psql(`SELECT COUNT(*) FROM working_memory WHERE project_hash='${h}' AND valid_to IS NOT NULL`);
   const kb = psql(`SELECT COUNT(*) FROM knowledge_entries WHERE project_hash='${h}'`);
@@ -233,11 +260,23 @@ const LME_PROJECT = "C:/Users/Amit/AI_projects/ZZ_LME";
 
 async function runLongMemEval(file, limit) {
   const data = JSON.parse(readFileSync(file, "utf8"));
-  const questions = (Array.isArray(data) ? data : data.questions).slice(0, limit || 50);
-  console.log(`LongMemEval: ${questions.length} questions (of ${Array.isArray(data) ? data.length : "?"})`);
+  const all = Array.isArray(data) ? data : data.questions;
+  // S4 — STRATIFIED sampling: the dataset is grouped by question_type, so a
+  // head-slice covers exactly one type (measured: first 50 = all
+  // single-session-user). Interpret --limit as PER-TYPE: take the first N of
+  // each type in dataset order (deterministic, no RNG).
+  const perType = new Map();
+  for (const q of all) {
+    const t = q.question_type ?? "unknown";
+    if (!perType.has(t)) perType.set(t, []);
+    if (perType.get(t).length < (limit || 15)) perType.get(t).push(q);
+  }
+  const questions = [...perType.values()].flat();
+  console.log(`LongMemEval: ${questions.length} questions (${limit || 15}/type × ${perType.size} types, of ${all.length} total)`);
 
   // Ingest the union of haystack sessions (deduped by session id).
   const seen = new Set();
+  const ingestFailures = [];
   let ingested = 0;
   for (const q of questions) {
     const ids   = q.haystack_session_ids ?? [];
@@ -249,7 +288,29 @@ async function runLongMemEval(file, limit) {
       seen.add(sid);
       const turns = (sess[i] ?? []).map((t) => `${t.role}: ${t.content}`).join("\n").slice(0, 45_000);
       if (!turns.trim()) continue;
-      await api("POST", "/api/v1/index", { projectPath: LME_PROJECT, content: turns, source: `session:${sid}`, sourceType: "internal" });
+      // S4 — resilient ingest: one transient 500 must not kill a 2,500-session
+      // batch (measured: the first full run died on a single "Internal error").
+      // Retry twice with backoff; count persistent failures; abort only >10%.
+      let ok = false;
+      for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+        try {
+          await api("POST", "/api/v1/index", { projectPath: LME_PROJECT, content: turns, source: `session:${sid}`, sourceType: "internal" });
+          ok = true;
+        } catch (e) {
+          if (attempt === 2) {
+            ingestFailures.push(sid);
+            console.warn(`\ningest failed after 3 attempts: session:${sid} — ${e.message.slice(0, 120)}`);
+          } else {
+            await new Promise((r) => setTimeout(r, 2_000 * (attempt + 1)));
+          }
+        }
+      }
+      if (!ok) {
+        if (ingestFailures.length > Math.max(10, seen.size * 0.1)) {
+          throw new Error(`aborting: ${ingestFailures.length} sessions failed to ingest (>10%) — API unhealthy`);
+        }
+        continue;
+      }
       if (dates[i]) {
         const d = new Date(dates[i]);
         if (Number.isFinite(d.getTime())) {
@@ -261,15 +322,41 @@ async function runLongMemEval(file, limit) {
       if (ingested % 20 === 0) process.stdout.write(`\ringested ${ingested} sessions…`);
     }
   }
-  console.log(`\ringested ${ingested} sessions. waiting 10s for embeddings…`);
-  await new Promise((r) => setTimeout(r, 10_000));
+  // S4 — wait for embeddings to LAND, not a fixed 10s (S1 lesson: scoring a
+  // vector-less corpus silently produces garbage). Budget scales with corpus size;
+  // the background embed lane drains serially at roughly 3-6 sessions/sec.
+  const lmeHash = psql(`SELECT project_hash FROM knowledge_entries WHERE source LIKE 'session:%' ORDER BY created_at DESC LIMIT 1`);
+  if (/^[0-9a-f]{16}$/.test(lmeHash)) {
+    const embCount = () => parseInt(psql(`SELECT COUNT(*) FROM embeddings WHERE project_hash='${lmeHash}' AND source LIKE 'session:%'`), 10);
+    const deadline = Date.now() + Math.max(120_000, ingested * 1_500);
+    let embedded = embCount();
+    while (embedded < Math.ceil(ingested * 0.95) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10_000));
+      embedded = embCount();
+      process.stdout.write(`\rembeddings: ${embedded}/${ingested}…   `);
+    }
+    console.log();
+    if (embedded < Math.ceil(ingested * 0.95)) {
+      console.warn(`⚠ only ${embedded}/${ingested} session embeddings landed — retrieval scores will be DEGRADED (BM25-heavy).`);
+    }
+  }
 
-  // Score retrieval proxy per question type.
+  // Score retrieval proxy per question type. Per-question resilience: a stalled
+  // search skips the question (counted) instead of killing the run.
   const byType = {};
+  let scoreFailures = 0;
   for (const q of questions) {
     const goldSet = new Set((q.answer_session_ids ?? []).map((s) => `session:${s}`));
     if (goldSet.size === 0) continue;
-    const r = await api("POST", "/api/v1/search", { projectPath: LME_PROJECT, queries: [q.question] });
+    let r;
+    try {
+      r = await api("POST", "/api/v1/search", { projectPath: LME_PROJECT, queries: [q.question] });
+    } catch (e) {
+      scoreFailures++;
+      console.warn(`\nscore failed for ${q.question_id ?? q.question.slice(0, 40)}: ${e.message.slice(0, 100)}`);
+      if (scoreFailures > questions.length * 0.2) throw new Error("aborting: >20% of questions failed to score — API unhealthy");
+      continue;
+    }
     const sources = (r.results ?? []).map((x) => x.source);
     const rank = sources.findIndex((s) => goldSet.has(s)) + 1; // 0 = miss
     const t = (byType[q.question_type ?? "unknown"] ??= { n: 0, hit5: 0, hit10: 0, mrr: 0 });

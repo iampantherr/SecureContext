@@ -4,6 +4,61 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.44.0] — 2026-07-16 — Temporal supersession, durable task graph, LongMemEval numbers
+
+Three verified rounds. S1 closes the Zep-parity gap (stale facts outranking their own
+updates); S8 turns the work-stealing queue into a dependency graph with crash-resumable
+plans; S4 publishes SecureContext's first public-benchmark numbers. Each round was
+live-verified with real terminal agents on both fresh and mature (250-fact) projects,
+and the testing itself surfaced + fixed a dozen scale defects (below). Suite 917/920
+(same 3 pre-existing fixtures).
+
+### S1 — Temporal fact supersession
+- **Prefer-latest recall**: near-identical conflicting pairs among the top focused-recall
+  candidates demote the OLDER fact below the newer, iterated to a fixpoint
+  (`ZC_PREFER_LATEST`, margin/topk knobs). Skipped for temporal/as-of queries —
+  historical questions still surface the old fact, INCLUDING retired facts whose
+  event-time falls in the requested window (both stores).
+- **Auto-supersession**: a numeric conflict whose NEWER side announces the change
+  ("now", "changed to", "migrated to"…) with >60s separation auto-retires the older fact
+  (revivable, dashboard Undo, `ZC_AUTO_RESOLVE_NUMERIC`). Same-burst pairs stay in
+  operator triage.
+- **Tightened numeric-conflict definition** (calibrated on three corpora): template-match
+  or update-marker required, quantity-vs-enumerator guard, series guard, session-summary
+  exclusion, per-branch similarity floors. Measured: 62-of-66 junk flags → exactly the
+  1 real conflict; 0 junk on a 250-fact boilerplate corpus.
+- Bench: knowledge-update decoyAboveGold **100% → 0%**, MRR 0.553 → 0.595.
+
+### S8 — Durable task graph
+- `task_queue_pg` gains `depends_on[]` + `plan_id` (PG migration 37). Claims enforce
+  STRICT dependency completion inside the atomic `SKIP LOCKED` query — unknown or
+  not-yet-enqueued dependencies block, failed prerequisites keep dependents blocked.
+- **`zc_plan_status`** — the crash-resume primitive: done/claimed/blocked/ready/failed
+  per plan step; a replacement agent resumes a 12-step plan in one tool call.
+- **Unblock notifications**: `zc_complete_task` reports which tasks the completion just
+  freed (role-aware) — fixes the measured pull-model gap where a worker went idle
+  moments before a cross-role completion freed its next task.
+- 13 new queue tests incl. a 20-worker chain race (strict order, zero double-claims).
+
+### S4 — LongMemEval (public benchmark)
+- Stratified adapter (`--limit` = per-type) + README results: retrieval recall over a
+  5,674-session haystack with fully-local embeddings. Knowledge-update is the strongest
+  category (86.7% recall@10) — the S1 work measured on a public yardstick.
+
+### Reliability (found by the E2E rounds, all measured failures)
+- **Two-lane embedder**: background lane (`getEmbeddingQueued`) serializes scans,
+  backfills, and write-time embeds with per-item retry — four agents booting
+  concurrently used to stampede Ollama (~320 parallel calls) and silently disable
+  every semantic feature. Interactive callers (recall focus, search) are unaffected.
+- **Write-time fact embeddings on the PG path** (was: cron-only backfill — focused
+  recall ran with rel=0 for up to an hour after write bursts).
+- **Scans read stored vectors** and self-heal missing ones (was: re-embedding all 80
+  facts per scan — minutes-long scans that timed out the MCP proxy).
+- Recent-first scan budget (old ★5 facts starved new facts from ever being scanned on
+  mature projects); scan-coverage `skipped` disclosure; `/index` 500s now logged
+  server-side; benchmark harness hardened end-to-end (per-item retry, abort
+  thresholds, embeddings-landed gates, bounded API timeouts).
+
 ## [0.43.0] — 2026-07-13 — Recall budget: bounded digest, staleness decay, importance discipline
 
 Fixes a measured failure on a mature project: 237 accumulated working-memory facts (87%

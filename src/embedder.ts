@@ -163,6 +163,41 @@ export async function getEmbedding(text: string): Promise<EmbeddingResult | null
 }
 
 /**
+ * S1 (v0.44.0) — BACKGROUND embedding lane: one global serialized queue with
+ * per-item retry, for every non-interactive caller (contradiction scans,
+ * embedding backfills, write-time fact embeds, re-embeds).
+ *
+ * Why: each agent recall kicks a background scan that embeds up to
+ * MAX_SCAN_FACTS facts. Four agents booting concurrently stampeded Ollama with
+ * ~320 parallel embed calls, tripped the failure breaker, and EVERY semantic
+ * feature silently degraded for the whole burst (measured live: both terminal
+ * E2E agents reported "embeddings unavailable" while Ollama itself was fine).
+ * Interactive callers (recall focus, search queries) keep calling getEmbedding
+ * directly — they must never wait behind a 300-item background drain.
+ */
+let _bgChain: Promise<void> = Promise.resolve();
+let _bgDepth = 0;
+export function getEmbeddingQueued(text: string): Promise<EmbeddingResult | null> {
+  if (_bgDepth > 2000) return Promise.resolve(null); // runaway guard
+  _bgDepth++;
+  const run = async (): Promise<EmbeddingResult | null> => {
+    for (let i = 0; i < 3; i++) {
+      const r = await getEmbedding(text);
+      if (r) return r;
+      // Breaker may be open — back off past its DOWN_RETRY_MS reprobe window.
+      await new Promise((res) => setTimeout(res, 2_000 * (i + 1)));
+    }
+    return null;
+  };
+  const result = _bgChain.then(run);
+  _bgChain = result
+    .then(() => new Promise<void>((res) => setTimeout(res, 100))) // gentle pacing
+    .catch(() => undefined)
+    .finally(() => { _bgDepth--; });
+  return result;
+}
+
+/**
  * Cosine similarity between two float vectors.
  * Returns 0 if lengths differ or either vector has zero magnitude.
  */

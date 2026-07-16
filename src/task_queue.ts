@@ -55,6 +55,10 @@ export interface EnqueueInput {
   projectHash:  string;
   role:         string;
   payload:      Record<string, unknown>;
+  /** S8 — task ids that must be 'done' before this task becomes claimable. */
+  dependsOn?:   string[];
+  /** S8 — groups the tasks of one multi-step plan (crash-resumable via getPlanStatus). */
+  planId?:      string | null;
 }
 
 export interface ClaimResult {
@@ -69,13 +73,16 @@ export interface ClaimResult {
  * Returns true if newly inserted, false if already present.
  */
 export async function enqueueTask(input: EnqueueInput): Promise<boolean> {
+  // S8 — sanitize dependencies: drop self-references (a task depending on
+  // itself would be permanently unclaimable) and dedupe.
+  const deps = [...new Set((input.dependsOn ?? []).filter((d) => d && d !== input.taskId))].slice(0, 64);
   return withClient(async (c: PoolClient) => {
     const r = await c.query<{ inserted: boolean }>(`
-      INSERT INTO task_queue_pg (task_id, project_hash, role, payload, state)
-      VALUES ($1, $2, $3, $4::jsonb, 'queued')
+      INSERT INTO task_queue_pg (task_id, project_hash, role, payload, state, depends_on, plan_id)
+      VALUES ($1, $2, $3, $4::jsonb, 'queued', $5::text[], $6)
       ON CONFLICT (task_id) DO NOTHING
       RETURNING true AS inserted
-    `, [input.taskId, input.projectHash, input.role, JSON.stringify(input.payload)]);
+    `, [input.taskId, input.projectHash, input.role, JSON.stringify(input.payload), deps, input.planId ?? null]);
     return r.rows.length > 0;
   });
 }
@@ -103,9 +110,21 @@ export async function claimTask(
         claimed_at    = NOW(),
         heartbeat_at  = NOW()
       WHERE task_id = (
-        SELECT task_id FROM task_queue_pg
-        WHERE project_hash = $1 AND role = $2 AND state = 'queued'
-        ORDER BY ts ASC
+        SELECT tq.task_id FROM task_queue_pg tq
+        WHERE tq.project_hash = $1 AND tq.role = $2 AND tq.state = 'queued'
+          -- S8: a task is claimable only when EVERY dependency EXISTS and is
+          -- 'done' (strict: an unknown / not-yet-enqueued dependency BLOCKS, so
+          -- out-of-order plan enqueues can't leak a dependent early; a typo'd
+          -- dep id surfaces as a permanently-blocked task in queue stats).
+          -- Completing the last dependency unblocks dependents automatically —
+          -- this predicate simply re-evaluates on the next claim attempt.
+          AND (
+            SELECT COUNT(*) FROM task_queue_pg d
+            WHERE d.project_hash = tq.project_hash
+              AND d.task_id = ANY(tq.depends_on)
+              AND d.state = 'done'
+          ) = cardinality(tq.depends_on)
+        ORDER BY tq.ts ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
@@ -144,6 +163,30 @@ export async function completeTask(taskId: string, workerId: string): Promise<bo
       WHERE task_id = $1 AND claimed_by = $2 AND state = 'claimed'
     `, [taskId, workerId]);
     return (r.rowCount ?? 0) > 0;
+  });
+}
+
+/**
+ * S8 — tasks that a just-completed task UNBLOCKED: queued dependents of `taskId`
+ * whose dependencies are now all done. Measured need (live E2E): in a pull model
+ * a worker's claim-loop can go idle moments before a completion frees its next
+ * task — the freed task then sits "ready" with no claimant. Returning the
+ * unblock list WITH the completion lets the completing agent announce it
+ * (broadcast) or claim it directly, so the news travels with the event.
+ */
+export async function listUnblockedBy(projectHash: string, taskId: string): Promise<Array<{ task_id: string; role: string; plan_id: string | null }>> {
+  return withClient(async (c: PoolClient) => {
+    const r = await c.query<{ task_id: string; role: string; plan_id: string | null }>(`
+      SELECT tq.task_id, tq.role, tq.plan_id FROM task_queue_pg tq
+      WHERE tq.project_hash = $1 AND tq.state = 'queued'
+        AND $2 = ANY(tq.depends_on)
+        AND (SELECT COUNT(*) FROM task_queue_pg d
+              WHERE d.project_hash = tq.project_hash
+                AND d.task_id = ANY(tq.depends_on)
+                AND d.state = 'done') = cardinality(tq.depends_on)
+      ORDER BY tq.ts ASC
+    `, [projectHash, taskId]);
+    return r.rows;
   });
 }
 
@@ -194,9 +237,11 @@ export async function reclaimStaleTasks(
   });
 }
 
-/** Inspect the queue (for the dashboard / debugging). */
+/** Inspect the queue (for the dashboard / debugging).
+ *  S8: `blocked` = queued tasks whose dependencies are not all done — a subset
+ *  of `queued` that no claim can currently pick up. */
 export async function getQueueStats(projectHash?: string): Promise<{
-  queued: number; claimed: number; done: number; failed: number;
+  queued: number; claimed: number; done: number; failed: number; blocked: number;
 }> {
   return withClient(async (c: PoolClient) => {
     const where = projectHash ? `WHERE project_hash = $1` : ``;
@@ -205,12 +250,60 @@ export async function getQueueStats(projectHash?: string): Promise<{
       `SELECT state, COUNT(*) AS n FROM task_queue_pg ${where} GROUP BY state`,
       params,
     );
-    const out = { queued: 0, claimed: 0, done: 0, failed: 0 };
+    const out = { queued: 0, claimed: 0, done: 0, failed: 0, blocked: 0 };
     for (const row of r.rows) {
       const k = row.state as keyof typeof out;
       if (k in out) out[k] = Number(row.n);
     }
+    try {
+      const b = await c.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM task_queue_pg tq
+          WHERE tq.state = 'queued' AND cardinality(tq.depends_on) > 0
+            AND (SELECT COUNT(*) FROM task_queue_pg d
+                  WHERE d.project_hash = tq.project_hash
+                    AND d.task_id = ANY(tq.depends_on)
+                    AND d.state = 'done') < cardinality(tq.depends_on)
+          ${projectHash ? "AND tq.project_hash = $1" : ""}`,
+        params,
+      );
+      out.blocked = Number(b.rows[0]?.n ?? 0);
+    } catch { /* pre-migration-37 — no depends_on column */ }
     return out;
+  });
+}
+
+/**
+ * S8 — status of one PLAN: every task in the plan with state, blockers, and
+ * who's working on what. This is what makes a multi-step plan CRASH-RESUMABLE:
+ * a fresh agent calls this, sees exactly which steps are done / in flight /
+ * blocked, and claims the next unblocked step instead of re-deriving the plan.
+ */
+export async function getPlanStatus(projectHash: string, planId: string): Promise<{
+  planId: string;
+  tasks: Array<{ task_id: string; role: string; state: string; claimed_by: string | null; depends_on: string[]; blocked: boolean }>;
+  summary: { total: number; done: number; claimed: number; blocked: number; ready: number; failed: number };
+}> {
+  return withClient(async (c: PoolClient) => {
+    const r = await c.query<{ task_id: string; role: string; state: string; claimed_by: string | null; depends_on: string[] }>(
+      `SELECT task_id, role, state, claimed_by, depends_on
+         FROM task_queue_pg WHERE project_hash = $1 AND plan_id = $2 ORDER BY ts ASC`,
+      [projectHash, planId],
+    );
+    const doneSet = new Set(r.rows.filter((t) => t.state === "done").map((t) => t.task_id));
+    const tasks = r.rows.map((t) => ({
+      ...t,
+      depends_on: t.depends_on ?? [],
+      blocked: t.state === "queued" && (t.depends_on ?? []).some((d) => !doneSet.has(d)),
+    }));
+    const summary = {
+      total:   tasks.length,
+      done:    tasks.filter((t) => t.state === "done").length,
+      claimed: tasks.filter((t) => t.state === "claimed").length,
+      blocked: tasks.filter((t) => t.blocked).length,
+      ready:   tasks.filter((t) => t.state === "queued" && !t.blocked).length,
+      failed:  tasks.filter((t) => t.state === "failed").length,
+    };
+    return { planId, tasks, summary };
   });
 }
 
@@ -229,6 +322,8 @@ export async function _dropTaskQueueForTesting(): Promise<void> {
     // Remove migration marker so runPgMigrations re-applies migration id=5.
     // Without this, a prior run's migration record would cause re-migration
     // to no-op and the table would stay dropped.
-    await c.query(`DELETE FROM schema_migrations_pg WHERE id = 5`).catch(() => { /* table may not exist yet */ });
+    // id=5 creates the table; id=37 adds depends_on/plan_id (S8) — both must
+    // re-apply after a drop or the recreated table lacks the graph columns.
+    await c.query(`DELETE FROM schema_migrations_pg WHERE id IN (5, 37)`).catch(() => { /* table may not exist yet */ });
   });
 }

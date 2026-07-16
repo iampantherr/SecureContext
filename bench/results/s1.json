@@ -1,0 +1,401 @@
+{
+  "stage": "s1",
+  "scoredAt": "2026-07-15T15:52:30.172Z",
+  "categories": {
+    "IE": {
+      "n": 12,
+      "hit@5%": 75,
+      "hit@10%": 75,
+      "mrr": 0.652
+    },
+    "MH": {
+      "n": 6,
+      "hit@5%": 100,
+      "hit@10%": 100,
+      "mrr": 0.917
+    },
+    "TR": {
+      "n": 8,
+      "hit@5%": 37.5,
+      "hit@10%": 75,
+      "mrr": 0.33,
+      "decoyAboveGoldPct": 0
+    },
+    "KU": {
+      "n": 6,
+      "hit@5%": 50,
+      "hit@10%": 50,
+      "mrr": 0.513,
+      "decoyAboveGoldPct": 0
+    }
+  },
+  "overall": {
+    "n": 32,
+    "hit@5%": 65.6,
+    "hit@10%": 75,
+    "mrr": 0.595
+  },
+  "perQuestion": [
+    {
+      "id": "ie-01",
+      "category": "IE",
+      "gold": "auth_token_rotation",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 81
+    },
+    {
+      "id": "ie-02",
+      "category": "IE",
+      "gold": "db_conn_pool_size",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 80
+    },
+    {
+      "id": "ie-03",
+      "category": "IE",
+      "gold": "deploy_freeze_window",
+      "rank": 2,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 0.5,
+      "listLen": 80
+    },
+    {
+      "id": "ie-04",
+      "category": "IE",
+      "gold": "fe_bundle_budget",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 80
+    },
+    {
+      "id": "ie-05",
+      "category": "IE",
+      "gold": "billing_proration_rule",
+      "rank": 28,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0,
+      "listLen": 80
+    },
+    {
+      "id": "ie-06",
+      "category": "IE",
+      "gold": "obs_trace_sampling",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 80
+    },
+    {
+      "id": "ie-07",
+      "category": "IE",
+      "gold": "inc_sev1_paging",
+      "rank": 14,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0.07142857142857142,
+      "listLen": 80
+    },
+    {
+      "id": "ie-08",
+      "category": "IE",
+      "gold": "api_pagination_style",
+      "rank": 39,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0,
+      "listLen": 80
+    },
+    {
+      "id": "ie-09",
+      "category": "IE",
+      "gold": "sec_dep_scan_gate",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 80
+    },
+    {
+      "id": "ie-10",
+      "category": "IE",
+      "gold": "test_flaky_quarantine",
+      "rank": 4,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 0.25,
+      "listLen": 80
+    },
+    {
+      "id": "ie-11",
+      "category": "IE",
+      "gold": "file:docs/webhook-retries.md",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 5
+    },
+    {
+      "id": "ie-12",
+      "category": "IE",
+      "gold": "file:docs/data-retention.md",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 1
+    },
+    {
+      "id": "mh-01",
+      "category": "MH",
+      "gold": "file:docs/reconciliation-rules.md",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 3
+    },
+    {
+      "id": "mh-02",
+      "category": "MH",
+      "gold": "file:docs/reconciliation-rules.md",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 7
+    },
+    {
+      "id": "mh-03",
+      "category": "MH",
+      "gold": "file:docs/quota-defaults.md",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 6
+    },
+    {
+      "id": "mh-04",
+      "category": "MH",
+      "gold": "file:docs/quota-defaults.md",
+      "rank": 2,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 0.5,
+      "listLen": 9
+    },
+    {
+      "id": "mh-05",
+      "category": "MH",
+      "gold": "file:docs/stemming-config.md",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 10
+    },
+    {
+      "id": "mh-06",
+      "category": "MH",
+      "gold": "file:docs/stemming-config.md",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 4
+    },
+    {
+      "id": "tr-01",
+      "category": "TR",
+      "gold": "cache_ttl_decision_new",
+      "rank": 8,
+      "hit5": 0,
+      "hit10": 1,
+      "mrr": 0.125,
+      "listLen": 80,
+      "decoyRank": null,
+      "decoyAboveGold": 0
+    },
+    {
+      "id": "tr-02",
+      "category": "TR",
+      "gold": "cache_ttl_decision_old",
+      "rank": 9,
+      "hit5": 0,
+      "hit10": 1,
+      "mrr": 0.1111111111111111,
+      "listLen": 81,
+      "decoyRank": 47,
+      "decoyAboveGold": 0
+    },
+    {
+      "id": "tr-03",
+      "category": "TR",
+      "gold": "ratelimit_decision_march",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 83,
+      "decoyRank": 5,
+      "decoyAboveGold": 0
+    },
+    {
+      "id": "tr-04",
+      "category": "TR",
+      "gold": "cache_ttl_decision_new",
+      "rank": 11,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0.09090909090909091,
+      "listLen": 80,
+      "decoyRank": null,
+      "decoyAboveGold": 0
+    },
+    {
+      "id": "tr-05",
+      "category": "TR",
+      "gold": "notify_channel_new",
+      "rank": 9,
+      "hit5": 0,
+      "hit10": 1,
+      "mrr": 0.1111111111111111,
+      "listLen": 80
+    },
+    {
+      "id": "tr-06",
+      "category": "TR",
+      "gold": "storage_provider_old",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 6
+    },
+    {
+      "id": "tr-07",
+      "category": "TR",
+      "gold": "queue_backend_old",
+      "rank": null,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0,
+      "listLen": 82
+    },
+    {
+      "id": "tr-08",
+      "category": "TR",
+      "gold": "queue_backend_new",
+      "rank": 5,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 0.2,
+      "listLen": 80,
+      "decoyRank": null,
+      "decoyAboveGold": 0
+    },
+    {
+      "id": "ku-01",
+      "category": "KU",
+      "gold": "queue_backend_new",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 80,
+      "retiredLeaked": 0
+    },
+    {
+      "id": "ku-02",
+      "category": "KU",
+      "gold": "storage_provider_new",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 80,
+      "retiredLeaked": 0
+    },
+    {
+      "id": "ku-03",
+      "category": "KU",
+      "gold": "notify_channel_new",
+      "rank": 39,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0,
+      "listLen": 80,
+      "retiredLeaked": 0
+    },
+    {
+      "id": "ku-04",
+      "category": "KU",
+      "gold": "cache_ttl_decision_new",
+      "rank": 13,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0.07692307692307693,
+      "listLen": 80,
+      "decoyRank": null,
+      "decoyAboveGold": 0
+    },
+    {
+      "id": "ku-05",
+      "category": "KU",
+      "gold": "queue_backend_new",
+      "rank": 28,
+      "hit5": 0,
+      "hit10": 0,
+      "mrr": 0,
+      "listLen": 80,
+      "retiredLeaked": 0
+    },
+    {
+      "id": "ku-06",
+      "category": "KU",
+      "gold": "storage_provider_new",
+      "rank": 1,
+      "hit5": 1,
+      "hit10": 1,
+      "mrr": 1,
+      "listLen": 80,
+      "retiredLeaked": 0
+    },
+    {
+      "id": "ab-01",
+      "category": "AB",
+      "abstention": true,
+      "topSource": "file:docs/quota-defaults.md"
+    },
+    {
+      "id": "ab-02",
+      "category": "AB",
+      "abstention": true,
+      "topSource": "file:docs/stemming-config.md"
+    },
+    {
+      "id": "ab-03",
+      "category": "AB",
+      "abstention": true,
+      "topSource": "file:docs/ledger-service.md"
+    },
+    {
+      "id": "ab-04",
+      "category": "AB",
+      "abstention": true,
+      "topSource": "file:docs/quota-defaults.md"
+    }
+  ]
+}

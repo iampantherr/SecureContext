@@ -1,17 +1,41 @@
 {
-  "scoredAt": "2026-07-10T16:55:18.643Z",
+  "scoredAt": "2026-07-16T07:23:17.146Z",
   "byType": {
     "single-session-user": {
-      "n": 1,
-      "hit5": 1,
-      "hit10": 1,
-      "mrr": 1
+      "n": 13,
+      "hit5": 4,
+      "hit10": 6,
+      "mrr": 2.3095238095238093
     },
     "multi-session": {
-      "n": 1,
-      "hit5": 1,
-      "hit10": 1,
-      "mrr": 1
+      "n": 15,
+      "hit5": 4,
+      "hit10": 5,
+      "mrr": 1.9261904761904762
+    },
+    "single-session-preference": {
+      "n": 15,
+      "hit5": 3,
+      "hit10": 3,
+      "mrr": 1.7
+    },
+    "temporal-reasoning": {
+      "n": 15,
+      "hit5": 5,
+      "hit10": 7,
+      "mrr": 2.361111111111111
+    },
+    "knowledge-update": {
+      "n": 15,
+      "hit5": 10,
+      "hit10": 13,
+      "mrr": 6.283333333333333
+    },
+    "single-session-assistant": {
+      "n": 15,
+      "hit5": 7,
+      "hit10": 7,
+      "mrr": 5.333333333333333
     }
   }
 }

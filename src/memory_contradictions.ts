@@ -25,7 +25,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { openDb } from "./knowledge.js";
 import { recallWorkingMemory, retireFact, type MemoryFact } from "./memory.js";
-import { getEmbedding, cosineSimilarity } from "./embedder.js";
+import { getEmbedding, getEmbeddingQueued, cosineSimilarity } from "./embedder.js";
 import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict, autoResolveVictim } from "./contradiction_heuristics.js";
 import { Config } from "./config.js";
 
@@ -69,16 +69,40 @@ export async function detectContradictions(
   surfacedBy: "cron" | "manual" = "cron",
 ): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean; skipped?: number }> {
   const facts = recallWorkingMemory(projectPath, agentId)
-    .filter((f) => f.importance >= 3)
+    // S1 — floor lowered 3→2: updates are often recorded at LOW importance ("just
+    // an update"), which excluded exactly the facts that supersede older ones.
+    // S1 — RECENT-first budget (mirrors store-postgres.ts): importance-first let
+    // old ★5 facts consume the whole window on mature projects, so new facts —
+    // the actual conflict candidates — were never scanned.
+    .filter((f) => f.importance >= 2)
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
     .slice(0, MAX_SCAN_FACTS);
   if (facts.length < 2) return { scanned: facts.length, flagged: 0, ollamaAvailable: true };
 
-  // M5 hardening (v0.41.0): skip facts whose embed transiently fails instead of
-  // aborting the whole scan — only an all-null run means Ollama is actually down.
+  // S1 (v0.44.0) — read STORED vectors first (facts are embedded at write time);
+  // only embed the missing few via the background lane. Mirrors store-postgres.ts:
+  // re-embedding every fact per scan was slow and hammered Ollama needlessly.
   const vectors = new Map<string, Float32Array>();
   let embFails = 0;
+  try {
+    const vdb = openDb(projectPath);
+    try {
+      const { deserializeVector, ACTIVE_MODEL } = await import("./embedder.js");
+      const sources = facts.map((f) => `memory:${f.agent_id ?? agentId}:${f.key}`);
+      const ph2 = sources.map(() => "?").join(",");
+      const rows = vdb.prepare(
+        `SELECT source, vector FROM embeddings WHERE model_name = ? AND source IN (${ph2})`
+      ).all(ACTIVE_MODEL, ...sources) as Array<{ source: string; vector: Buffer }>;
+      const bySource = new Map(rows.map((r) => [r.source, r.vector]));
+      for (const f of facts) {
+        const buf = bySource.get(`memory:${f.agent_id ?? agentId}:${f.key}`);
+        if (buf) vectors.set(f.key, deserializeVector(buf));
+      }
+    } finally { vdb.close(); }
+  } catch { /* embeddings table absent — fall through to live embeds */ }
   for (const f of facts) {
-    const emb = await getEmbedding(f.value);
+    if (vectors.has(f.key)) continue;
+    const emb = await getEmbeddingQueued(f.value); // S1 — background lane
     if (!emb) { embFails++; continue; }
     vectors.set(f.key, emb.vector);
   }

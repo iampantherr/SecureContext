@@ -232,3 +232,144 @@ describe.skipIf(!pgAvailable)("v0.17.0 §8.2 — work-stealing queue (live PG)",
     expect(maxClaims).toBeLessThanOrEqual(5);
   });
 });
+
+// ─── S8 (v0.44.0) — durable task graph: dependencies + plans ────────────────
+const { getPlanStatus } = await import("./task_queue.js");
+
+describe.skipIf(!pgAvailable)("S8 — task graph dependencies (live PG)", () => {
+
+  it("a task with an unfinished dependency is NOT claimable", async () => {
+    await enqueueTask({ taskId: "dep-A", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "dep-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["dep-A"] });
+    const first = await claimTask(PH_A, "developer", "w1");
+    expect(first?.taskId).toBe("dep-A"); // B is blocked; only A claimable
+    const second = await claimTask(PH_A, "developer", "w2");
+    expect(second).toBeNull(); // A claimed (not done), B still blocked
+  });
+
+  it("completing the last dependency unblocks the dependent automatically", async () => {
+    await enqueueTask({ taskId: "u-A", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "u-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["u-A"] });
+    const a = await claimTask(PH_A, "developer", "w1");
+    await completeTask(a!.taskId, "w1");
+    const b = await claimTask(PH_A, "developer", "w2");
+    expect(b?.taskId).toBe("u-B");
+  });
+
+  it("a chain A→B→C executes strictly in order across workers", async () => {
+    await enqueueTask({ taskId: "c-C", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["c-B"] });
+    await enqueueTask({ taskId: "c-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["c-A"] });
+    await enqueueTask({ taskId: "c-A", projectHash: PH_A, role: "developer", payload: {} });
+    const order = [];
+    for (const w of ["w1", "w2", "w3"]) {
+      const t = await claimTask(PH_A, "developer", w);
+      expect(t).not.toBeNull();
+      order.push(t!.taskId);
+      await completeTask(t!.taskId, w);
+    }
+    expect(order).toEqual(["c-A", "c-B", "c-C"]);
+  });
+
+  it("STRICT semantics: an unknown/not-yet-enqueued dependency blocks", async () => {
+    await enqueueTask({ taskId: "s-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["s-A-not-enqueued"] });
+    expect(await claimTask(PH_A, "developer", "w1")).toBeNull();
+  });
+
+  it("multi-dependency fan-in: claimable only after ALL deps done", async () => {
+    await enqueueTask({ taskId: "f-A", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "f-B", projectHash: PH_A, role: "qa", payload: {} });
+    await enqueueTask({ taskId: "f-C", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["f-A", "f-B"] });
+    const a = await claimTask(PH_A, "developer", "w1");
+    await completeTask(a!.taskId, "w1");
+    expect(await claimTask(PH_A, "developer", "w1")).toBeNull(); // f-B not done yet
+    const b = await claimTask(PH_A, "qa", "w2");
+    await completeTask(b!.taskId, "w2");
+    const c = await claimTask(PH_A, "developer", "w1");
+    expect(c?.taskId).toBe("f-C");
+  });
+
+  it("self-dependency is stripped at enqueue (task stays claimable)", async () => {
+    await enqueueTask({ taskId: "self-A", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["self-A"] });
+    const t = await claimTask(PH_A, "developer", "w1");
+    expect(t?.taskId).toBe("self-A");
+  });
+
+  it("a FAILED dependency keeps dependents blocked (retry via reclaim, not leak)", async () => {
+    await enqueueTask({ taskId: "x-A", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "x-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["x-A"] });
+    const a = await claimTask(PH_A, "developer", "w1");
+    await failTask(a!.taskId, "w1", "boom");
+    expect(await claimTask(PH_A, "developer", "w2")).toBeNull(); // B must not run on a failed prerequisite
+  });
+
+  it("getQueueStats reports blocked as a subset of queued", async () => {
+    await enqueueTask({ taskId: "q-A", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "q-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["q-A"] });
+    const s = await getQueueStats(PH_A);
+    expect(s.queued).toBe(2);
+    expect(s.blocked).toBe(1);
+  });
+
+  it("dependencies are project-scoped (same task id in another project doesn't unblock)", async () => {
+    await enqueueTask({ taskId: "p-A", projectHash: PH_B, role: "developer", payload: {} });
+    const otherA = await claimTask(PH_B, "developer", "wB");
+    await completeTask(otherA!.taskId, "wB");
+    await enqueueTask({ taskId: "p-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["p-A"] });
+    expect(await claimTask(PH_A, "developer", "w1")).toBeNull(); // PH_A has no done p-A
+  });
+
+  it("getPlanStatus: crash-resume view (done/claimed/ready/blocked)", async () => {
+    await enqueueTask({ taskId: "pl-A", projectHash: PH_A, role: "developer", payload: {}, planId: "plan-1" });
+    await enqueueTask({ taskId: "pl-B", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["pl-A"], planId: "plan-1" });
+    await enqueueTask({ taskId: "pl-C", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["pl-B"], planId: "plan-1" });
+    const a = await claimTask(PH_A, "developer", "w1");
+    await completeTask(a!.taskId, "w1");
+    const b = await claimTask(PH_A, "developer", "w1"); // claims pl-B, then "crash" (no complete)
+    expect(b?.taskId).toBe("pl-B");
+    const plan = await getPlanStatus(PH_A, "plan-1");
+    expect(plan.summary).toEqual({ total: 3, done: 1, claimed: 1, blocked: 1, ready: 0, failed: 0 });
+    expect(plan.tasks.find((t) => t.task_id === "pl-C")?.blocked).toBe(true);
+  });
+
+  it("[RT-S4-01 graph edition] 20 workers race a 10-chain: strict order, zero double-claims", async () => {
+    for (let i = 9; i >= 0; i--) {
+      await enqueueTask({ taskId: `r-${i}`, projectHash: PH_A, role: "developer", payload: {}, dependsOn: i > 0 ? [`r-${i - 1}`] : [] });
+    }
+    const completed = [];
+    while (completed.length < 10) {
+      const claims = await Promise.all(Array.from({ length: 20 }, (_, w) => claimTask(PH_A, "developer", `w${w}`)));
+      const winners = claims.map((c, w) => (c ? { c, w } : null)).filter((x) => x !== null);
+      expect(winners.length).toBeLessThanOrEqual(1); // chain => at most one claimable at a time
+      if (winners.length === 1) {
+        const { c, w } = winners[0]!;
+        completed.push(c.taskId);
+        await completeTask(c.taskId, `w${w}`);
+      }
+    }
+    expect(completed).toEqual(Array.from({ length: 10 }, (_, i) => `r-${i}`));
+  });
+});
+
+const { listUnblockedBy } = await import("./task_queue.js");
+
+describe.skipIf(!pgAvailable)("S8 — unblock notification (live PG)", () => {
+
+  it("completing the last dependency reports the freed dependents", async () => {
+    await enqueueTask({ taskId: "n-A", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "n-B", projectHash: PH_A, role: "qa", payload: {}, dependsOn: ["n-A"] });
+    await enqueueTask({ taskId: "n-C", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["n-A"] });
+    const a = await claimTask(PH_A, "developer", "w1");
+    await completeTask(a!.taskId, "w1");
+    const freed = await listUnblockedBy(PH_A, "n-A");
+    expect(freed.map((f) => f.task_id).sort()).toEqual(["n-B", "n-C"]);
+  });
+
+  it("does NOT report dependents that still have other unfinished deps", async () => {
+    await enqueueTask({ taskId: "m-A", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "m-B", projectHash: PH_A, role: "developer", payload: {} });
+    await enqueueTask({ taskId: "m-C", projectHash: PH_A, role: "developer", payload: {}, dependsOn: ["m-A", "m-B"] });
+    const a = await claimTask(PH_A, "developer", "w1");
+    await completeTask(a!.taskId, "w1");
+    expect(await listUnblockedBy(PH_A, "m-A")).toEqual([]); // m-B still pending
+  });
+});

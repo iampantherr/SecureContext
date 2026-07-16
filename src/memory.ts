@@ -469,7 +469,7 @@ export function recallWorkingMemory(
   let rows: MemoryFact[];
   if (safeAgent === "default") {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
       FROM working_memory
       WHERE agent_id = 'default' AND valid_to IS NULL
         AND (expires_at IS NULL OR expires_at > datetime('now'))
@@ -477,7 +477,7 @@ export function recallWorkingMemory(
     `).all() as unknown as MemoryFact[];
   } else {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
       FROM working_memory
       WHERE (agent_id = ? OR agent_id = 'default') AND valid_to IS NULL
         AND (expires_at IS NULL OR expires_at > datetime('now'))
@@ -563,12 +563,35 @@ export async function recallWorkingMemoryFocused(
       const safeAgent = sanitize(agentId, 64);
       const iso = win.asOf.toISOString();
       rows = db.prepare(`
-        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin
+        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
         FROM working_memory
         WHERE (agent_id = ? OR agent_id = 'default')
           AND created_at <= ? AND (valid_to IS NULL OR valid_to > ?)
         ORDER BY importance DESC, created_at DESC
       `).all(safeAgent, iso, iso) as unknown as MemoryFact[];
+    } finally { db.close(); }
+  } else if (win.from || win.to) {
+    // S1 (v0.44.0) — historical WINDOW queries include RETIRED facts whose
+    // event-time falls inside the window (mirrors store-postgres.ts): once
+    // auto-supersession retires a stale fact, "what did we decide three weeks
+    // ago?" must still surface it — it was the truth THEN.
+    const db = openDb(projectPath);
+    try {
+      ensureAgentIdColumn(db);
+      ensureEpistemologyColumns(db);
+      const safeAgent = sanitize(agentId, 64);
+      const conds: string[] = [];
+      const winParams: string[] = [];
+      if (win.from) { conds.push(`COALESCE(valid_at, created_at) >= ?`); winParams.push(win.from.toISOString()); }
+      if (win.to)   { conds.push(`COALESCE(valid_at, created_at) <= ?`); winParams.push(win.to.toISOString()); }
+      rows = db.prepare(`
+        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
+        FROM working_memory
+        WHERE (agent_id = ? OR agent_id = 'default')
+          AND ((valid_to IS NULL AND (expires_at IS NULL OR expires_at > datetime('now')))
+               OR (valid_to IS NOT NULL AND ${conds.join(" AND ")}))
+        ORDER BY importance DESC, created_at DESC
+      `).all(safeAgent, ...winParams) as unknown as MemoryFact[];
     } finally { db.close(); }
   } else {
     rows = recallWorkingMemory(projectPath, agentId);
@@ -621,6 +644,40 @@ export async function recallWorkingMemoryFocused(
     b.r.importance - a.r.importance ||
     (a.r.created_at < b.r.created_at ? 1 : a.r.created_at > b.r.created_at ? -1 : 0)
   );
+
+  // S1 (v0.44.0) — prefer-latest: a near-identical conflicting pair among the top
+  // candidates demotes the OLDER fact below the newer (the un-retired stale update
+  // problem — bench KU decoy outranked its own update 100% of the time). Skipped
+  // for temporal/as-of queries: "what was it three weeks ago" wants the old fact.
+  if (Config.PREFER_LATEST && !win.from && !win.to && !win.asOf && scored.length > 1) {
+    const { preferLatestAdjust } = await import("./contradiction_heuristics.js");
+    const evOf = (r: MemoryFact): number => {
+      const raw = (r as MemoryFact & { valid_at?: string | null }).valid_at ?? r.created_at;
+      return Date.parse(String(raw));
+    };
+    // Fixpoint loop (mirrors store-postgres.ts): demoting a stale duplicate frees
+    // top-K slots that can expose NEW conflicting pairs — re-slice and re-run
+    // until a pass adjusts nothing (≤3 passes).
+    for (let pass = 0; pass < 3; pass++) {
+      const top = scored.slice(0, Config.PREFER_LATEST_TOPK).map((x) => ({
+        fact: x.r,
+        score: x.score,
+        vec: vecMap.get(`memory:${x.r.agent_id ?? agentId}:${x.r.key}`),
+        ev: evOf(x.r),
+      }));
+      const adjusted = preferLatestAdjust(top, cosineSimilarity, Config.PREFER_LATEST_MARGIN);
+      if (adjusted.size === 0) break;
+      for (const s of scored) {
+        const adj = adjusted.get(s.r.key);
+        if (adj !== undefined && adj < s.score) s.score = adj;
+      }
+      scored.sort((a, b) =>
+        b.score - a.score ||
+        b.r.importance - a.r.importance ||
+        (a.r.created_at < b.r.created_at ? 1 : a.r.created_at > b.r.created_at ? -1 : 0)
+      );
+    }
+  }
   return scored.map((x) => x.r);
 }
 
