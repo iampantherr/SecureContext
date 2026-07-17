@@ -1115,6 +1115,14 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 39,
+    description: "S3 (v0.46.0): team attribution — nullable created_by (user id) on working_memory (mirrors PG migration 38). The team control plane (users/keys/workspaces) is PG-only by design — multi-user coordination requires the shared store; SQLite carries the attribution column for parity so facts round-trip losslessly.",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE working_memory ADD COLUMN created_by TEXT`); } catch { /* exists */ }
+    },
+  },
+
 ];
 
 /**

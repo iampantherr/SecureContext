@@ -70,6 +70,8 @@ export interface MemoryFact {
   last_retrieved_at?: string | null;
   // v0.38.0 per-claim citation (what created the fact):
   origin?:            string | null;
+  // S3 (v0.46.0) team attribution (WHICH USER wrote it; absent for single-user use):
+  created_by?:        string | null;
 }
 
 // SECURITY: Strip control chars and limit length to prevent log injection / DB bloat
@@ -269,6 +271,7 @@ function ensureEpistemologyColumns(db: DatabaseSync): void {
   add("origin",            `TEXT`);
   add("valid_at",          `TEXT`);   // M3 event-time
   add("invalid_at",        `TEXT`);   // M3 event-time
+  add("created_by",        `TEXT`);   // S3 team attribution
   add("expires_at",        `TEXT`);   // R1 TTL
 }
 
@@ -292,6 +295,9 @@ export interface EpistemicOpts {
   /** R1 (v0.42.0) — per-fact TTL: ISO timestamp after which the fact is excluded from
    *  recall and retired ('expired', revivable) by the enrichment sweep. Null = never. */
   expiresAt?:  string | null;
+  /** S3 (v0.46.0) — team attribution: the USER (api-key owner) who wrote the fact.
+   *  Set by the API layer from the authenticated identity; absent for single-user use. */
+  createdBy?:  string | null;
 }
 
 /**
@@ -364,8 +370,8 @@ export function rememberFact(
   })();
 
   db.prepare(`
-    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at, origin, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at, origin, expires_at, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key, agent_id) DO UPDATE SET
       value             = excluded.value,
       importance        = excluded.importance,
@@ -377,10 +383,11 @@ export function rememberFact(
       resolved_at       = excluded.resolved_at,
       origin            = excluded.origin,
       expires_at        = excluded.expires_at,
+      created_by        = COALESCE(excluded.created_by, working_memory.created_by),
       valid_to          = NULL,
       superseded_by     = NULL,
       retired_reason    = NULL
-  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires);
+  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires, epi.createdBy ? sanitize(epi.createdBy, 64) : null);
   // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
   // v0.36.0 — memory facts are co-reference sources (memory-aware edge extraction), so a
@@ -469,7 +476,7 @@ export function recallWorkingMemory(
   let rows: MemoryFact[];
   if (safeAgent === "default") {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at, created_by
       FROM working_memory
       WHERE agent_id = 'default' AND valid_to IS NULL
         AND (expires_at IS NULL OR expires_at > datetime('now'))
@@ -477,7 +484,7 @@ export function recallWorkingMemory(
     `).all() as unknown as MemoryFact[];
   } else {
     rows = db.prepare(`
-      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
+      SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at, created_by
       FROM working_memory
       WHERE (agent_id = ? OR agent_id = 'default') AND valid_to IS NULL
         AND (expires_at IS NULL OR expires_at > datetime('now'))
@@ -563,7 +570,7 @@ export async function recallWorkingMemoryFocused(
       const safeAgent = sanitize(agentId, 64);
       const iso = win.asOf.toISOString();
       rows = db.prepare(`
-        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
+        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at, created_by
         FROM working_memory
         WHERE (agent_id = ? OR agent_id = 'default')
           AND created_at <= ? AND (valid_to IS NULL OR valid_to > ?)
@@ -585,7 +592,7 @@ export async function recallWorkingMemoryFocused(
       if (win.from) { conds.push(`COALESCE(valid_at, created_at) >= ?`); winParams.push(win.from.toISOString()); }
       if (win.to)   { conds.push(`COALESCE(valid_at, created_at) <= ?`); winParams.push(win.to.toISOString()); }
       rows = db.prepare(`
-        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at
+        SELECT key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at, created_by
         FROM working_memory
         WHERE (agent_id = ? OR agent_id = 'default')
           AND ((valid_to IS NULL AND (expires_at IS NULL OR expires_at > datetime('now')))

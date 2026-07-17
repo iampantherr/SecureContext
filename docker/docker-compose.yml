@@ -94,8 +94,22 @@ services:
       # v0.33.0 — Tier-2 #6 memory-enrichment cron (contradiction re-scan + backlink backfill).
       # ON by default; set ZC_ENRICHMENT_CRON=0 to disable. Interval + recency window tunable.
       ZC_ENRICHMENT_CRON:         ${ZC_ENRICHMENT_CRON:-1}
+      # S9 — kill switch for the qwen-based entity-extraction layer (it can saturate
+      # CPU-only Ollama and starve the nomic embedder; see 2026-07-17 incident).
+      ZC_ENTITY_EXTRACT:          ${ZC_ENTITY_EXTRACT:-1}
       ZC_ENRICHMENT_INTERVAL_MIN: ${ZC_ENRICHMENT_INTERVAL_MIN:-30}
       ZC_ENRICHMENT_SCAN_DAYS:    ${ZC_ENRICHMENT_SCAN_DAYS:-14}
+      # S5 (v0.46.0) — OTLP export of the audit chain as Gen-AI semconv spans.
+      # OFF unless set (no sensible default collector). Point at your collector,
+      # e.g. http://host.docker.internal:4318 for one on the host.
+      ZC_OTLP_ENDPOINT: ${ZC_OTLP_ENDPOINT:-}
+      ZC_OTLP_HEADERS:  ${ZC_OTLP_HEADERS:-}
+      # S6 (v0.45.0) — session replay chain verification. Tool-call rows in PG
+      # were HMAC'd by the HOST's machine secret (the MCP process that recorded
+      # them), not the container's. Mount the host secret read-only (below) so
+      # the replay verifier can try it as a candidate key. Optional: without it,
+      # host-recorded rows show as unverifiable (never breaks anything else).
+      ZC_VERIFY_SECRET_PATH: /run/secrets/host_machine_secret
     volumes:
       # v0.22.1 — persist machine_secret + logs + sessions across container rebuilds.
       # Without this, HMAC-protected data in PG (skills.body_hmac, hash chains)
@@ -118,6 +132,10 @@ services:
       # design: nothing the SC container ever writes back to the wiki.
       # Adjust the host path to match where YOUR personal-wiki lives.
       - ${USERPROFILE:-${HOME}}/AI_projects/personal-wiki:/personal-wiki:ro
+      # S6 (v0.45.0) — host machine secret, read-only, for replay chain
+      # verification (see ZC_VERIFY_SECRET_PATH above). The secret never leaves
+      # the container process; endpoints only ever return verdict labels.
+      - ${USERPROFILE:-${HOME}}/.claude/zc-ctx/.machine_secret:/run/secrets/host_machine_secret:ro
     ports:
       - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
     depends_on:

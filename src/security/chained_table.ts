@@ -133,10 +133,20 @@ export interface ChainedTable {
  * @returns 32-byte HMAC key for use with hmacRowHash().
  */
 export function deriveAgentChainKey(agentId: string): Buffer {
+  return deriveAgentChainKeyFrom(getMachineSecret(), agentId);
+}
+
+/**
+ * S6 (v0.45.0) — same HKDF derivation from an EXPLICIT root secret. The replay
+ * verifier needs this: tool-call rows in PG were HMAC'd by the HOST's machine
+ * secret (the MCP process that recorded them), which differs from the API
+ * container's own secret. The container verifies with a read-only mount of the
+ * host secret (ZC_VERIFY_SECRET_PATH) as an additional candidate key.
+ */
+export function deriveAgentChainKeyFrom(ikm: Buffer, agentId: string): Buffer {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("deriveAgentChainKey: agentId must be a non-empty string");
   }
-  const ikm = getMachineSecret();
   // HKDF-Extract is implicit; we only need Expand. salt=null uses the all-zero
   // salt which (combined with high-entropy machine_secret IKM) yields full
   // key-derivation strength per RFC 5869.

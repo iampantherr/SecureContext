@@ -1,11 +1,23 @@
 /**
- * OpenTelemetry export of the HMAC-chained audit trail (v0.38.0 — Tier-2 #9)
+ * OpenTelemetry export of the HMAC-chained audit trail (v0.38.0 — Tier-2 #9;
+ * S5 v0.46.0 — Gen-AI semantic-conventions conformance)
  * ===========================================================================
  *
  * Streams `tool_calls_pg` rows as OTLP/HTTP JSON spans so SC agents appear in any
  * existing observability stack (Grafana Tempo, Langfuse, Jaeger, …) — and, uniquely,
  * each span carries the row's chain hashes (`audit.row_hash`/`audit.prev_hash`), making
  * this the only tamper-evident trace data in that stack.
+ *
+ * S5 (v0.46.0): spans follow the OTel **Gen-AI semantic conventions** (semconv
+ * v1.41 "execute_tool" shape) so Gen-AI-aware backends (Langfuse, Grafana Gen-AI
+ * dashboards, Arize/Phoenix) light up without custom mapping:
+ *   - span name          "execute_tool {tool_name}"
+ *   - gen_ai.operation.name = "execute_tool"
+ *   - gen_ai.provider.name  derived from the model id (claude→anthropic, …)
+ *   - gen_ai.tool.name / gen_ai.tool.call.id / gen_ai.tool.type = "function"
+ *   - gen_ai.agent.id, gen_ai.conversation.id (session), gen_ai.request.model
+ *   - gen_ai.usage.input_tokens / output_tokens; error.type on failures
+ * SecureContext-specific fields ride in the securecontext.* / audit.* namespaces.
  *
  * Zero-dependency by design: OTLP/HTTP JSON is just a schema — no OTel SDK needed.
  * OFF unless ZC_OTLP_ENDPOINT is set (there is no sensible default target). The
@@ -37,11 +49,22 @@ function extraHeaders(): Record<string, string> {
   return out;
 }
 
-interface ToolCallRow {
+export interface ToolCallRow {
   id: string; call_id: string; session_id: string; agent_id: string; project_hash: string;
   task_id: string | null; skill_id: string | null; tool_name: string; model: string;
   input_tokens: number; output_tokens: number; cost_usd: string; latency_ms: number;
   status: string; error_class: string | null; ts: Date; prev_hash: string; row_hash: string;
+}
+
+/** Gen-AI semconv well-known provider from a model id (best-effort, "unknown" fallback). */
+export function providerFromModel(model: string): string {
+  const m = (model || "").toLowerCase();
+  if (m.includes("claude")) return "anthropic";
+  if (/gpt|^o[0-9]|davinci|openai/.test(m)) return "openai";
+  if (m.includes("gemini")) return "gcp.gemini";
+  if (m.includes("mistral")) return "mistral_ai";
+  if (m.includes("llama") || m.includes("qwen") || m.includes("deepseek")) return "self_hosted";
+  return "unknown";
 }
 
 const attr = (key: string, value: string | number | null | undefined): object | null =>
@@ -50,22 +73,35 @@ const attr = (key: string, value: string | number | null | undefined): object | 
       ? { key, value: Number.isInteger(value) ? { intValue: String(value) } : { doubleValue: value } }
       : { key, value: { stringValue: String(value).slice(0, 256) } };
 
-function toSpan(r: ToolCallRow): object {
+export function toSpan(r: ToolCallRow): object {
   const endNs   = BigInt(new Date(r.ts).getTime()) * 1_000_000n;
   const startNs = endNs - BigInt(Math.max(0, r.latency_ms)) * 1_000_000n;
   return {
     traceId: createHash("sha256").update(r.session_id).digest("hex").slice(0, 32),
     spanId:  createHash("sha256").update(r.call_id).digest("hex").slice(0, 16),
-    name:    r.tool_name.slice(0, 128),
-    kind:    1, // SPAN_KIND_INTERNAL
+    // Gen-AI semconv span-name convention for tool execution: "execute_tool {tool}".
+    name:    `execute_tool ${r.tool_name}`.slice(0, 128),
+    kind:    1, // SPAN_KIND_INTERNAL (per semconv for execute_tool)
     startTimeUnixNano: startNs.toString(),
     endTimeUnixNano:   endNs.toString(),
     status: { code: r.status === "ok" ? 1 : 2, ...(r.error_class ? { message: r.error_class.slice(0, 128) } : {}) },
     attributes: [
-      attr("agent.id", r.agent_id), attr("project.hash", r.project_hash),
-      attr("task.id", r.task_id), attr("skill.id", r.skill_id), attr("gen_ai.request.model", r.model),
-      attr("gen_ai.usage.input_tokens", r.input_tokens), attr("gen_ai.usage.output_tokens", r.output_tokens),
-      attr("cost.usd", Number(r.cost_usd) || 0), attr("securecontext.status", r.status),
+      // ── Gen-AI semantic conventions (v1.41) ──
+      attr("gen_ai.operation.name", "execute_tool"),
+      attr("gen_ai.provider.name", providerFromModel(r.model)),
+      attr("gen_ai.tool.name", r.tool_name),
+      attr("gen_ai.tool.call.id", r.call_id),
+      attr("gen_ai.tool.type", "function"),
+      attr("gen_ai.agent.id", r.agent_id),
+      attr("gen_ai.conversation.id", r.session_id),
+      attr("gen_ai.request.model", r.model),
+      attr("gen_ai.usage.input_tokens", r.input_tokens),
+      attr("gen_ai.usage.output_tokens", r.output_tokens),
+      ...(r.status !== "ok" ? [attr("error.type", r.error_class ?? r.status)] : []),
+      // ── SecureContext extensions (properly namespaced) ──
+      attr("securecontext.project_hash", r.project_hash),
+      attr("securecontext.task_id", r.task_id), attr("securecontext.skill_id", r.skill_id),
+      attr("securecontext.cost_usd", Number(r.cost_usd) || 0), attr("securecontext.status", r.status),
       // The moat, exported: chained hashes make each span independently verifiable.
       attr("audit.row_hash", r.row_hash), attr("audit.prev_hash", r.prev_hash),
     ].filter(Boolean),

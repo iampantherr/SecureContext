@@ -35,6 +35,7 @@
  */
 
 import Fastify from "fastify";
+import type { FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { isAbsolute as posixIsAbsolute } from "node:path/posix";
@@ -96,6 +97,12 @@ function timingSafeKeyCheck(supplied: string | undefined): boolean {
 function validateProjectPath(projectPath: unknown): string {
   if (typeof projectPath !== "string" || !projectPath.trim()) {
     throw new ApiError(400, "projectPath is required and must be a non-empty string");
+  }
+  // S3 (v0.46.0) — shared workspaces are VIRTUAL project paths ("workspace:<slug>").
+  // They are hashed exactly like filesystem paths by every store, so all memory/KB/
+  // broadcast code paths work unchanged; access is gated per-user in the preHandler.
+  if (/^workspace:[a-z0-9][a-z0-9_-]{0,63}$/i.test(projectPath.trim())) {
+    return projectPath.trim().toLowerCase();
   }
   // Accept POSIX absolute paths (/home/...) AND Windows absolute paths (C:\... or C:/...)
   // The API server runs in Docker (Linux) but clients are often Windows-native — both must work.
@@ -257,11 +264,34 @@ export async function createApiServer(storeOverride?: Store) {
     // ZC_API_KEY since v0.12.1.
     if (request.url.startsWith("/api/v1/telemetry/")) return;
 
-    // API key check
+    // API key check — S3 (v0.46.0): the master ZC_API_KEY (operator) OR a per-user
+    // key from api_keys_pg ("zck_…", sha256-looked-up, revocable). The resolved
+    // identity is stashed on the request for attribution + workspace gating.
+    // Kill switch ZC_TEAM_AUTH=0 → master key only (exact v0.45 behavior).
     const authHeader = request.headers.authorization;
     const supplied   = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
-    if (!timingSafeKeyCheck(supplied)) {
+    const { resolveIdentity, assertWorkspaceAccess } = await import("./team_auth.js");
+    const identity = await resolveIdentity(supplied);
+    if (!identity) {
       reply.status(401).send({ error: "Unauthorized — invalid or missing API key" });
+      return;
+    }
+    (request as FastifyRequest & { zcIdentity?: import("./team_auth.js").ApiIdentity }).zcIdentity = identity;
+
+    // S3 — central workspace gate: any data-plane request addressing a
+    // workspace:<slug> virtual project requires membership (operator exempt).
+    try {
+      const body = request.body as Record<string, unknown> | undefined;
+      const query = request.query as Record<string, unknown> | undefined;
+      const pp = (typeof body?.projectPath === "string" && body.projectPath)
+        || (typeof query?.projectPath === "string" && query.projectPath) || "";
+      if (pp && /^workspace:/i.test(pp.trim())) {
+        await assertWorkspaceAccess(pp.trim().toLowerCase(), identity);
+      }
+    } catch (e) {
+      const status = (e as { statusCode?: number }).statusCode ?? 403;
+      reply.status(status).send({ error: (e as Error).message });
+      return;
     }
   });
 
@@ -2969,6 +2999,71 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // S10 (v0.46.0) — compliance report, dashboard-served (localhost operator UI).
+  app.get("/dashboard/compliance", async (request, reply) => {
+    try {
+      const q = request.query as Record<string, unknown>;
+      const projectHash = String(q.project ?? "").trim();
+      if (!/^[0-9a-f]{16}$/.test(projectHash)) {
+        reply.type("text/html").send(`<div class="error">project (16-hex) is required</div>`);
+        return;
+      }
+      const days = Math.max(1, Math.min(365, parseInt(String(q.days ?? "30"), 10) || 30));
+      const { buildComplianceReport, renderComplianceMarkdown } = await import("./compliance.js");
+      const { loadProjectNameMap } = await import("./dashboard/render.js");
+      const report = await buildComplianceReport(projectHash, days);
+      const name = (await loadProjectNameMap()).get(projectHash) ?? null;
+      const md = renderComplianceMarkdown(report, name);
+      if (String(q.format ?? "") === "download") {
+        reply.header("Content-Disposition", `attachment; filename="compliance-${projectHash}-${days}d.md"`);
+        reply.type("text/markdown").send(md);
+        return;
+      }
+      reply.type("text/html").send(
+        `<div class="compliance-report"><pre style="white-space:pre-wrap;font-family:var(--mono);font-size:.8rem;line-height:1.55">${escapeHtml(md)}</pre>` +
+        `<p><a href="/dashboard/compliance?project=${projectHash}&amp;days=${days}&amp;format=download">⬇ Download as markdown</a></p></div>`,
+      );
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to build report: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  // ─── S6 (v0.45.0) — Session replay dashboard fragments ────────────────
+  app.get("/dashboard/replay/sessions", async (request, reply) => {
+    try {
+      const q = request.query as Record<string, unknown>;
+      const projectHash = String(q.project ?? "").trim();
+      if (!/^[0-9a-f]{16}$/.test(projectHash)) {
+        reply.type("text/html").send(`<p class="empty">Choose a project to list its recorded agent sessions.</p>`);
+        return;
+      }
+      const { listReplaySessions } = await import("./replay.js");
+      const { renderReplaySessionsFragment } = await import("./dashboard/render.js");
+      const sessions = await listReplaySessions(projectHash, 30);
+      reply.type("text/html").send(renderReplaySessionsFragment(projectHash, sessions));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load sessions: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
+  app.get("/dashboard/replay/session", async (request, reply) => {
+    try {
+      const q = request.query as Record<string, unknown>;
+      const projectHash = String(q.project ?? "").trim();
+      const sessionId = String(q.session ?? "").trim();
+      if (!/^[0-9a-f]{16}$/.test(projectHash) || !sessionId) {
+        reply.type("text/html").send(`<div class="error">project (16-hex) and session are required</div>`);
+        return;
+      }
+      const { getSessionReplay } = await import("./replay.js");
+      const { renderReplayStepsFragment } = await import("./dashboard/render.js");
+      const result = await getSessionReplay(projectHash, sessionId);
+      reply.type("text/html").send(renderReplayStepsFragment(sessionId, result.steps, result.summary));
+    } catch (e) {
+      reply.type("text/html").send(`<div class="error">Failed to load replay: ${escapeHtml((e as Error).message)}</div>`);
+    }
+  });
+
   // ─── v0.25.0 — Completed mutations panel ──────────────────────────────
   app.get("/dashboard/mutations/completed", async (_request, reply) => {
     try {
@@ -3123,6 +3218,16 @@ export async function createApiServer(storeOverride?: Store) {
       else if (typeof ttl_days === "number" && ttl_days > 0) {
         epi.expiresAt = new Date(Date.now() + ttl_days * 86_400_000).toISOString();
       }
+      // S3 (v0.46.0) — attribution. A user key's identity ALWAYS wins (a member
+      // can't write as someone else); operator-key callers may attribute via the
+      // x-zc-user header (how MCP agents pass ZC_USER_ID through).
+      const identity = (request as FastifyRequest & { zcIdentity?: import("./team_auth.js").ApiIdentity }).zcIdentity;
+      if (identity?.kind === "user") {
+        epi.createdBy = identity.userId;
+      } else {
+        const hdr = request.headers["x-zc-user"];
+        if (typeof hdr === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(hdr)) epi.createdBy = hdr;
+      }
       await store.remember(pp, key, value, Number(importance), String(agentId), epi);
       // v0.31.0 — re-arm the contradiction scan for this project. A new fact can form
       // a contradiction with an existing one, so the next recall must re-scan. Without
@@ -3142,6 +3247,107 @@ export async function createApiServer(storeOverride?: Store) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });
     }
+  });
+
+  // ── S3 (v0.46.0): team control plane — master-key (operator) only ─────────
+  // Users, per-user API keys (hashed, revocable), shared workspaces + members.
+  const requireOperator = (request: FastifyRequest): void => {
+    const identity = (request as FastifyRequest & { zcIdentity?: import("./team_auth.js").ApiIdentity }).zcIdentity;
+    if (!identity || identity.kind !== "operator") {
+      throw new ApiError(403, "Team management requires the operator (master) API key");
+    }
+  };
+  const teamErr = (e: unknown, reply: { status: (n: number) => { send: (b: unknown) => unknown } }): unknown => {
+    const status = (e as { statusCode?: number }).statusCode;
+    if (status) return reply.status(status).send({ error: (e as Error).message });
+    return reply.status(500).send({ error: "Internal error" });
+  };
+
+  app.post("/api/v1/team/users", async (request, reply) => {
+    try {
+      requireOperator(request);
+      const { userId, displayName } = request.body as Record<string, unknown>;
+      if (typeof userId !== "string" || !userId) throw new ApiError(400, "userId is required");
+      const { createUser } = await import("./team_auth.js");
+      return { ok: true, user: await createUser(userId, typeof displayName === "string" ? displayName : undefined) };
+    } catch (e) { return teamErr(e, reply); }
+  });
+
+  app.get("/api/v1/team/users", async (request, reply) => {
+    try {
+      requireOperator(request);
+      const { listUsers } = await import("./team_auth.js");
+      return { ok: true, users: await listUsers() };
+    } catch (e) { return teamErr(e, reply); }
+  });
+
+  app.post("/api/v1/team/keys", async (request, reply) => {
+    try {
+      requireOperator(request);
+      const { userId, label } = request.body as Record<string, unknown>;
+      if (typeof userId !== "string" || !userId) throw new ApiError(400, "userId is required");
+      const { createApiKey } = await import("./team_auth.js");
+      const key = await createApiKey(userId, typeof label === "string" ? label : undefined);
+      // The plaintext api_key appears ONLY in this response — it is never stored.
+      return { ok: true, ...key, note: "Store this key now — it cannot be retrieved again." };
+    } catch (e) { return teamErr(e, reply); }
+  });
+
+  app.get("/api/v1/team/keys", async (request, reply) => {
+    try {
+      requireOperator(request);
+      const { listApiKeys } = await import("./team_auth.js");
+      return { ok: true, keys: await listApiKeys() };
+    } catch (e) { return teamErr(e, reply); }
+  });
+
+  app.post("/api/v1/team/keys/revoke", async (request, reply) => {
+    try {
+      requireOperator(request);
+      const { keyId } = request.body as Record<string, unknown>;
+      if (typeof keyId !== "number") throw new ApiError(400, "keyId (number) is required");
+      const { revokeApiKey } = await import("./team_auth.js");
+      return { ok: true, revoked: await revokeApiKey(keyId) };
+    } catch (e) { return teamErr(e, reply); }
+  });
+
+  app.post("/api/v1/team/workspaces", async (request, reply) => {
+    try {
+      // Users may create workspaces too (they become admin); operator creates unowned.
+      const identity = (request as FastifyRequest & { zcIdentity?: import("./team_auth.js").ApiIdentity }).zcIdentity;
+      if (!identity) throw new ApiError(401, "Unauthorized");
+      const { workspaceId, name } = request.body as Record<string, unknown>;
+      if (typeof workspaceId !== "string" || !workspaceId) throw new ApiError(400, "workspaceId is required");
+      const { createWorkspace } = await import("./team_auth.js");
+      const ws = await createWorkspace(workspaceId, typeof name === "string" ? name : undefined,
+        identity.kind === "user" ? identity.userId : null);
+      return { ok: true, workspace: ws };
+    } catch (e) { return teamErr(e, reply); }
+  });
+
+  app.get("/api/v1/team/workspaces", async (request, reply) => {
+    try {
+      const identity = (request as FastifyRequest & { zcIdentity?: import("./team_auth.js").ApiIdentity }).zcIdentity;
+      if (!identity) throw new ApiError(401, "Unauthorized");
+      const { listWorkspaces } = await import("./team_auth.js");
+      // Users see only their workspaces; the operator sees all.
+      return { ok: true, workspaces: await listWorkspaces(identity.kind === "user" ? identity.userId : undefined) };
+    } catch (e) { return teamErr(e, reply); }
+  });
+
+  app.post("/api/v1/team/workspaces/members", async (request, reply) => {
+    try {
+      requireOperator(request);
+      const { workspaceId, userId, role, remove } = request.body as Record<string, unknown>;
+      if (typeof workspaceId !== "string" || !workspaceId) throw new ApiError(400, "workspaceId is required");
+      if (typeof userId !== "string" || !userId) throw new ApiError(400, "userId is required");
+      const team = await import("./team_auth.js");
+      if (remove === true) {
+        return { ok: true, removed: await team.removeWorkspaceMember(workspaceId, userId) };
+      }
+      await team.addWorkspaceMember(workspaceId, userId, role === "admin" ? "admin" : "member");
+      return { ok: true };
+    } catch (e) { return teamErr(e, reply); }
   });
 
   app.post("/api/v1/forget", async (request, reply) => {
@@ -3608,6 +3814,89 @@ export async function createApiServer(storeOverride?: Store) {
       const pp      = validateProjectPath(projectPath);
       const results = await store.replay(pp, fromId !== undefined ? Number(fromId) : undefined);
       return { ok: true, broadcasts: results };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  // S5 (v0.46.0) — on-demand OTLP export trigger (operator). The enrichment cron
+  // ships spans every cycle; this lets an operator (or a test) flush immediately.
+  app.post("/api/v1/otel/export", async (request, reply) => {
+    try {
+      const identity = (request as FastifyRequest & { zcIdentity?: import("./team_auth.js").ApiIdentity }).zcIdentity;
+      if (!identity || identity.kind !== "operator") throw new ApiError(403, "Operator key required");
+      const { exportAuditSpans } = await import("./otel_export.js");
+      const r = await exportAuditSpans();
+      if (r === null) return { ok: true, enabled: false, note: "ZC_OTLP_ENDPOINT not set — export disabled" };
+      return { ok: true, enabled: true, exported: r.exported };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
+  // S10 (v0.46.0) — compliance report from the audit chain (operator only).
+  // ?project=<16-hex|path>&days=30&format=json|markdown
+  app.get("/api/v1/compliance/report", async (request, reply) => {
+    try {
+      const identity = (request as FastifyRequest & { zcIdentity?: import("./team_auth.js").ApiIdentity }).zcIdentity;
+      if (!identity || identity.kind !== "operator") throw new ApiError(403, "Operator key required");
+      const q = request.query as Record<string, unknown>;
+      const projectHash = await resolveReplayProject(q.project);
+      const days = Math.max(1, Math.min(365, parseInt(String(q.days ?? "30"), 10) || 30));
+      const { buildComplianceReport, renderComplianceMarkdown } = await import("./compliance.js");
+      const report = await buildComplianceReport(projectHash, days);
+      if (String(q.format ?? "json") === "markdown") {
+        const { loadProjectNameMap } = await import("./dashboard/render.js");
+        const name = (await loadProjectNameMap()).get(projectHash) ?? null;
+        reply.type("text/markdown").send(renderComplianceMarkdown(report, name));
+        return;
+      }
+      return { ok: true, report };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  // ── S6 (v0.45.0): session replay from the HMAC audit chain ────────────────
+  // Accepts ?project= as a 16-hex project hash OR a filesystem path.
+  const resolveReplayProject = async (raw: unknown): Promise<string> => {
+    const s = String(raw ?? "").trim();
+    if (!s) throw new ApiError(400, "project is required (16-hex hash or path)");
+    if (/^[0-9a-f]{16}$/.test(s)) return s;
+    const pp = validateProjectPath(s);
+    const { createHash } = await import("node:crypto");
+    const { realpathSync } = await import("node:fs");
+    let normalized = pp;
+    try { normalized = realpathSync(pp); } catch { /* use raw */ }
+    return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+  };
+
+  app.get("/api/v1/replay/sessions", async (request, reply) => {
+    try {
+      const q = request.query as Record<string, unknown>;
+      const projectHash = await resolveReplayProject(q.project);
+      const limit = Math.max(1, Math.min(100, parseInt(String(q.limit ?? "30"), 10) || 30));
+      const { listReplaySessions } = await import("./replay.js");
+      const sessions = await listReplaySessions(projectHash, limit);
+      return { ok: true, project: projectHash, sessions };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  app.get("/api/v1/replay/session", async (request, reply) => {
+    try {
+      const q = request.query as Record<string, unknown>;
+      const projectHash = await resolveReplayProject(q.project);
+      const sessionId = String(q.session ?? "").trim();
+      if (!sessionId) throw new ApiError(400, "session is required");
+      const { getSessionReplay } = await import("./replay.js");
+      const result = await getSessionReplay(projectHash, sessionId);
+      return { ok: true, project: projectHash, ...result };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

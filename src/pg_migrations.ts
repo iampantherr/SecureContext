@@ -1011,6 +1011,52 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 38,
+    description: "S3 (v0.46.0): team/multi-user memory — users_pg + api_keys_pg (per-user API keys, sha256-hashed, revocable), workspaces_pg + workspace_members_pg (shared memory scopes addressed as workspace:<slug> virtual project paths), and working_memory.created_by attribution (mirrors SQLite migration 39). Control plane (user/key/workspace CRUD) is master-key-only; user keys authenticate the data plane with per-write attribution.",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS users_pg (
+          user_id      TEXT PRIMARY KEY,
+          display_name TEXT,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          disabled_at  TIMESTAMPTZ
+        )
+      `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS api_keys_pg (
+          key_id       BIGSERIAL PRIMARY KEY,
+          user_id      TEXT NOT NULL REFERENCES users_pg(user_id),
+          key_hash     TEXT NOT NULL UNIQUE,
+          key_prefix   TEXT NOT NULL,
+          label        TEXT,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_used_at TIMESTAMPTZ,
+          revoked_at   TIMESTAMPTZ
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys_pg(user_id)`);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS workspaces_pg (
+          workspace_id TEXT PRIMARY KEY,
+          name         TEXT NOT NULL,
+          created_by   TEXT,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS workspace_members_pg (
+          workspace_id TEXT NOT NULL REFERENCES workspaces_pg(workspace_id) ON DELETE CASCADE,
+          user_id      TEXT NOT NULL REFERENCES users_pg(user_id),
+          role         TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member','admin')),
+          added_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (workspace_id, user_id)
+        )
+      `);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS created_by TEXT`);
+    },
+  },
+
 ];
 
 /**

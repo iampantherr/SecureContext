@@ -2,7 +2,7 @@
 
 > **SecureContext is the persistent memory and security layer for Claude Code.** It gives coding agents memory that survives every restart (~87% lower context-overhead tokens), a cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs 100% locally on PostgreSQL + Ollama — no cloud sync, no subscription, MIT-licensed.
 
-[![Version](https://img.shields.io/badge/version-0.44.0-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.46.0-blue)](package.json)
 [![Tests](https://img.shields.io/badge/tests-917%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
@@ -245,11 +245,14 @@ The `machine_secret` is generated once on first boot, mode 0600, lives inside th
 
 ---
 
-## What's new (v0.43.0)
+## What's new (v0.46.0)
 
-**Recall is now a bounded digest.** Measured failure this release fixes: a mature project accumulated 237 working-memory facts and `zc_recall_context` rendered ~47k tokens — agents started spawning subagents to "digest" their own memory. Now the top-ranked facts render in full up to a budget (`ZC_RECALL_MAX_CHARS`, default ≈4k tokens) and the tail collapses into a grouped, fully-retrievable index. Time-scoped questions ("what happened last week") get in-window facts first with explicit overflow reporting — never silent truncation. Stale facts decay (selective-rehearsal salience), and `zc_remember` pushes back on importance inflation with a ★5 soft quota.
+**Team memory.** Per-user API keys (`zck_…`, sha256-hashed, instantly revocable), shared workspaces (`workspace:<slug>` virtual projects that every memory/KB/broadcast path handles natively, membership-gated per key), and write attribution (`created_by` on every fact — a user key can't write as anyone else; agents attribute via `ZC_USER_ID`). The operator's master key and single-user setups behave exactly as before; `ZC_TEAM_AUTH=0` is the kill switch.
 
 Recent releases:
+- **v0.45.0** — session replay with cryptographic provenance: scrub any session's tool-call timeline on the dashboard (Security → Session replay); every step badged `✓ verified` / `✗ tampered` / `⛓ gap` / `· unsigned` from the HMAC chain, multi-key verification (container + host secret via `ZC_VERIFY_SECRET_PATH`).
+- **v0.44.0** — temporal fact supersession (retrieval prefers current facts; measured knowledge-update decoy rate 100% → 0%), durable PG task graph (`depends_on[]`, `plan_id`, `zc_plan_status` crash-resume), first public LongMemEval numbers.
+- **v0.43.0** — token-budgeted recall digest (`ZC_RECALL_MAX_CHARS`): full render up to budget, grouped index tail, time-scoped priority — fixes the 47k-token recall firehose on 237-fact projects.
 - **v0.42.0** — TTL memories (`ttl_days`), numeric-conflict triage, temporal filters in KB search, multimodal ingestion (`zc_index_file`: PDF / DOCX / images via local vision models), LongMemEval public-benchmark adapter.
 - **v0.41.0** — memory-quality program: LongMemEval-style benchmark harness, focused recall (`focus` re-ranking), semantic consolidation, bi-temporal event-time + natural-language time windows, multi-hop graph retrieval. Bench: hit@10 0% → 75%.
 - **v0.37–0.40** — self-correcting memory v2, graph retrieval channel, community query mode, trajectory→skill spotter graduation, automatic background memory extraction, operator dashboard redesign.

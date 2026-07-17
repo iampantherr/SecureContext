@@ -35,14 +35,20 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, statSync, chmodSync, mkdirSync, unlinkSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 
 // ─── Paths ─────────────────────────────────────────────────────────────────
 
-/** Where the machine secret lives. Single per-machine file, mode 0600. */
-export const MACHINE_SECRET_PATH = join(homedir(), ".claude", "zc-ctx", ".machine_secret");
+/** Where the machine secret lives. Single per-machine file, mode 0600.
+ *  ZC_MACHINE_SECRET_PATH override (S10 hardening, v0.46.0): lets the TEST
+ *  suite point secret-lifecycle tests at a scratch file. Before this, tests
+ *  that delete+regenerate the secret operated on the REAL per-machine file —
+ *  every full-suite run rotated the root HMAC key and silently invalidated
+ *  every previously-signed audit row on the machine. Production never sets it. */
+export const MACHINE_SECRET_PATH = process.env["ZC_MACHINE_SECRET_PATH"]
+  ?? join(homedir(), ".claude", "zc-ctx", ".machine_secret");
 
 /** Length of the generated secret in bytes. 64 = 512 bits, way beyond brute-force reach. */
 export const MACHINE_SECRET_BYTES = 64;
@@ -175,8 +181,9 @@ export function _resetCacheForTesting(): void {
 function generateAndWriteSecret(): Buffer {
   const buf = randomBytes(MACHINE_SECRET_BYTES);
 
-  // Ensure parent directory exists
-  const dir = join(homedir(), ".claude", "zc-ctx");
+  // Ensure parent directory exists (derived from the ACTIVE path so the
+  // ZC_MACHINE_SECRET_PATH test override writes where it points).
+  const dir = dirname(MACHINE_SECRET_PATH);
   mkdirSync(dir, { recursive: true });
 
   // Write base64-encoded with restrictive permissions

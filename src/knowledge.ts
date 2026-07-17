@@ -206,6 +206,66 @@ export async function storeEmbeddingAsync(
   // the containerized PG deployment, not just BM25. Fire-and-forget; dedup by
   // content_hash + model like the SQLite path. Skips silently with no PG creds.
   void storeEmbeddingPgAsync(projectPath, source, result, contentHash);
+
+  // S9 (v0.46.0) — chunked embeddings for long content (PG parity: the head
+  // vector only covers the first EMBED_MAX_CHARS; store per-chunk vectors keyed
+  // `<source>#c<N>` so _searchDb can max-pool similarity over the whole doc).
+  if (Config.EMBED_CHUNKS && !source.startsWith("memory:") && content.length > Config.EMBED_CHUNK_SIZE) {
+    void storeChunkEmbeddingsSqlite(projectPath, content, source, contentHash).catch(() => undefined);
+  }
+}
+
+async function storeChunkEmbeddingsSqlite(
+  projectPath: string,
+  content: string,
+  source: string,
+  parentHash: string,
+): Promise<void> {
+  const size = Math.max(500, Config.EMBED_CHUNK_SIZE);
+  const overlap = Math.min(300, Math.floor(size / 10));
+  const chunks: string[] = [];
+  for (let off = size - overlap; off < content.length && chunks.length < Math.max(1, Config.EMBED_MAX_CHUNKS); off += size - overlap) {
+    const piece = content.slice(off, off + size);
+    if (piece.trim().length < 100) break;
+    chunks.push(piece);
+  }
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkSource = `${source}#c${i + 1}`;
+    const chunkHash = `${parentHash}:${i + 1}`;
+    try {
+      {
+        const db0 = openDb(projectPath);
+        try {
+          const existing = db0.prepare(`SELECT content_hash, model_name FROM embeddings WHERE source = ?`)
+            .get(chunkSource) as { content_hash: string | null; model_name: string } | undefined;
+          if (existing && existing.content_hash === chunkHash && existing.model_name === ACTIVE_MODEL) continue;
+        } finally { db0.close(); }
+      }
+      const result = await getEmbeddingQueued(chunks[i]!);
+      if (!result) return; // embedder down — later re-index heals
+      const db = openDb(projectPath);
+      try {
+        db.prepare(
+          `INSERT OR REPLACE INTO embeddings(source, vector, model_name, dimensions, created_at, content_hash)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(chunkSource, serializeVector(result.vector), result.modelName, result.dimensions, new Date().toISOString(), chunkHash);
+      } finally { db.close(); }
+    } catch { /* per-chunk best-effort */ }
+  }
+  // Content shrank → drop stale chunk rows beyond the new count.
+  try {
+    const db = openDb(projectPath);
+    try {
+      const rows = db.prepare(`SELECT source FROM embeddings WHERE source LIKE ?`)
+        .all(`${source}#c%`) as Array<{ source: string }>;
+      for (const r of rows) {
+        const m = /#c(\d+)$/.exec(r.source);
+        if (m && parseInt(m[1]!, 10) > chunks.length) {
+          db.prepare(`DELETE FROM embeddings WHERE source = ?`).run(r.source);
+        }
+      }
+    } finally { db.close(); }
+  } catch { /* best-effort */ }
 }
 
 async function storeEmbeddingPgAsync(
@@ -508,14 +568,18 @@ function _searchDb(
       const allEmb = db.prepare(
         `SELECT source, vector FROM embeddings WHERE model_name = ?`
       ).all(ACTIVE_MODEL) as Array<{ source: string; vector: Buffer }>;
-      const scored: Array<{ source: string; cos: number }> = [];
+      // S9 (v0.46.0) — chunk rows (`<source>#c<N>`) score their PARENT with
+      // max-pooled similarity, so a deep match inside a long doc surfaces the doc.
+      const bestByParent = new Map<string, number>();
       for (const e of allEmb) {
-        if (candidateMap.has(e.source)) continue;
+        const parent = e.source.replace(/#c\d+$/, "");
+        if (candidateMap.has(parent)) continue;
         const vec = deserializeVector(e.vector);
         const cos = cosineSimilarity(vec, queryVector);
         if (cos < Config.VECTOR_MIN_SIM) continue; // similarity floor — no garbage injection
-        scored.push({ source: e.source, cos });
+        if (cos > (bestByParent.get(parent) ?? -Infinity)) bestByParent.set(parent, cos);
       }
+      const scored: Array<{ source: string; cos: number }> = [...bestByParent].map(([source, cos]) => ({ source, cos }));
       scored.sort((a, b) => b.cos - a.cos);
       const worstRank = Math.max(0, ...[...candidateMap.values()].map((r) => r.rank));
       for (const s of scored.slice(0, Config.VECTOR_CANDIDATES)) {
@@ -552,6 +616,17 @@ function _searchDb(
        WHERE source IN (${placeholders})
        AND (model_name = ? OR model_name = 'unknown')`
     ).all(...sources, ACTIVE_MODEL) as EmbedRow[];
+    // S9 — include chunk vectors (`<source>#c<N>`) of the candidates for max-pooling.
+    try {
+      const chunkRows = db.prepare(
+        `SELECT source, vector, model_name FROM embeddings
+         WHERE source LIKE '%#c%' AND (model_name = ? OR model_name = 'unknown')`
+      ).all(ACTIVE_MODEL) as EmbedRow[];
+      const wanted = new Set(sources);
+      for (const r of chunkRows) {
+        if (wanted.has(r.source.replace(/#c\d+$/, ""))) embedRows.push(r);
+      }
+    } catch { /* best-effort */ }
     metaRows = db.prepare(
       `SELECT source, source_type FROM source_meta WHERE source IN (${placeholders})`
     ).all(...sources) as MetaRow[];
@@ -560,8 +635,14 @@ function _searchDb(
   const sourceTypeMap = new Map<string, string>();
   for (const row of metaRows) sourceTypeMap.set(row.source, row.source_type);
 
-  const embeddingMap = new Map<string, Float32Array>();
-  for (const row of embedRows) embeddingMap.set(row.source, deserializeVector(row.vector));
+  // S9 — group head + chunk vectors per PARENT source; cosine below max-pools.
+  const embeddingMap = new Map<string, Float32Array[]>();
+  for (const row of embedRows) {
+    const parent = row.source.replace(/#c\d+$/, "");
+    const arr = embeddingMap.get(parent);
+    if (arr) arr.push(deserializeVector(row.vector));
+    else embeddingMap.set(parent, [deserializeVector(row.vector)]);
+  }
 
   // Tier-1 A: backlink in-degree boost. ONE batched lookup; absent table (pre-migration)
   // OR W_BACKLINK=0 ⇒ empty map ⇒ +0 ⇒ ranking byte-identical to pre-backlink behaviour.
@@ -594,8 +675,13 @@ function _searchDb(
     // Vector: higher cosine = more relevant (only when a query embedding exists).
     if (queryVector) {
       const withCos = entries.map(([s]) => {
-        const v = embeddingMap.get(s);
-        return { s, cos: v ? cosineSimilarity(queryVector, v) : -Infinity };
+        const vs = embeddingMap.get(s);
+        let cos = -Infinity;
+        for (const v of vs ?? []) {
+          const c = cosineSimilarity(queryVector, v);
+          if (c > cos) cos = c;
+        }
+        return { s, cos };
       }).sort((a, b) => b.cos - a.cos);
       cosRankMap = new Map(withCos.map((x, i) => [x.s, i + 1]));
     }
@@ -683,7 +769,12 @@ function _searchDb(
     const bm25Norm  = 1 - (row.rank - minRank) / rankRange;
     let   cosine    = 0;
     const storedVec = embeddingMap.get(source);
-    if (queryVector && storedVec) cosine = cosineSimilarity(queryVector, storedVec);
+    if (queryVector && storedVec) {
+      for (const v of storedVec) {
+        const c = cosineSimilarity(queryVector, v);
+        if (c > cosine) cosine = c;
+      }
+    }
 
     const baseScore = queryVector && storedVec
       ? Config.W_BM25 * bm25Norm + Config.W_COSINE * cosine
@@ -868,8 +959,14 @@ export async function explainRetrieval(
     ).all(...sources) as MetaRow[];
   } catch {}
 
-  const embeddingMap = new Map<string, Float32Array>();
-  for (const row of embedRows) embeddingMap.set(row.source, deserializeVector(row.vector));
+  // S9 — group head + chunk vectors per PARENT source; cosine below max-pools.
+  const embeddingMap = new Map<string, Float32Array[]>();
+  for (const row of embedRows) {
+    const parent = row.source.replace(/#c\d+$/, "");
+    const arr = embeddingMap.get(parent);
+    if (arr) arr.push(deserializeVector(row.vector));
+    else embeddingMap.set(parent, [deserializeVector(row.vector)]);
+  }
 
   // Tier-1 A: backlink in-degree for observability (base vs boost per result).
   const backlinkMap = new Map<string, number>();
@@ -900,7 +997,14 @@ export async function explainRetrieval(
   for (const [source, row] of candidateMap) {
     const bm25Normalized = 1 - (row.rank - minRank) / rankRange;
     const storedVec = embeddingMap.get(source);
-    const cosine    = (queryVector && storedVec) ? cosineSimilarity(queryVector, storedVec) : null;
+    let cosine: number | null = null;
+    if (queryVector && storedVec) {
+      cosine = 0;
+      for (const v of storedVec) {
+        const c = cosineSimilarity(queryVector, v);
+        if (c > cosine) cosine = c;
+      }
+    }
     const baseScore = (queryVector && storedVec)
       ? Config.W_BM25 * bm25Normalized + Config.W_COSINE * cosine!
       : bm25Normalized;

@@ -4,6 +4,143 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.46.0] — 2026-07-17 — Team / multi-user memory (S3) + OTel Gen-AI conformance (S5)
+
+Per-user API keys, shared workspaces, and write attribution — memory a whole team can
+share without losing track of who said what. Live-verified end-to-end: user-key auth,
+membership denial (403), immediate revocation (401), attributed writes from two
+different user keys, and real terminal agents writing attributed facts on fresh +
+mature projects via `ZC_USER_ID`.
+
+### Per-user API keys (`src/team_auth.ts` + PG migration 38)
+- `users_pg` + `api_keys_pg`: each team member gets `zck_…` keys, stored **sha256-hashed**
+  (plaintext returned exactly once at creation), revocable (`revoked_at`; the identity
+  cache clears on revoke so it takes effect immediately), `last_used_at` stamped.
+- The master `ZC_API_KEY` keeps working unchanged and is the ONLY key that can manage
+  users/keys/memberships (control plane). Kill switch: `ZC_TEAM_AUTH=0` → master-only,
+  exact prior behavior. PG down → graceful master-only degradation.
+- Control plane: `POST/GET /api/v1/team/users`, `POST/GET /api/v1/team/keys`,
+  `POST /api/v1/team/keys/revoke`, `POST/GET /api/v1/team/workspaces`,
+  `POST /api/v1/team/workspaces/members`.
+
+### Shared workspaces
+- A workspace is a VIRTUAL project path — `workspace:<slug>` — hashed exactly like a
+  filesystem path, so every existing store path (memory, KB, broadcasts, graph,
+  contradictions) works on it unchanged. Central preHandler gate: user keys must be
+  members (`workspace_members_pg`); the operator always may; creating a workspace with
+  a user key makes the creator its admin.
+
+### Attribution
+- `working_memory.created_by` (PG migration 38 / SQLite migration 39, both write paths):
+  a user key's identity is stamped on every fact it writes (and CANNOT be spoofed — a
+  user key always attributes as itself); operator-key callers may attribute via the
+  `x-zc-user` header. MCP agents pass it with `ZC_USER_ID` (forwarded by the A2A
+  launchers), so terminal-agent writes carry the human they act for.
+- Recall surfaces it in the opt-in citation chip: `〔developer · 2026-07-17 · by:amit〕`.
+  Facts without attribution render byte-identical to before.
+
+### S9 — Chunked embeddings (bench-driven retrieval precision)
+- **Root cause found via LongMemEval**: `EMBED_MAX_CHARS` (4k) meant a 45k-char
+  doc/session embedded only its FIRST 4k chars — the vector channel was blind to
+  anything deeper (temporal-reasoning/preference recall 20–47% while short-content
+  categories scored fine). Long KB content now ALSO stores per-chunk vectors
+  (`<source>#c<N>`, `ZC_EMBED_CHUNK_SIZE` 3500 / `ZC_EMBED_MAX_CHUNKS` 12) and search
+  **max-pools** similarity over a source's head + chunks — both in the independent
+  vector-candidate channel and the cosine rerank. Kill switch `ZC_EMBED_CHUNKS=0`.
+  Verified: a needle at char ~36k of a 49k doc now surfaces for a pure-paraphrase
+  query with zero keyword overlap.
+- **Measured (LongMemEval, same 90-question stratified corpus, before → after chunks):**
+  single-session-user (extraction) hit@5 **21.4% → 46.2%** / MRR 0.145 → 0.333;
+  knowledge-update MRR 0.416 → 0.454; assistant/preference flat; temporal-reasoning
+  flat (its misses are ranking-semantics, not embedding coverage — documented as the
+  next lever); multi-session −1 question at n=15 (noise-range). Honest read: chunking
+  fixes long-content *extraction* blindness; temporal reasoning needs a different fix.
+- **Embed reliability fix (found live)**: the embedder's fixed 5s timeout silently
+  failed EVERY embedding whenever the CPU-only Ollama was concurrently running a chat
+  model (summarizer/entity qwen) — `/health` said OK while the vector index quietly
+  stopped growing. Now `ZC_EMBED_TIMEOUT_MS` (default 20s); compose passes
+  `ZC_ENTITY_EXTRACT` through as a load kill-switch.
+
+### CRITICAL fix — test suite was rotating the REAL machine secret
+- Six security test files delete + regenerate the machine secret around their runs;
+  they operated on the real `~/.claude/zc-ctx/.machine_secret`, so **every full-suite
+  run rotated the machine's root HMAC key** and silently invalidated every
+  previously-signed audit row on the host. This is the root cause of the
+  "historically unverifiable rows" the S6 replay verifier surfaced (rows signed with
+  pre-rotation keys can never verify again — those keys are gone).
+- Fix: `machine_secret.ts` honors `ZC_MACHINE_SECRET_PATH`; vitest global setup points
+  it at a per-run scratch file, exactly like the existing PG test-database isolation.
+  Proven: the real secret file is byte-identical before/after the full suite.
+  (Historical rows stay honestly flagged as unverifiable; rotations stop from now on.)
+
+### S10 — Compliance report export from the audit chain
+- **`GET /api/v1/compliance/report?project=…&days=30&format=json|markdown`**
+  (operator key): full-chain re-verification (S6 multi-key walk over every row),
+  per-agent activity with failure counts, session totals, skill-admission security
+  events (quarantines), and memory-write attribution by user (S3 `created_by`) —
+  an auditor-ready document generated straight from the tamper-evident store.
+- Dashboard → Security → "Compliance report": project + window picker, inline
+  rendering, one-click markdown download. Markdown renderer unit-tested.
+
+### S7 — CI/CD memory (headless hydrate + write-back)
+- **`scripts/ci-memory.mjs`** — zero-dependency CLI for pipeline jobs (GitHub Actions,
+  GitLab CI, cron): `hydrate` prints a compact markdown memory block (focused-recall
+  ranked facts with epistemic badges + attribution chips, recent coordination
+  broadcasts, open-contradiction warnings) to pipe into `claude -p`; `remember` /
+  `broadcast` / `search` write results back so the NEXT run starts warm.
+- Composes with S3: give CI its own user key (`userId: "ci"`) — every write-back is
+  attributed `created_by=ci` and independently revocable. Live-verified with real
+  headless `claude -p` runs on fresh + mature projects: the agent answered
+  project-history questions purely from the hydrated block, and its write-backs
+  landed attributed with TTL.
+
+### S5 — OTel Gen-AI semantic-conventions conformance
+- OTLP audit-span export (v0.38) now emits **Gen-AI semconv (v1.41) `execute_tool`
+  spans**: span name `execute_tool {tool}`, `gen_ai.operation.name`,
+  `gen_ai.provider.name` (derived from the model id: claude→anthropic, gpt→openai,
+  gemini→gcp.gemini, qwen/llama→self_hosted), `gen_ai.tool.name` / `tool.call.id` /
+  `tool.type`, `gen_ai.agent.id`, `gen_ai.conversation.id`, `gen_ai.request.model`,
+  `gen_ai.usage.input_tokens|output_tokens`, and `error.type` on failures — Gen-AI-aware
+  backends (Langfuse, Grafana, Phoenix) light up without custom mapping.
+- SecureContext extensions ride properly namespaced (`securecontext.*`); the
+  tamper-evidence attributes (`audit.row_hash`/`audit.prev_hash`) still make these
+  the only independently-verifiable traces in the stack. 8 conformance unit tests.
+- **`POST /api/v1/otel/export`** (operator): flush pending spans on demand instead of
+  waiting for the enrichment cron. Compose passes `ZC_OTLP_ENDPOINT`/`ZC_OTLP_HEADERS`
+  through (still OFF by default). Live-verified: 28 tool calls from real terminal
+  agents (fresh + mature projects) arrived at a collector as conformant spans.
+
+## [0.45.0] — 2026-07-17 — Session replay from the HMAC audit chain (S6)
+
+Time-travel debugging with cryptographic provenance: scrub any session's tool-call
+timeline step by step, each step badged with its chain verdict. AgentOps-style replay,
+except the timeline itself is tamper-evident — a row modified after recording (or an
+inserted/deleted row) breaks visibly at the exact step. Live-verified with real terminal
+agents on fresh + mature projects, including a real SQL-tamper test (row flipped to
+`✗ tampered`, neighbors stayed `✓ verified`).
+
+### Replay engine (`src/replay.ts`)
+- **`walkChainVerdicts`** — pure per-row verdict walker over a project's full chain
+  (linkage crosses sessions): `verified` / `hash-mismatch` / `link-broken` (resyncs so a
+  single break doesn't cascade) / `unsigned` (pre-chain rows). 8 unit tests incl.
+  cross-agent forgery (row re-signed with another agent's HKDF subkey → flagged).
+- **Multi-key verification**: rows are HMAC'd by the machine secret of the process that
+  RECORDED them — the host's MCP or the API container. The verifier tries every candidate
+  root secret and reports which one verified each row (`key: "container" | "host"`).
+  New `deriveAgentChainKeyFrom(ikm, agentId)` export (explicit-secret HKDF).
+- **`ZC_VERIFY_SECRET_PATH`** — optional read-only mount of the host machine secret into
+  the API container (wired in docker-compose). Accepts base64 (native format), hex, or
+  raw bytes. Secrets never leave the process; endpoints return verdict labels only.
+
+### API + dashboard
+- `GET /api/v1/replay/sessions?project=<16-hex|path>` — recent sessions picker (agents,
+  calls, span, cost, failures).
+- `GET /api/v1/replay/session?project=…&session=…` — one session's steps with per-row
+  verdicts + summary (`chainOk`, verified/unsigned/broken counts, keys tried).
+- **Dashboard → Security → Session replay**: project picker → session list → step
+  timeline with relative timestamps, status, latency, tokens, and chain badges
+  (`✓ verified` / `✗ tampered` / `⛓ gap` / `· unsigned`); green/red chain-integrity banner.
+
 ## [0.44.0] — 2026-07-16 — Temporal supersession, durable task graph, LongMemEval numbers
 
 Three verified rounds. S1 closes the Zep-parity gap (stale facts outranking their own

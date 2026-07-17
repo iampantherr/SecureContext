@@ -37,7 +37,7 @@ const env = process.env;
 
 export const Config = {
   // ── Version ──────────────────────────────────────────────────────────────
-  VERSION: "0.44.0",
+  VERSION: "0.46.0",
 
   // ── Storage paths ────────────────────────────────────────────────────────
   DB_DIR:      join(homedir(), ".claude", "zc-ctx", "sessions"),
@@ -211,8 +211,21 @@ export const Config = {
   OLLAMA_URL:        env["ZC_OLLAMA_URL"]   ?? "http://127.0.0.1:11434/api/embeddings",
   OLLAMA_TAGS_URL:   "http://127.0.0.1:11434/api/tags",
   OLLAMA_MODEL:      env["ZC_OLLAMA_MODEL"] ?? "nomic-embed-text",
-  EMBED_TIMEOUT_MS:  5_000,
+  // S9 (v0.46.0): was a fixed 5s — on CPU-only Ollama a concurrent chat-model
+  // generation (summarizer/entity qwen) makes nomic embeds exceed 5s routinely,
+  // and every embed silently failed ("breaker open") while /health said OK.
+  EMBED_TIMEOUT_MS:  parseInt(env["ZC_EMBED_TIMEOUT_MS"] ?? "20000", 10),
   EMBED_MAX_CHARS:   4_000,
+  // S9 (v0.46.0) — CHUNKED embeddings for long KB content. EMBED_MAX_CHARS means a
+  // 45k-char doc/session used to embed only its FIRST 4k chars — the vector channel
+  // was blind to answers deeper in (measured on LongMemEval: preference/temporal
+  // recall 20-47% while short-content categories scored fine). Content longer than
+  // EMBED_CHUNK_SIZE also stores per-chunk vectors (`<source>#c<N>`, capped at
+  // EMBED_MAX_CHUNKS); search MAX-POOLS similarity over a source's chunks.
+  // Kill switch: ZC_EMBED_CHUNKS=0 (head-only embedding, exact prior behavior).
+  EMBED_CHUNKS:      env["ZC_EMBED_CHUNKS"] !== "0",
+  EMBED_CHUNK_SIZE:  parseInt(env["ZC_EMBED_CHUNK_SIZE"] ?? "3500", 10),
+  EMBED_MAX_CHUNKS:  parseInt(env["ZC_EMBED_MAX_CHUNKS"] ?? "12", 10),
   EMBED_AVAIL_TTL:   60_000, // re-check Ollama availability every 60s
 
   // ── Security ──────────────────────────────────────────────────────────────

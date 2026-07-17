@@ -203,8 +203,8 @@ export class PostgresStore implements Store {
     })();
 
     await this.pool.query(`
-      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin, expires_at, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT(project_hash, key, agent_id) DO UPDATE SET
         value             = EXCLUDED.value,
         importance        = EXCLUDED.importance,
@@ -215,10 +215,11 @@ export class PostgresStore implements Store {
         resolved_at       = EXCLUDED.resolved_at,
         origin            = EXCLUDED.origin,
         expires_at        = EXCLUDED.expires_at,
+        created_by        = COALESCE(EXCLUDED.created_by, working_memory.created_by),
         valid_to          = NULL,
         superseded_by     = NULL,
         retired_reason    = NULL
-    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires]);
+    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires, epi.createdBy ? sanitize(epi.createdBy, 64) : null]);
     // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
     // v0.36.0 — memory facts are now co-reference sources, so a memory WRITE must refresh
@@ -369,7 +370,7 @@ export class PostgresStore implements Store {
     // When agentId="default" explicitly: return only the shared pool
     // (avoids redundant self-join).
     let rows: MemoryFact[];
-    const COLS = `key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at`;
+    const COLS = `key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, access_count, last_retrieved_at, origin, valid_at, created_by`;
     // S1 (v0.44.0) — historical WINDOW queries include RETIRED facts whose
     // event-time falls inside the window. Once auto-supersession retires a stale
     // fact, "what did we decide three weeks ago, before the change?" must still
@@ -701,7 +702,15 @@ export class PostgresStore implements Store {
         const existing = (await this.pool.query<{ content_hash: string | null; model_name: string }>(
           `SELECT content_hash, model_name FROM embeddings WHERE project_hash = $1 AND source = $2`,
           [projectHash, source])).rows[0];
-        if (existing && existing.content_hash === contentHash && existing.model_name === ACTIVE_MODEL) return true;
+        if (existing && existing.content_hash === contentHash && existing.model_name === ACTIVE_MODEL) {
+          // S9 — the HEAD is deduped, but chunks may not exist yet (content indexed
+          // before chunking shipped, or a prior chunk pass died mid-way). Ensure
+          // them; each chunk self-dedups via its own content_hash.
+          if (Config.EMBED_CHUNKS && !source.startsWith("memory:") && content.length > Config.EMBED_CHUNK_SIZE) {
+            void this._storeChunkEmbeddings(projectHash, content, source, contentHash).catch(() => undefined);
+          }
+          return true;
+        }
       } catch { /* content_hash column absent (pre-migration) — fall through */ }
 
       const result = await getEmbeddingQueued(content); // S1 — background lane
@@ -725,6 +734,15 @@ export class PostgresStore implements Store {
           created_at   = EXCLUDED.created_at,
           content_hash = EXCLUDED.content_hash
       `, [projectHash, source, vectorStr, result.modelName, result.dimensions, new Date().toISOString(), contentHash]);
+
+      // S9 (v0.46.0) — chunk embeddings for long content: the head vector only
+      // covers the first EMBED_MAX_CHARS; store additional per-chunk vectors so
+      // search can max-pool similarity over the WHOLE document. Chunk rows are
+      // keyed `<source>#c<N>` (never joined as KB entries; search maps them back
+      // to the parent). Fire-and-forget per chunk via the background lane.
+      if (Config.EMBED_CHUNKS && !source.startsWith("memory:") && content.length > Config.EMBED_CHUNK_SIZE) {
+        void this._storeChunkEmbeddings(projectHash, content, source, contentHash).catch(() => undefined);
+      }
       return true;
     } catch (e) {
       // Embedding failure is non-fatal — falls back to BM25-only search.
@@ -739,6 +757,53 @@ export class PostgresStore implements Store {
     }
   }
   private static _lastEmbedErrLog = 0;
+
+  /**
+   * S9 (v0.46.0) — store per-chunk embeddings for content beyond the head window.
+   * Chunk 0 is the head (already stored under the bare source); chunks start at
+   * offset EMBED_CHUNK_SIZE with a small overlap so boundary sentences aren't
+   * split blind. content_hash carries the PARENT hash + chunk index so re-index
+   * of unchanged content skips cleanly; stale chunks beyond the new count are
+   * deleted (content shrank).
+   */
+  private async _storeChunkEmbeddings(projectHash: string, content: string, source: string, parentHash: string): Promise<void> {
+    const size = Math.max(500, Config.EMBED_CHUNK_SIZE);
+    const overlap = Math.min(300, Math.floor(size / 10));
+    const chunks: string[] = [];
+    for (let off = size - overlap; off < content.length && chunks.length < Math.max(1, Config.EMBED_MAX_CHUNKS); off += size - overlap) {
+      const piece = content.slice(off, off + size);
+      if (piece.trim().length < 100) break; // tail too small to be a useful vector
+      chunks.push(piece);
+    }
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkSource = `${source}#c${i + 1}`;
+      const chunkHash = `${parentHash}:${i + 1}`;
+      try {
+        const existing = (await this.pool.query<{ content_hash: string | null; model_name: string }>(
+          `SELECT content_hash, model_name FROM embeddings WHERE project_hash = $1 AND source = $2`,
+          [projectHash, chunkSource])).rows[0];
+        if (existing && existing.content_hash === chunkHash && existing.model_name === ACTIVE_MODEL) continue;
+        const result = await getEmbeddingQueued(chunks[i]!);
+        if (!result) return; // embedder down — the backfill cron heals later re-writes
+        await this.pool.query(`
+          INSERT INTO embeddings(project_hash, source, vector, model_name, dimensions, created_at, content_hash)
+          VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
+          ON CONFLICT(project_hash, source) DO UPDATE SET
+            vector = EXCLUDED.vector, model_name = EXCLUDED.model_name,
+            dimensions = EXCLUDED.dimensions, created_at = EXCLUDED.created_at,
+            content_hash = EXCLUDED.content_hash
+        `, [projectHash, chunkSource, "[" + result.vector.join(",") + "]", result.modelName, result.dimensions, new Date().toISOString(), chunkHash]);
+      } catch { /* per-chunk best-effort */ }
+    }
+    // Content shrank since last index → drop chunk rows beyond the new count.
+    try {
+      await this.pool.query(
+        `DELETE FROM embeddings WHERE project_hash = $1 AND source LIKE $2
+           AND CAST(substring(source from '#c([0-9]+)$') AS int) > $3`,
+        [projectHash, `${source.replace(/([%_\\])/g, "\\$1")}#c%`, chunks.length],
+      );
+    } catch { /* best-effort */ }
+  }
 
   /**
    * v0.39.0 — SAFE EMBEDDING-MODEL MIGRATION: budgeted re-embed of rows whose vectors were
@@ -839,15 +904,26 @@ export class PostgresStore implements Store {
         qEmbedEarly = await getEmbedding(queryText);
         if (qEmbedEarly) {
           const qVecStr = "[" + qEmbedEarly.vector.join(",") + "]";
+          // S9 (v0.46.0) — chunk rows (`<source>#c<N>`) map back to their PARENT
+          // entry and the parent takes its BEST chunk's distance (max-pooled
+          // similarity), so a match deep inside a long doc surfaces the doc.
           const vecRes = await this.pool.query<CandRow>(`
-            SELECT ke.source, ke.content, ke.created_at, 0 AS rank,
-                   COALESCE(sm.source_type, 'internal') as source_type
-            FROM   embeddings e
-            JOIN   knowledge_entries ke ON ke.project_hash = e.project_hash AND ke.source = e.source
-            LEFT JOIN source_meta sm ON sm.project_hash = ke.project_hash AND sm.source = ke.source
-            WHERE  e.project_hash = $1 AND e.model_name = $2
-              AND  (e.vector <=> $3::vector) <= $5
-            ORDER  BY e.vector <=> $3::vector
+            SELECT q.source, q.content, q.created_at, 0 AS rank, q.source_type
+            FROM (
+              SELECT DISTINCT ON (ke.source)
+                     ke.source, ke.content, ke.created_at,
+                     COALESCE(sm.source_type, 'internal') as source_type,
+                     (e.vector <=> $3::vector) AS dist
+              FROM   embeddings e
+              JOIN   knowledge_entries ke
+                ON   ke.project_hash = e.project_hash
+               AND   ke.source = regexp_replace(e.source, '#c[0-9]+$', '')
+              LEFT JOIN source_meta sm ON sm.project_hash = ke.project_hash AND sm.source = ke.source
+              WHERE  e.project_hash = $1 AND e.model_name = $2
+                AND  (e.vector <=> $3::vector) <= $5
+              ORDER  BY ke.source, e.vector <=> $3::vector
+            ) q
+            ORDER  BY q.dist
             LIMIT  $4
           `, [projectHash, ACTIVE_MODEL, qVecStr, Config.VECTOR_CANDIDATES, 1 - Config.VECTOR_MIN_SIM]);
           for (const r of vecRes.rows) if (!candMap.has(r.source)) candMap.set(r.source, { ...r, synthetic: true });
@@ -894,24 +970,33 @@ export class PostgresStore implements Store {
         const qVec = "[" + qEmbed.vector.join(",") + "]";
         const sources = candRows.map(r => r.source);
 
-        // Get stored embeddings for ALL candidates (keyword + OR-fallback + vector-injected)
+        // Get stored embeddings for ALL candidates (keyword + OR-fallback + vector-injected).
+        // S9 (v0.46.0): includes chunk rows (`<source>#c<N>`) — a candidate's cosine
+        // score is the MAX over its head + chunk vectors (max-pooling), so long docs
+        // aren't penalized for burying the relevant span past the head window.
         const embRes = await this.pool.query<{ source: string; vector: string }>(
           `SELECT source, vector::text FROM embeddings
-           WHERE project_hash = $1 AND source = ANY($2) AND model_name = $3`,
+           WHERE project_hash = $1 AND model_name = $3
+             AND regexp_replace(source, '#c[0-9]+$', '') = ANY($2)`,
           [projectHash, sources, ACTIVE_MODEL]
         );
 
-        const embMap = new Map(embRes.rows.map(r => [r.source, r.vector]));
+        const embsBySource = new Map<string, string[]>();
+        for (const r of embRes.rows) {
+          const parent = r.source.replace(/#c[0-9]+$/, "");
+          const arr = embsBySource.get(parent);
+          if (arr) arr.push(r.vector); else embsBySource.set(parent, [r.vector]);
+        }
         const maxBm25 = Math.max(...candRows.map(r => r.rank), 1);
 
         // Compute cosine for every candidate up front (needed by both fusion modes).
         const withCos = candRows.map(row => {
           let cosScore = 0;
-          const storedVecStr = embMap.get(row.source);
-          if (storedVecStr) {
+          for (const storedVecStr of embsBySource.get(row.source) ?? []) {
             // Parse pgvector "[x1,x2,...,xN]" string back to Float32Array
             const nums = storedVecStr.slice(1, -1).split(",").map(Number);
-            cosScore   = cosineSimilarity(new Float32Array(nums), qEmbed.vector);
+            const c = cosineSimilarity(new Float32Array(nums), qEmbed.vector);
+            if (c > cosScore) cosScore = c;
           }
           return { row, cosScore };
         });
@@ -2207,6 +2292,8 @@ CREATE TABLE IF NOT EXISTS working_memory (
   confidence        REAL,
   resolution_status TEXT CHECK (resolution_status IN ('open','resolved_correct','resolved_incorrect','resolved_partial')),
   resolved_at       TIMESTAMPTZ,
+  -- S3 (v0.46.0) team attribution: which USER (api key owner) wrote the fact
+  created_by        TEXT,
   UNIQUE(project_hash, key, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_wm_project_agent ON working_memory(project_hash, agent_id);

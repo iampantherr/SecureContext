@@ -90,6 +90,11 @@ async function apiCall(
   const url     = `${ZC_API_URL}${path}`;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (ZC_API_KEY) headers["Authorization"] = `Bearer ${ZC_API_KEY}`;
+  // S3 (v0.46.0) — team attribution: when this MCP process runs on behalf of a
+  // named team member (ZC_USER_ID env), writes are attributed to them. User-key
+  // auth overrides this server-side; operator-key callers are trusted to set it.
+  const zcUser = process.env["ZC_USER_ID"];
+  if (zcUser && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(zcUser)) headers["x-zc-user"] = zcUser;
 
   const res = await fetch(url, {
     method,
@@ -1472,13 +1477,16 @@ async function _handleRemoteTool(
         const recallFocus = typeof body["focus"] === "string" && (body["focus"] as string).trim()
           ? `&focus=${encodeURIComponent((body["focus"] as string).slice(0, 2000))}` : "";
         const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}${recallFocus}`);
-        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null; agent_id?: string; created_at?: string; valid_at?: string | null; origin?: string | null }> ?? [];
+        const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null; agent_id?: string; created_at?: string; valid_at?: string | null; origin?: string | null; created_by?: string | null }> ?? [];
         // v0.38.0 — per-claim citations, opt-in ({cite:true}) so default recall stays lean.
+        // S3 (v0.46.0) — the citation chip also names the team member who wrote the
+        // fact (created_by attribution) when present.
         const wantCite = body["cite"] === true;
-        const citeChip = (f: { agent_id?: string; created_at?: string; origin?: string | null }): string => {
+        const citeChip = (f: { agent_id?: string; created_at?: string; origin?: string | null; created_by?: string | null }): string => {
           if (!wantCite) return "";
           const d = f.created_at ? String(f.created_at).slice(0, 10) : "?";
-          return `  〔${f.agent_id ?? "?"} · ${d}${f.origin ? ` · ${f.origin}` : ""}〕`;
+          const by = f.created_by ? ` · by:${f.created_by}` : "";
+          return `  〔${f.agent_id ?? "?"} · ${d}${f.origin ? ` · ${f.origin}` : ""}${by}〕`;
         };
         const skills    = recallRes["skills"] as Array<{ skill_id: string; name: string; description: string }> ?? [];
         const max       = recallRes["max"] as number ?? 50;

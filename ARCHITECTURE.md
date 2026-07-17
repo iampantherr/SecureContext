@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.44.0)
+# SecureContext — Architecture Reference (v0.46.0)
 
 ## Overview
 
@@ -149,6 +149,51 @@ recall (slower, lossier, and more expensive than reading it). Recall is now a bo
   atomic claim (unknown deps block; failed prerequisites keep dependents blocked),
   `plan_id` + `zc_plan_status` for crash-resumable multi-step plans, and unblock
   notifications on `zc_complete_task`. The queue remains PG-only by design.
+
+### Session replay from the HMAC chain (v0.45.0, "S6")
+
+- **`src/replay.ts`** — `walkChainVerdicts` (pure, unit-tested) walks a project's full
+  `tool_calls_pg` chain in id order (prev-hash linkage crosses sessions) and assigns each
+  row `verified` / `hash-mismatch` / `link-broken` (resync after a break so one gap
+  doesn't cascade) / `unsigned` (pre-chain rows). `getSessionReplay` returns one
+  session's steps with those verdicts + a summary; `listReplaySessions` is the picker.
+- **Multi-key model:** a row verifies against the machine secret of the process that
+  RECORDED it (host MCP vs API container). `deriveAgentChainKeyFrom(ikm, agentId)`
+  exposes the HKDF subkey derivation for an explicit root secret; the verifier tries
+  `[container, host]` (host via read-only `ZC_VERIFY_SECRET_PATH` mount, base64/hex/raw
+  accepted) and reports which key vouched per row. Secrets never leave the process.
+- **Surface:** `GET /api/v1/replay/sessions` + `GET /api/v1/replay/session`, and the
+  dashboard Security tab's "Session replay" panel (project → sessions → step timeline
+  with chain badges and a chain-integrity banner).
+
+### Team / multi-user memory (v0.46.0, "S3")
+
+- **Per-user keys** (`src/team_auth.ts`, PG migration 38): `users_pg` + `api_keys_pg`
+  (`zck_…` keys stored sha256-hashed, plaintext returned once, revocable with immediate
+  effect via identity-cache clear). The master `ZC_API_KEY` is unchanged and owns the
+  control plane (`/api/v1/team/*`). Kill switch `ZC_TEAM_AUTH=0`; PG-down degrades to
+  master-only.
+- **Workspaces**: `workspace:<slug>` is a VIRTUAL project path — hashed like any
+  filesystem path, so all store paths work on it unchanged; a central preHandler gate
+  enforces membership (`workspace_members_pg`) for user keys.
+- **Attribution**: `working_memory.created_by` (PG mig 38 / SQLite mig 39). A user key
+  always attributes as itself (unspoofable); operator-key callers attribute via
+  `x-zc-user`, which the MCP client sets from `ZC_USER_ID` (forwarded by the A2A
+  launchers). Recall's opt-in citation chip renders `by:<user>`.
+
+### Chunked embeddings + compliance export (v0.46.0, "S9/S10")
+
+- **S9 chunked embeddings (both stores):** content longer than `ZC_EMBED_CHUNK_SIZE`
+  also stores per-chunk vectors (`<source>#c<N>`, cap `ZC_EMBED_MAX_CHUNKS`); search
+  MAX-POOLS similarity over a source's head + chunks in the vector-candidate channel
+  AND the cosine rerank. Fixes long-doc blindness (only the first `EMBED_MAX_CHARS`
+  were embedded). Kill switch `ZC_EMBED_CHUNKS=0`. Related reliability fix: the embed
+  timeout is now `ZC_EMBED_TIMEOUT_MS` (default 20s; the old fixed 5s silently killed
+  ALL embeds whenever a chat model shared the CPU-only Ollama).
+- **S10 compliance export** (`src/compliance.ts`): `GET /api/v1/compliance/report`
+  (operator) + the dashboard Security-tab panel — full-chain multi-key re-verification,
+  per-agent activity, skill-admission events, and `created_by` attribution rendered as
+  an auditor-ready markdown document.
 
 ---
 

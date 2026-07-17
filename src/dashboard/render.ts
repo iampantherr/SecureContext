@@ -506,6 +506,22 @@ export function renderDashboardHtml(): string {
   .fs-quarantine-table td,.fs-admission-table td,.spotter-runs-table td,.runs-table td,.scans-table td,.savings-table td,.summarizer-table td,.mutations-table td,.broadcasts-table td,.market-pulls-table td,.pull-details-table td{padding:9px 10px;border-bottom:1px solid var(--hairline);color:var(--text);vertical-align:top;}
   .broadcasts-table tbody tr,.mutations-table tbody tr,.runs-table tbody tr{transition:background var(--fast) var(--ease);}
   .broadcasts-table tbody tr:hover,.mutations-table tbody tr:hover,.runs-table tbody tr:hover{background:rgba(47,230,166,.03);}
+
+  /* ── S6 session replay ── */
+  .replay-controls{display:flex;align-items:center;gap:10px;margin:2px 0 14px;}
+  .replay-controls select{background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-family:var(--mono);font-size:.8rem;min-width:280px;}
+  .replay-session-row:hover{background:rgba(90,162,255,.06)!important;}
+  .chain-badge{display:inline-flex;align-items:center;font-family:var(--mono);font-size:.68rem;font-weight:500;padding:2px 8px;border-radius:8px;letter-spacing:.02em;white-space:nowrap;}
+  .chain-ok{background:rgba(47,230,166,.12);color:var(--signal);border:1px solid rgba(47,230,166,.25);}
+  .chain-bad{background:rgba(255,93,108,.14);color:var(--alert);border:1px solid rgba(255,93,108,.3);}
+  .chain-unsigned{background:rgba(139,153,173,.10);color:var(--text-dim);border:1px solid var(--border);}
+  .replay-banner{font-family:var(--mono);font-size:.8rem;padding:10px 14px;border-radius:10px;margin:12px 0;}
+  .replay-banner-ok{background:rgba(47,230,166,.08);color:var(--signal);border:1px solid rgba(47,230,166,.22);}
+  .replay-banner-bad{background:rgba(255,93,108,.10);color:var(--alert);border:1px solid rgba(255,93,108,.3);}
+  .replay-step-broken td{background:rgba(255,93,108,.05);}
+  .replay-status-ok{color:var(--signal);}
+  .replay-status-err{color:var(--alert);}
+  .replay-fail{color:var(--alert);font-family:var(--mono);font-size:.7rem;margin-left:6px;}
   .summarizer-table td.error-msg,.runs-table .mono.small,.scans-table .mono.small,.summarizer-table td.small{font-family:var(--mono);font-size:.78rem;color:var(--text-dim);}
   .summarizer-table td.error-msg{color:#ffb3bb;max-width:480px;word-break:break-word;}
 
@@ -902,6 +918,61 @@ export function renderDashboardHtml(): string {
       Loading admission log…
     </div>
   </details>
+</div>
+
+<!-- S6 (v0.45.0) — Session replay from the HMAC audit chain. Pick a project +
+     session, scrub the tool-call timeline; every step carries its chain verdict
+     (verified / tampered / gap / unsigned). Time-travel debugging where the
+     timeline itself is tamper-evident. -->
+<div class="panel" id="replay-panel">
+  <h2>Session replay <span class="sub">tool-call time-travel · every step cryptographically verified</span></h2>
+  <div class="replay-controls">
+    <label class="small" for="replay-project" style="color:var(--text-dim)">Project</label>
+    <select id="replay-project" name="project"
+            hx-get="/dashboard/replay/sessions"
+            hx-trigger="change"
+            hx-target="#replay-sessions" hx-swap="innerHTML">
+      <option value="">Select a project…</option>
+    </select>
+    <span id="replay-project-loader"
+          hx-get="/dashboard/savings/projects"
+          hx-trigger="load"
+          hx-target="#replay-project" hx-swap="beforeend"></span>
+  </div>
+  <div id="replay-sessions">
+    <p class="empty">Choose a project to list its recorded agent sessions.</p>
+  </div>
+  <div id="replay-detail"></div>
+</div>
+
+<!-- S10 (v0.46.0) — Compliance report export. Full-chain re-verification +
+     agent activity + skill-security events + memory attribution, rendered as
+     an auditor-ready markdown report (viewable inline or downloadable). -->
+<div class="panel" id="compliance-panel">
+  <h2>Compliance report <span class="sub">full-chain verification · agent activity · attribution · exportable</span></h2>
+  <div class="replay-controls">
+    <label class="small" for="compliance-project" style="color:var(--text-dim)">Project</label>
+    <select id="compliance-project" name="project"
+            hx-get="/dashboard/compliance"
+            hx-trigger="change"
+            hx-include="#compliance-days"
+            hx-target="#compliance-out" hx-swap="innerHTML">
+      <option value="">Select a project…</option>
+    </select>
+    <label class="small" for="compliance-days" style="color:var(--text-dim)">Window</label>
+    <select id="compliance-days" name="days">
+      <option value="7">7 days</option>
+      <option value="30" selected>30 days</option>
+      <option value="90">90 days</option>
+    </select>
+    <span id="compliance-project-loader"
+          hx-get="/dashboard/savings/projects"
+          hx-trigger="load"
+          hx-target="#compliance-project" hx-swap="beforeend"></span>
+  </div>
+  <div id="compliance-out">
+    <p class="empty">Choose a project to generate its compliance report.</p>
+  </div>
 </div>
 </section>
 
@@ -3033,4 +3104,105 @@ export async function renderWikiGraphFragment(): Promise<string> {
     document.head.appendChild(s);
   })();
   </script>`;
+}
+
+// ─── S6 (v0.45.0) — Session replay from the HMAC audit chain ────────────────
+// Time-travel view: pick a session, scrub its tool-call timeline, every step
+// badged with its cryptographic chain verdict. Fragments served by
+// /dashboard/replay/sessions and /dashboard/replay/session.
+
+export interface ReplaySessionRow {
+  session_id: string; agents: string[]; calls: number;
+  first_ts: string; last_ts: string; cost_usd: number; failures: number;
+}
+
+export function renderReplaySessionsFragment(projectHash: string, rows: ReplaySessionRow[]): string {
+  if (rows.length === 0) {
+    return `<p class="empty">No recorded sessions for this project yet. Sessions appear here as agents make tool calls (each call is HMAC-chained at write time).</p>`;
+  }
+  const trs = rows.map((r) => {
+    const when = r.last_ts.slice(0, 19).replace("T", " ");
+    const dur = Math.max(0, (new Date(r.last_ts).getTime() - new Date(r.first_ts).getTime()) / 1000);
+    const durTxt = dur >= 3600 ? `${(dur / 3600).toFixed(1)}h` : dur >= 60 ? `${Math.round(dur / 60)}m` : `${Math.round(dur)}s`;
+    const fail = r.failures > 0 ? `<span class="replay-fail">${r.failures} failed</span>` : "";
+    return `
+      <tr class="replay-session-row"
+          hx-get="/dashboard/replay/session?project=${encodeURIComponent(projectHash)}&amp;session=${encodeURIComponent(r.session_id)}"
+          hx-target="#replay-detail" hx-swap="innerHTML" style="cursor:pointer">
+        <td class="mono small">${escapeHtml(r.session_id.slice(0, 24))}${r.session_id.length > 24 ? "…" : ""}</td>
+        <td class="mono small">${escapeHtml(r.agents.join(", "))}</td>
+        <td class="mono small">${r.calls}</td>
+        <td class="mono small">${durTxt}</td>
+        <td class="mono small">$${r.cost_usd.toFixed(4)}</td>
+        <td class="mono small">${escapeHtml(when)} ${fail}</td>
+      </tr>`;
+  }).join("");
+  return `
+    <table class="broadcasts-table replay-sessions-table">
+      <thead><tr><th>Session</th><th>Agents</th><th>Calls</th><th>Span</th><th>Cost</th><th>Last activity</th></tr></thead>
+      <tbody>${trs}</tbody>
+    </table>
+    <p class="small" style="color:var(--text-dim);margin:6px 2px 0">Click a session to replay its tool-call timeline with per-step chain verdicts.</p>`;
+}
+
+export interface ReplayStepView {
+  id: number; call_id: string; agent_id: string; tool_name: string; status: string;
+  latency_ms: number; input_tokens: number; output_tokens: number; cost_usd: number;
+  ts: string; task_id: string | null; skill_id: string | null; error_class: string | null;
+  chain: "verified" | "hash-mismatch" | "link-broken" | "unsigned";
+  key: string | null;
+}
+
+export interface ReplaySummaryView {
+  steps: number; verified: number; unsigned: number; broken: number;
+  chainOk: boolean; keysTried: string[]; projectRows: number;
+}
+
+const CHAIN_BADGE: Record<ReplayStepView["chain"], { label: string; cls: string; title: string }> = {
+  "verified":      { label: "✓ verified",  cls: "chain-ok",       title: "HMAC matches and prev-hash links — this step is exactly as recorded" },
+  "hash-mismatch": { label: "✗ tampered",  cls: "chain-bad",      title: "Row content does not match its HMAC — modified after recording (or recorded by an unknown machine key)" },
+  "link-broken":   { label: "⛓ gap",       cls: "chain-bad",      title: "prev-hash does not link to the preceding row — a row was inserted or deleted here" },
+  "unsigned":      { label: "· unsigned",  cls: "chain-unsigned", title: "Recorded before chain signing was enabled — no verdict possible" },
+};
+
+export function renderReplayStepsFragment(
+  sessionId: string,
+  steps: ReplayStepView[],
+  summary: ReplaySummaryView,
+): string {
+  const banner = summary.chainOk
+    ? `<div class="replay-banner replay-banner-ok">⛓ Chain intact — ${summary.verified}/${summary.steps} steps cryptographically verified${summary.unsigned ? ` · ${summary.unsigned} unsigned (pre-chain)` : ""} <span class="small">(keys tried: ${summary.keysTried.map(escapeHtml).join(", ") || "none"})</span></div>`
+    : `<div class="replay-banner replay-banner-bad">⚠ Chain integrity broken — ${summary.broken} of ${summary.steps} steps failed verification. The audit trail was modified after recording. <span class="small">(keys tried: ${summary.keysTried.map(escapeHtml).join(", ") || "none"})</span></div>`;
+  if (steps.length === 0) {
+    return `${banner}<p class="empty">No tool calls recorded for session <code>${escapeHtml(sessionId)}</code>.</p>`;
+  }
+  const t0 = new Date(steps[0]!.ts).getTime();
+  const trs = steps.map((s, i) => {
+    const b = CHAIN_BADGE[s.chain];
+    const rel = ((new Date(s.ts).getTime() - t0) / 1000);
+    const relTxt = rel >= 60 ? `+${Math.floor(rel / 60)}:${String(Math.round(rel % 60)).padStart(2, "0")}` : `+${rel.toFixed(1)}s`;
+    const statusCls = s.status === "ok" || s.status === "success" ? "replay-status-ok" : "replay-status-err";
+    const extra = [
+      s.task_id ? `task ${escapeHtml(s.task_id)}` : "",
+      s.skill_id ? `skill ${escapeHtml(s.skill_id)}` : "",
+      s.error_class ? `err ${escapeHtml(s.error_class)}` : "",
+    ].filter(Boolean).join(" · ");
+    return `
+      <tr class="replay-step ${s.chain !== "verified" && s.chain !== "unsigned" ? "replay-step-broken" : ""}">
+        <td class="mono small" style="color:var(--text-faint)">${i + 1}</td>
+        <td class="mono small">${relTxt}</td>
+        <td class="mono small">${escapeHtml(s.agent_id)}</td>
+        <td class="mono">${escapeHtml(s.tool_name)}</td>
+        <td class="mono small ${statusCls}">${escapeHtml(s.status)}</td>
+        <td class="mono small">${s.latency_ms}ms</td>
+        <td class="mono small">${s.input_tokens}→${s.output_tokens}</td>
+        <td><span class="chain-badge ${b.cls}" title="${escapeHtml(b.title)}${s.key ? ` (key: ${escapeHtml(s.key)})` : ""}">${b.label}</span></td>
+        <td class="small" style="color:var(--text-dim)">${extra}</td>
+      </tr>`;
+  }).join("");
+  return `${banner}
+    <table class="broadcasts-table replay-steps-table">
+      <thead><tr><th>#</th><th>T</th><th>Agent</th><th>Tool</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Chain</th><th>Context</th></tr></thead>
+      <tbody>${trs}</tbody>
+    </table>`;
 }

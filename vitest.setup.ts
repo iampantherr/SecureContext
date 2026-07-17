@@ -29,6 +29,17 @@ const TEST_DB_NAME = process.env.ZC_TEST_POSTGRES_DB ?? "securecontext_test";
 // This must happen before pg_pool.ts captures process.env.
 process.env.ZC_POSTGRES_DB = TEST_DB_NAME;
 
+// S10 hardening (v0.46.0) — ISOLATE THE MACHINE SECRET. Six security test
+// files delete + regenerate the machine secret around their runs; before this
+// isolation they operated on the REAL ~/.claude/zc-ctx/.machine_secret, so
+// every full-suite run ROTATED the machine's root HMAC key and silently
+// invalidated every previously-signed audit row on the host (measured: the
+// "historical unverifiable rows" in tool_calls_pg trace back to suite runs).
+// machine_secret.ts honors ZC_MACHINE_SECRET_PATH; point it at a scratch file.
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+process.env.ZC_MACHINE_SECRET_PATH = joinPath(tmpdir(), `zc-test-machine-secret-${process.pid}`);
+
 // Best-effort create the test DB. Skip silently if PG isn't configured.
 async function ensureTestDb() {
   if (!process.env.ZC_POSTGRES_PASSWORD && !process.env.ZC_POSTGRES_URL) {
