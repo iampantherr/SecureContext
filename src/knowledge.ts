@@ -40,7 +40,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { Config } from "./config.js";
-import { parseTemporalQuery } from "./temporal_parse.js";
+import { parseTemporalQuery, stripInterrogativeScaffolding, isTemporalQuestion, splitEventClauses } from "./temporal_parse.js";
 import { runMigrations } from "./migrations.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
 import { rebuildBacklinksAsync } from "./indexing/backlinks.js";
@@ -52,6 +52,9 @@ export interface KnowledgeEntry {
   content: string;
   snippet: string;
   rank:    number;
+  /** TR-2 (v0.46.1) — index/event date of the entry, for timeline + staleness
+   *  rendering on temporal questions. ISO string when known. */
+  createdAt?: string;
   vectorScore?: number;
   /** Tier-1 A: the log-damped backlink contribution folded into `rank` (omitted when 0). */
   backlinkScore?: number;
@@ -510,6 +513,9 @@ function _searchDb(
   // match on the cleaned (time-phrase-stripped) text. No time expression = no change.
   const _tw = parseTemporalQuery(queries.join(" "));
   if ((_tw.from || _tw.to) && _tw.cleaned.trim()) queries = [_tw.cleaned];
+  // S11 (v0.46.1) — strip interrogative-temporal scaffolding (PG parity; see
+  // temporal_parse.ts). Declarative queries pass through byte-identical.
+  queries = queries.map((q) => stripInterrogativeScaffolding(q));
 
   type BM25Row  = { source: string; content: string; rank: number };
   type EmbedRow = { source: string; vector: Buffer; model_name: string };
@@ -830,6 +836,7 @@ function _searchDb(
       backlinkScore: blBoost || undefined,
       sourceType:    entrySourceType,
       nonAsciiSource,
+      createdAt:     (row as { created_at?: string }).created_at || undefined,
       _hybrid:       hybridScore,
     });
   }
@@ -847,8 +854,37 @@ function _searchDb(
 export async function searchKnowledge(
   projectPath: string,
   queries: string[],
-  depth: "L0" | "L1" | "L2" = "L2"
+  depth: "L0" | "L1" | "L2" = "L2",
+  _noDecompose: boolean = false
 ): Promise<KnowledgeEntry[]> {
+  // TR-2 (v0.46.1) — compound-temporal decomposition (PG parity; see
+  // store-postgres.search for rationale). Recursion-guarded via _noDecompose.
+  if (!_noDecompose) {
+    const raw = queries.join(" ");
+    if (isTemporalQuestion(raw)) {
+      const clauses = splitEventClauses(stripInterrogativeScaffolding(raw));
+      if (clauses.length >= 2) {
+        const lists = await Promise.all([
+          searchKnowledge(projectPath, queries, depth, true),
+          ...clauses.map((c) => searchKnowledge(projectPath, [c], depth, true)),
+        ]);
+        const K = 60;
+        const scored = new Map<string, { entry: KnowledgeEntry; score: number; bestRank: number }>();
+        for (const list of lists) {
+          list.forEach((entry, i) => {
+            const cur = scored.get(entry.source);
+            const add = 1 / (K + i + 1);
+            if (cur) { cur.score += add; if (i + 1 < cur.bestRank) { cur.bestRank = i + 1; cur.entry = entry; } }
+            else scored.set(entry.source, { entry, score: add, bestRank: i + 1 });
+          });
+        }
+        return [...scored.values()]
+          .sort((a, b) => b.score - a.score)
+          .slice(0, Config.MAX_RESULTS)
+          .map((x) => ({ ...x.entry, rank: x.score }));
+      }
+    }
+  }
   const db          = openDb(projectPath);
   const queryText   = queries.filter((q) => q.trim()).join(" ");
   const embedResult = await getEmbedding(queryText);

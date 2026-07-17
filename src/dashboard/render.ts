@@ -707,6 +707,14 @@ export function renderDashboardHtml(): string {
   .stat-sys .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:baseline;}
   .stat-sys .dot.up{background:var(--signal);box-shadow:0 0 8px var(--signal-glow);}
   .stat-sys .dot.down{background:#f87171;}
+  /* v0.46.1 (D1) — delivery-program burn-down rows */
+  .program-row{padding:10px 4px;border-bottom:1px solid var(--border);}
+  .program-row:last-child{border-bottom:none;}
+  .program-head .sub{margin-left:8px;}
+  .program-phases{margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+  .phase-cell{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:6px;border:1px solid var(--border);font-size:.8rem;color:var(--text-dim);}
+  .phase-cell.closed{color:var(--signal);border-color:var(--signal);}
+  .phase-cell.open{color:#fbbf24;border-color:#fbbf24;box-shadow:0 0 8px rgba(251,191,36,.35);}
   @media (prefers-reduced-motion:reduce){
     *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;}
     .live-dot::after{display:none;}
@@ -844,6 +852,20 @@ export function renderDashboardHtml(): string {
        hx-trigger="load, every 10s[!document.querySelector('#pending input:focus, #pending textarea:focus, #pending select:focus, #pending details[open]')]"
        hx-target="this" hx-swap="innerHTML">
     Loading…
+  </div>
+</div>
+</section>
+
+<section class="tab-content" data-tab="overview">
+<!-- v0.46.1 (D1) — Delivery programs: multi-phase program burn-down. The
+     operator's view of zc_program state — which phase is open, % closed. -->
+<div class="panel">
+  <h2>Delivery programs <span class="sub">zc_program phase burn-down, all projects</span></h2>
+  <div id="programs"
+       hx-get="/dashboard/programs"
+       hx-trigger="load, every 60s"
+       hx-target="this" hx-swap="innerHTML">
+    Loading programs…
   </div>
 </div>
 </section>

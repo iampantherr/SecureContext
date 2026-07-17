@@ -119,20 +119,26 @@ export async function checkOllamaAvailable(): Promise<{ available: boolean; url:
 export async function getEmbedding(text: string): Promise<EmbeddingResult | null> {
   if (!(await isOllamaAvailable())) return null;
 
-  const truncated = text.slice(0, Config.EMBED_MAX_CHARS);
-
-  const attempt = async (): Promise<EmbeddingResult | null | "retryable"> => {
+  const attempt = async (input: string): Promise<EmbeddingResult | null | "retryable" | "too_long"> => {
     const controller = new AbortController();
     const timer      = setTimeout(() => controller.abort(), Config.EMBED_TIMEOUT_MS);
     try {
       const resp = await fetch(resolvedOllamaUrl, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ model: Config.OLLAMA_MODEL, prompt: truncated }),
+        body:    JSON.stringify({ model: Config.OLLAMA_MODEL, prompt: input }),
         signal:  controller.signal,
       });
       clearTimeout(timer);
-      if (!resp.ok) return "retryable";
+      if (!resp.ok) {
+        // v0.46.1 — token-dense content (code, CJK) can exceed the model context
+        // at char counts well below EMBED_MAX_CHARS; Ollama 500s with a specific
+        // message. That's a CONTENT error, not an availability error — it must
+        // not count toward the failure streak, and it's fixable by shortening.
+        let msg = "";
+        try { msg = ((await resp.json()) as { error?: string }).error ?? ""; } catch { /* non-JSON body */ }
+        return /context length/i.test(msg) ? "too_long" : "retryable";
+      }
       const data = (await resp.json()) as { embedding?: number[] };
       if (!Array.isArray(data.embedding) || data.embedding.length === 0) return null;
       const vector = new Float32Array(data.embedding);
@@ -144,12 +150,20 @@ export async function getEmbedding(text: string): Promise<EmbeddingResult | null
     }
   };
 
-  let result = await attempt();
+  let input = text.slice(0, Config.EMBED_MAX_CHARS);
+  let result = await attempt(input);
+  // Halve-and-retry for over-long content (chars are a poor proxy for tokens —
+  // 3.4k chars of ShareGPT dialogue overflowed an 8k-token context in the wild).
+  for (let halvings = 0; result === "too_long" && halvings < 3 && input.length > 400; halvings++) {
+    input = input.slice(0, Math.floor(input.length / 2));
+    result = await attempt(input);
+  }
+  if (result === "too_long") return null; // still too dense at 1/8 length — give up on this content
   if (result === "retryable") {
     // M1 hardening: absorb a single transient blip (saturation, GC pause) with
     // one short-backoff retry instead of instantly poisoning the availability cache.
     await new Promise((r) => setTimeout(r, 300));
-    result = await attempt();
+    result = await attempt(input);
   }
   if (result === "retryable") {
     embedFailureStreak++;
@@ -159,7 +173,7 @@ export async function getEmbedding(text: string): Promise<EmbeddingResult | null
     }
     return null;
   }
-  return result;
+  return result === "too_long" ? null : result;
 }
 
 /**

@@ -128,10 +128,37 @@ function validateProjectPath(projectPath: unknown): string {
   //       because the normalization round-trips on Windows paths; CI Linux
   //       always failed because POSIX paths got butchered.
   // The regex matches drive letter + separator only at string start.
-  if (/^[a-zA-Z]:[\/\\]/.test(projectPath)) {
-    return projectPath.replace(/\//g, "\\");
-  }
-  return projectPath;
+  const normalized = /^[a-zA-Z]:[\/\\]/.test(projectPath)
+    ? projectPath.replace(/\//g, "\\")
+    : projectPath;
+  _registerProjectPath(normalized);
+  return normalized;
+}
+
+// v0.46.1 (D2) — hash → path registration for EVERY project touching the API.
+// Previously only the telemetry handler wrote project_paths_pg, so projects
+// indexed via /api/v1/index (etc.) had no name row — which made the
+// zc_search_global `project` name filter silently match nothing (caught by the
+// 2026-07-17 live E2E: SecureContext itself had no row). Fire-and-forget with an
+// in-memory guard so each (process, path) upserts once.
+const _registeredPaths = new Set<string>();
+function _registerProjectPath(projectPath: string): void {
+  if (projectPath.startsWith("workspace:")) return;
+  if (_registeredPaths.has(projectPath)) return;
+  _registeredPaths.add(projectPath);
+  const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  void (async () => {
+    try {
+      const { withClient } = await import("./pg_pool.js");
+      await withClient(async (c) => {
+        await c.query(
+          `INSERT INTO project_paths_pg (project_hash, project_path) VALUES ($1, $2)
+           ON CONFLICT (project_hash) DO UPDATE SET project_path = EXCLUDED.project_path`,
+          [projectHash, projectPath],
+        );
+      });
+    } catch { /* PG down or table absent — registration is best-effort */ }
+  })();
 }
 
 function checkIpRate(ip: string): void {
@@ -301,10 +328,14 @@ export async function createApiServer(storeOverride?: Store) {
       import("./config.js"),
       checkOllamaAvailable(),
     ]);
+    const { getEmbedLaneHealth } = await import("./embed_watchdog.js");
     return {
       status:          "ok",
       version:         config.Config.VERSION,
       store:           process.env["ZC_STORE"] ?? "sqlite",
+      // D4 (v0.46.1) — embed-lane watchdog verdict (stalled = pending vectors +
+      // quiet lane + Ollama reachable; the silent-degradation class).
+      embedLane:       getEmbedLaneHealth(),
       ollamaAvailable: ollama.available,
       ollamaUrl:       ollama.available ? ollama.url.replace("/api/embeddings", "") : null,
       searchMode:      ollama.available ? "hybrid (BM25 + vector)" : "BM25-only (Ollama unavailable)",
@@ -415,6 +446,12 @@ export async function createApiServer(storeOverride?: Store) {
       clearTimeout(t); ollamaUp = r.ok;
     } catch { ollamaUp = false; }
     const cronOn = process.env.ZC_ENRICHMENT_CRON !== "0";
+    // v0.46.1 (D4) — embed-lane watchdog verdict. "stalled" is the silent-degradation
+    // state (pending vectors + quiet lane + Ollama answering) the operator must see.
+    const { getEmbedLaneHealth } = await import("./embed_watchdog.js");
+    const lane = getEmbedLaneHealth();
+    const laneCls = lane.status === "stalled" ? "down" : lane.status === "unknown" ? "" : "up";
+    const laneTitle = lane.detail ? ` title="${esc(lane.detail)}"` : "";
     const card = (n: number, label: string, tab: string, warnWhenPositive: boolean) =>
       `<div class="stat-card" onclick="document.querySelector('.tab-button[data-tab=${tab}]')?.click()" role="button" tabindex="0">` +
       `<div class="stat-n ${n > 0 ? (warnWhenPositive ? "warn" : "ok") : ""}">${n}</div>` +
@@ -425,6 +462,7 @@ export async function createApiServer(storeOverride?: Store) {
       `<span>store <b>postgres</b></span>` +
       `<span><span class="dot ${ollamaUp ? "up" : "down"}"></span>ollama <b>${ollamaUp ? "up" : "down"}</b></span>` +
       `<span><span class="dot ${cronOn ? "up" : "down"}"></span>enrichment cron <b>${cronOn ? "on" : "off"}</b></span>` +
+      `<span${laneTitle}><span class="dot ${laneCls}"></span>embed lane <b>${esc(lane.status)}</b>${lane.pendingEntries > 0 ? ` (${lane.pendingEntries} pending)` : ""}</span>` +
       `</div>` +
       `<div class="stat-strip">` +
       card(counts.contradictions, "open contradictions", "memory", true) +
@@ -435,6 +473,46 @@ export async function createApiServer(storeOverride?: Store) {
       card(counts.facts, "live memory facts", "memory", false) +
       `</div>`;
     reply.type("text/html; charset=utf-8").send(html);
+  });
+
+  // v0.46.1 (D1) — Delivery programs panel: per-program phase burn-down so the
+  // operator sees multi-week program state at a glance. HTML fragment for HTMX.
+  app.get("/dashboard/programs", async (_request, reply) => {
+    const { withClient } = await import("./pg_pool.js");
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    try {
+      const html = await withClient(async (c) => {
+        const progs = (await c.query<{
+          program_id: string; name: string; status: string; project_hash: string;
+        }>(
+          `SELECT program_id, name, status, project_hash FROM programs_pg
+            ORDER BY (status = 'active') DESC, created_at DESC LIMIT 12`,
+        )).rows;
+        if (!progs.length) return `<p class="empty">No delivery programs defined. Agents create them with zc_program.</p>`;
+        const rows: string[] = [];
+        for (const p of progs) {
+          const phases = (await c.query<{ phase_id: string; title: string; status: string; ordinal: number }>(
+            `SELECT phase_id, title, status, ordinal FROM program_phases_pg
+              WHERE program_id = $1 ORDER BY ordinal`, [p.program_id],
+          )).rows;
+          const closed = phases.filter((x) => x.status === "closed").length;
+          const open = phases.find((x) => x.status === "open");
+          const pct = phases.length ? Math.round((closed / phases.length) * 100) : 0;
+          const cells = phases.map((x) =>
+            `<span class="phase-cell ${x.status}" title="${esc(x.title)} [${esc(x.phase_id)}]">${
+              x.status === "closed" ? "✓" : x.status === "open" ? "●" : "○"}</span>`).join("");
+          rows.push(
+            `<div class="program-row">` +
+            `<div class="program-head"><b>${esc(p.name)}</b> <span class="sub">${esc(p.program_id)} · ${esc(p.status)} · ${closed}/${phases.length} phases (${pct}%)</span></div>` +
+            `<div class="program-phases">${cells}${open ? ` <span class="sub">open: ${esc(open.title)}</span>` : ""}</div>` +
+            `</div>`);
+        }
+        return rows.join("");
+      });
+      reply.type("text/html; charset=utf-8").send(html);
+    } catch (e) {
+      reply.type("text/html; charset=utf-8").send(`<p class="empty">Programs unavailable: ${(e as Error).message.replace(/</g, "&lt;")}</p>`);
+    }
   });
 
   // v0.22.9 — Generic pretool-event telemetry. Records EVERY PreRead hook
@@ -3663,9 +3741,10 @@ export async function createApiServer(storeOverride?: Store) {
 
   app.post("/api/v1/search-global", async (request, reply) => {
     try {
-      const { queries, limit } = request.body as Record<string, unknown>;
+      const { queries, limit, project } = request.body as Record<string, unknown>;
       if (!Array.isArray(queries) || queries.length === 0) throw new ApiError(400, "queries must be a non-empty array");
-      const results = await store.searchGlobal(queries.map(String), limit !== undefined ? Number(limit) : undefined);
+      const results = await store.searchGlobal(queries.map(String), limit !== undefined ? Number(limit) : undefined,
+        typeof project === "string" ? project : undefined);
       return { ok: true, results };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
@@ -3833,6 +3912,34 @@ export async function createApiServer(storeOverride?: Store) {
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
+  // D1 (v0.46.1) — program memory: define/status/open/close phases.
+  app.post("/api/v1/program", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(b.projectPath);
+      const action = String(b.action ?? "status");
+      const prog = await import("./program.js");
+      if (action === "define") {
+        const phases = Array.isArray(b.phases) ? b.phases as Array<{ phase_id: string; title: string }> : [];
+        return { ok: true, ...(await prog.defineProgram(pp, String(b.programId ?? ""), String(b.name ?? b.programId ?? ""), phases)) };
+      }
+      if (action === "open_phase") {
+        await prog.openPhase(String(b.programId ?? ""), String(b.phaseId ?? ""));
+        return { ok: true };
+      }
+      if (action === "close_phase") {
+        const r = await prog.closePhase(pp, String(b.programId ?? ""), String(b.phaseId ?? ""), String(b.evidence ?? ""));
+        // Persist the checkpoint into the KB (summary retention) so it is retrievable forever.
+        await store.index(pp, r.checkpoint, r.source, "internal", "summary");
+        return { ok: true, source: r.source, checkpoint: r.checkpoint };
+      }
+      return { ok: true, status: await prog.programStatus(pp, typeof b.programId === "string" && b.programId ? b.programId : undefined) };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(400).send({ error: (e as Error).message });
     }
   });
 
@@ -4384,6 +4491,17 @@ if (process.argv[1]?.endsWith("api-server.js")) {
             console.log(`Enrichment cron: ENABLED (every ${intervalMin} min)`);
           }
         } catch (e) { console.error("Enrichment cron bootstrap failed:", (e as Error).message); }
+        // D4 (v0.46.1) — embed-lane watchdog (self-health for the delivery tool).
+        // With a Postgres store it also registers the self-heal pass: budgeted
+        // embedding of KB entries whose index-time embed died (orphans that were
+        // previously BM25-only forever).
+        try {
+          const { startEmbedWatchdog } = await import("./embed_watchdog.js");
+          const healable = store as unknown as { embedMissingVectors?: (b: number) => Promise<{ embedded: number; remaining: number; ollamaDown: boolean }> };
+          startEmbedWatchdog(typeof healable.embedMissingVectors === "function"
+            ? (b) => healable.embedMissingVectors!(b)
+            : undefined);
+        } catch (e) { console.error("Embed watchdog bootstrap failed:", (e as Error).message); }
         try {
           const { autoImportSkills, backfillSecurityScans, backfillIntendedRoles } = await import("./skill_auto_import.js");
           const summary = await autoImportSkills();

@@ -1057,6 +1057,47 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 39,
+    description: "D1 (v0.46.1): program memory — programs_pg + program_phases_pg. A PROGRAM is a named multi-phase delivery effort over a project; phases carry ordinal, status, an acceptance-checklist memory key, and an auto-generated close-out checkpoint. Powers zc_program (define/status/close_phase) and the orchestrator handoff test. PG-only by design (multi-agent coordination lives in the shared store; no SQLite twin — same precedent as task_queue_pg).",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS programs_pg (
+          program_id   TEXT PRIMARY KEY,
+          project_hash TEXT NOT NULL,
+          name         TEXT NOT NULL,
+          status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','abandoned')),
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          completed_at TIMESTAMPTZ
+        )
+      `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS program_phases_pg (
+          program_id     TEXT NOT NULL REFERENCES programs_pg(program_id) ON DELETE CASCADE,
+          phase_id       TEXT NOT NULL,
+          ordinal        INTEGER NOT NULL,
+          title          TEXT NOT NULL,
+          status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','open','closed')),
+          acceptance_key TEXT,
+          opened_at      TIMESTAMPTZ,
+          closed_at      TIMESTAMPTZ,
+          checkpoint     TEXT,
+          PRIMARY KEY (program_id, phase_id)
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_pp_project ON programs_pg(project_hash, status)`);
+    },
+  },
+
+  {
+    id: 40,
+    description: "Fix (v0.46.1): relax chk_sss_score. v0.37.0 (Tier-1 #6) widened the admission scan from 8 to 11 checks and made the gating RELATIVE (maxScore - score), but the skill_security_scans_pg CHECK constraint still capped score at 8 — so every CLEAN skill (score 9-11) failed its scan-row INSERT and the boot backfill logged failures forever (measured: 'scanned=9 passed=0 failed=9' every boot). New bound 0..32 leaves headroom for future breadth additions; gating stays relative in code.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE skill_security_scans_pg DROP CONSTRAINT IF EXISTS chk_sss_score`);
+      await client.query(`ALTER TABLE skill_security_scans_pg ADD CONSTRAINT chk_sss_score CHECK (score BETWEEN 0 AND 32)`);
+    },
+  },
+
 ];
 
 /**

@@ -103,7 +103,15 @@ export function classifyRelation(from: string, to: string, matchKind: "full_key"
  * buildKnowledgeGraph scan: full-source-key match + conservative basename match,
  * weight = mention count, self-references excluded.
  */
-export function extractCoReferences(rows: Array<{ source: string; content: string }>): RawEdge[] {
+interface ScanContext {
+  sources: Set<string>;
+  /** Precompiled per-basename regexes — compiled ONCE per extraction, not per row.
+   *  (Pre-v0.46.1 the regex was built inside the row loop: rows × basenames
+   *  compilations, a large constant factor on big corpora.) */
+  basenames: Array<{ source: string; re: RegExp }>;
+}
+
+function _buildScanContext(rows: Array<{ source: string; content: string }>): ScanContext {
   const sources = new Set<string>();
   for (const r of rows) { if (r.source) sources.add(r.source); }
 
@@ -130,41 +138,82 @@ export function extractCoReferences(rows: Array<{ source: string; content: strin
     const key = m ? m[1] : lastSeg;
     if (key && !basenameIndex.has(key)) basenameIndex.set(key, s);
   }
+  const basenames: ScanContext["basenames"] = [];
+  for (const [basename, source] of basenameIndex) {
+    if (basename.length < 4) continue;  // skip noise
+    // Be deliberately conservative: word-boundary or path-suffix match
+    basenames.push({ source, re: new RegExp(`(^|[\\s/\\\\"'\`(])${basename.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}([\\s/\\\\"'\`).,]|$)`) });
+  }
+  return { sources, basenames };
+}
 
-  const edges: RawEdge[] = [];
-  for (const r of rows) {
-    if (!r.content || !r.source) continue;
-    // per-other: total mention count + whether the (stronger) full-key form matched
-    const local = new Map<string, { count: number; full: boolean }>();
+function _scanRow(r: { source: string; content: string }, ctx: ScanContext, edges: RawEdge[]): void {
+  if (!r.content || !r.source) return;
+  // per-other: total mention count + whether the (stronger) full-key form matched
+  const local = new Map<string, { count: number; full: boolean }>();
 
-    // Reference type 1: full source key (e.g. "file:src/utils.ts")
-    for (const other of sources) {
-      if (other === r.source) continue;
-      if (r.content.includes(other)) {
-        const e = local.get(other) ?? { count: 0, full: false };
-        e.count += 1; e.full = true;
-        local.set(other, e);
-      }
-    }
-
-    // Reference type 2: basename (e.g. "utils.ts" or "./utils.js")
-    for (const [basename, otherSource] of basenameIndex) {
-      if (otherSource === r.source) continue;
-      if (basename.length < 4) continue;  // skip noise
-      // Be deliberately conservative: word-boundary or path-suffix match
-      const re = new RegExp(`(^|[\\s/\\\\"'\`(])${basename.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}([\\s/\\\\"'\`).,]|$)`);
-      if (re.test(r.content)) {
-        const e = local.get(otherSource) ?? { count: 0, full: false };
-        e.count += 1;
-        local.set(otherSource, e);
-      }
-    }
-
-    for (const [other, e] of local) {
-      edges.push({ from: r.source, to: other, matchKind: e.full ? "full_key" : "basename", weight: e.count });
+  // Reference type 1: full source key (e.g. "file:src/utils.ts")
+  for (const other of ctx.sources) {
+    if (other === r.source) continue;
+    if (r.content.includes(other)) {
+      const e = local.get(other) ?? { count: 0, full: false };
+      e.count += 1; e.full = true;
+      local.set(other, e);
     }
   }
+
+  // Reference type 2: basename (e.g. "utils.ts" or "./utils.js")
+  for (const { source: otherSource, re } of ctx.basenames) {
+    if (otherSource === r.source) continue;
+    if (re.test(r.content)) {
+      const e = local.get(otherSource) ?? { count: 0, full: false };
+      e.count += 1;
+      local.set(otherSource, e);
+    }
+  }
+
+  for (const [other, e] of local) {
+    edges.push({ from: r.source, to: other, matchKind: e.full ? "full_key" : "basename", weight: e.count });
+  }
+}
+
+export function extractCoReferences(rows: Array<{ source: string; content: string }>): RawEdge[] {
+  const ctx = _buildScanContext(rows);
+  const edges: RawEdge[] = [];
+  for (const r of rows) _scanRow(r, ctx, edges);
   return edges;
+}
+
+/**
+ * v0.46.1 — event-loop-friendly variant for background rebuilds. The scan is
+ * O(rows × sources) over multi-KB strings; on a bulk-ingested corpus (e.g. a
+ * benchmark project with thousands of session entries) the synchronous version
+ * blocked the Node event loop for MINUTES — pool connects timed out, the Ollama
+ * breaker opened, ingest froze, CPU pegged (observed twice on 2026-07-17).
+ * Yielding to the loop every few rows keeps the API responsive while the scan
+ * crawls in the background.
+ */
+export async function extractCoReferencesAsync(
+  rows: Array<{ source: string; content: string }>, yieldEvery = 10,
+): Promise<RawEdge[]> {
+  const ctx = _buildScanContext(rows);
+  const edges: RawEdge[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    _scanRow(rows[i]!, ctx, edges);
+    if ((i + 1) % yieldEvery === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  return edges;
+}
+
+/**
+ * v0.46.1 — automatic-rebuild node cap. Above this, background/debounced graph
+ * rebuilds SKIP (leaving any existing graph in place) instead of burning
+ * O(N²) CPU on a corpus that is almost certainly bulk-ingested data, not a
+ * cross-referencing project. Explicit zc_graph_rebuild is still allowed to run
+ * (it uses the async variant and yields). Override with ZC_GRAPH_MAX_NODES.
+ */
+export function graphMaxNodes(): number {
+  return parseInt(process.env["ZC_GRAPH_MAX_NODES"] ?? "3000", 10) || 3000;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

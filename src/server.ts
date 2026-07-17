@@ -60,6 +60,7 @@ import {
   type ProjectCard,
 } from "./harness.js";
 import { ACTIVE_MODEL, checkOllamaAvailable } from "./embedder.js";
+import { isTemporalQuestion as _isTemporalQ } from "./temporal_parse.js";
 
 const PROJECT_PATH = process.env["ZC_PROJECT_PATH"] || cwd();
 
@@ -263,13 +264,16 @@ const TOOLS: Tool[] = [
     name: "zc_search_global",
     description:
       "Search across ALL projects in your SecureContext knowledge base (cross-project federated search). " +
-      "Use when looking for patterns, decisions, or notes you remember from a different project. " +
+      "Use when looking for patterns, decisions, or notes you remember from a different project — " +
+      "ESPECIALLY as a cross-repo REFERENCE lookup while building one project against another " +
+      "(e.g. project:'SecureContext' + 'how session replay verifies the HMAC chain'). " +
       "Searches the N most recently active projects. External content trust warnings still apply.",
     inputSchema: {
       type: "object",
       properties: {
         queries:      { type: "array", items: { type: "string" }, minItems: 1, description: "Search terms (up to 5)" },
         max_projects: { type: "integer", minimum: 1, maximum: 10, default: 5, description: "Max projects to search (most recently active first)" },
+        project:      { type: "string", description: "Optional: narrow to projects whose name contains this string (or hash prefix) — the cross-repo reference filter" },
       },
       required: ["queries"],
     },
@@ -1223,6 +1227,28 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_program",
+    description:
+      "D1 (v0.46.1) — PROGRAM memory for long-horizon deliveries (multi-phase efforts spanning days/weeks). " +
+      "action:'status' (default) is THE HANDOFF PRIMITIVE: a fresh orchestrator resuming a program calls this " +
+      "FIRST and gets phases, burn-down, the open phase's acceptance checklist, and exactly what to do next. " +
+      "action:'define' registers a program + ordered phases (do this when the operator hands you a phase brief). " +
+      "action:'open_phase' marks a phase started. action:'close_phase' REQUIRES the acceptance evidence table " +
+      "and AUTO-GENERATES the checkpoint document (phase metadata + acceptance + MERGE deliverables + spend), " +
+      "storing it in the KB as checkpoint:<program>:<phase> — no more hand-written checkpoint files.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action:    { type: "string", enum: ["status", "define", "open_phase", "close_phase"], default: "status" },
+        programId: { type: "string", description: "Program slug, e.g. 'enterprise-wave'" },
+        name:      { type: "string", description: "define: human-readable program name" },
+        phases:    { type: "array", items: { type: "object", properties: { phase_id: { type: "string" }, title: { type: "string" } }, required: ["phase_id", "title"] }, description: "define: ordered phases" },
+        phaseId:   { type: "string", description: "open_phase/close_phase: which phase" },
+        evidence:  { type: "string", description: "close_phase: the acceptance evidence table (REQUIRED — a phase without evidence does not close)" },
+      },
+    },
+  },
+  {
     name: "zc_claim_task",
     description:
       "v0.17.0 §8.2 — Atomically claim the oldest queued task for the given role. " +
@@ -1304,6 +1330,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 // filesystem access to PROJECT_PATH). Shared by both dispatch switches below.
 type ContraRow = { key_a: string; key_b: string; similarity: number; reason: string; detail: string };
 /** v0.37.0 — format a globalSearch answer (corpus-level Q&A + DRIFT-lite follow-ups). */
+/**
+ * TR-2 (v0.46.1) — timeline + staleness rendering for temporal questions.
+ * When the query asks about order/intervals/"when", agents need DATES, not just
+ * ranked snippets: this prepends a chronological timeline of the results (with
+ * relative ages) so ordering/interval answers can be read straight off. For ALL
+ * queries, entries older than ZC_STALE_NOTE_DAYS (default 30) get a staleness
+ * note so agents on long-running projects don't act on outdated docs.
+ */
+function _fmtTemporalTimeline(rawQuery: string, results: Array<{ source: string; createdAt?: string }>): string {
+  // Static ESM import — the original lazy `require` was UNDEFINED in the ESM
+  // dist and the catch silently disabled the Timeline forever (caught by the
+  // 2026-07-17 live terminal-agent E2E: staleness notes rendered, timeline never did).
+  if (!_isTemporalQ(rawQuery)) return "";
+  const dated = results
+    .filter((r) => r.createdAt)
+    .map((r) => ({ source: r.source, t: Date.parse(r.createdAt!) }))
+    .filter((r) => Number.isFinite(r.t))
+    .sort((a, b) => a.t - b.t);
+  if (dated.length < 2) return "";
+  const lines = dated.map((r, i) => {
+    const d = new Date(r.t).toISOString().slice(0, 10);
+    const gap = i > 0 ? ` (+${Math.round((r.t - dated[i - 1]!.t) / 86_400_000)}d after previous)` : "";
+    return `${i + 1}. ${d} — ${r.source}${gap}`;
+  });
+  return `## Timeline (results in chronological order — use these dates for order/interval answers)\n${lines.join("\n")}\n\n`;
+}
+
+function _staleNote(createdAt?: string): string {
+  if (!createdAt) return "";
+  const days = Math.floor((Date.now() - Date.parse(createdAt)) / 86_400_000);
+  if (!Number.isFinite(days) || days < 0) return "";
+  const threshold = parseInt(process.env["ZC_STALE_NOTE_DAYS"] ?? "30", 10) || 30;
+  if (days >= threshold) return ` [⏳ ${days}d old — verify still current]`;
+  return "";
+}
+
 function _fmtGlobalAnswer(g: { answer: string; followups: string[]; communities: Array<{ community_id: number; size: number; summary: string }> } | null): string {
   if (!g) {
     return "Global mode unavailable — the project has no knowledge clusters yet (index some content first) or Ollama is unreachable. Falling back tip: run a normal zc_search.";
@@ -1592,14 +1654,38 @@ async function _handleRemoteTool(
           const g = sr["global"] as { answer: string; followups: string[]; communities: Array<{ community_id: number; size: number; summary: string }> } | null;
           return { content: [{ type: "text", text: _fmtGlobalAnswer(g) }] };
         }
-        const results = sr["results"] as Array<{ source: string; snippet: string }> ?? [];
+        const results = sr["results"] as Array<{ source: string; snippet: string; createdAt?: string }> ?? [];
         if (results.length === 0) return { content: [{ type: "text", text: "No results found." }] };
-        const lines = results.map((r, i) => `${i + 1}. [${r.source}]\n   ${r.snippet}`);
-        return { content: [{ type: "text", text: lines.join("\n\n") }] };
+        // TR-2 — timeline block for temporal questions + per-result staleness notes.
+        const timeline = _fmtTemporalTimeline((body["queries"] as string[] ?? []).join(" "), results);
+        const lines = results.map((r, i) => `${i + 1}. [${r.source}]${_staleNote(r.createdAt)}\n   ${r.snippet}`);
+        return { content: [{ type: "text", text: timeline + lines.join("\n\n") }] };
+      }
+
+      case "zc_program": {
+        const pr = await apiCall("POST", "/api/v1/program", {
+          projectPath: PROJECT_PATH,
+          action:    body["action"] ?? "status",
+          programId: body["programId"],
+          name:      body["name"],
+          phases:    body["phases"],
+          phaseId:   body["phaseId"],
+          evidence:  body["evidence"],
+        });
+        const action = String(body["action"] ?? "status");
+        if (action === "status") return { content: [{ type: "text", text: String(pr["status"] ?? "") }] };
+        if (action === "close_phase") {
+          return { content: [{ type: "text", text:
+            `Phase closed. Checkpoint stored as [${pr["source"]}] (retrievable via zc_search).
+
+` +
+            String(pr["checkpoint"] ?? "") }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(pr) }] };
       }
 
       case "zc_search_global": {
-        const gsr = await apiCall("POST", "/api/v1/search-global", { queries: body["queries"] });
+        const gsr = await apiCall("POST", "/api/v1/search-global", { queries: body["queries"], project: body["project"] });
         const results = gsr["results"] as Array<{ source: string; snippet: string; projectLabel: string }> ?? [];
         if (results.length === 0) return { content: [{ type: "text", text: "No global results found." }] };
         const lines = results.map((r, i) => `${i + 1}. [${r.projectLabel}] ${r.source}\n   ${r.snippet}`);
@@ -1726,6 +1812,8 @@ async function dispatchToolCall(
     // v0.31.0 Tier-1 — graph + contradictions are store-backed (PG in prod), so they
     // MUST proxy to the API; otherwise they'd run in-process against empty local SQLite.
     "zc_graph_rebuild", "zc_graph_backlinks", "zc_memory_contradictions",
+    // D1 — program memory is PG-backed; must proxy to the API.
+    "zc_program",
   ]);
 
   if (ZC_API_URL && REMOTE_TOOLS.has(name)) {
@@ -1805,18 +1893,26 @@ async function dispatchToolCall(
           ? `⚠️  Ollama unavailable — results ranked by BM25 keyword score only (no semantic reranking).\n` +
             `    Run 'ollama serve' locally or start the Docker stack for better search quality.\n\n`
           : "";
+        // TR-2 — timeline block for temporal questions + per-result staleness notes.
+        const timeline = _fmtTemporalTimeline((queries ?? []).join(" "), results);
         const formatted = results.map((r, i) => {
           const vecInfo     = r.vectorScore !== undefined ? ` | cosine: ${r.vectorScore.toFixed(3)}` : " | BM25 only";
           const trustBadge  = r.sourceType === "external" ? " [EXTERNAL]" : "";
           const asciiBadge  = r.nonAsciiSource ? " [⚠️ NON-ASCII SOURCE]" : "";
-          return `### Result ${i + 1}: ${r.source}${trustBadge}${asciiBadge}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
+          return `### Result ${i + 1}: ${r.source}${trustBadge}${asciiBadge}${_staleNote(r.createdAt)}\nScore: ${r.rank.toFixed(4)}${vecInfo}\n\n${r.snippet}`;
         }).join("\n\n---\n\n");
-        return { content: [{ type: "text", text: ollamaBanner + formatted }] };
+        return { content: [{ type: "text", text: ollamaBanner + timeline + formatted }] };
       }
 
       case "zc_search_global": {
-        const { queries, max_projects } = args as { queries: string[]; max_projects?: number };
-        const results = await searchAllProjects(queries, max_projects ?? 5);
+        const { queries, max_projects, project } = args as { queries: string[]; max_projects?: number; project?: string };
+        let results = await searchAllProjects(queries, max_projects ?? 5);
+        // D2 (v0.46.1) — cross-repo project narrowing (in-process parity).
+        const pf = (project ?? "").trim().toLowerCase();
+        if (pf) {
+          results = results.filter((r) =>
+            r.projectLabel?.toLowerCase().includes(pf) || r.projectHash?.toLowerCase().startsWith(pf));
+        }
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No results found across any projects." }] };
         }

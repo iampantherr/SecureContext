@@ -77,6 +77,9 @@ export interface SearchOptions {
   limit?:   number;
   agentId?: string;
   depth?:   "L0" | "L1" | "L2";
+  /** TR-2 internal: set on sub-searches spawned by temporal-question
+   *  decomposition so they don't decompose recursively. */
+  _noDecompose?: boolean;
 }
 
 export interface ExplainEntry {
@@ -155,7 +158,10 @@ export interface Store {
   // ── Knowledge Base ──────────────────────────────────────────────────────────
   index(projectPath: string, content: string, source: string, sourceType?: "internal" | "external", retentionTier?: RetentionTier): Promise<void>;
   search(projectPath: string, queries: string[], opts?: SearchOptions): Promise<KnowledgeEntry[]>;
-  searchGlobal(queries: string[], limit?: number): Promise<CrossProjectEntry[]>;
+  /** D2 (v0.46.1): projectFilter narrows to projects whose label contains the
+   *  string (case-insensitive) or whose hash starts with it — the cross-repo
+   *  reference lookup ("how did SecureContext implement replay?"). */
+  searchGlobal(queries: string[], limit?: number, projectFilter?: string): Promise<CrossProjectEntry[]>;
   getKbStats(projectPath: string): Promise<KbStats>;
   explain(projectPath: string, query: string, depth?: string): Promise<ExplainResult>;
 

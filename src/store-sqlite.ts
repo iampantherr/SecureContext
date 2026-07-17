@@ -195,8 +195,13 @@ export class SqliteStore implements Store {
     return searchKnowledge(projectPath, queries, (opts.depth ?? "L2") as "L0" | "L1" | "L2");
   }
 
-  async searchGlobal(queries: string[], limit = 10): Promise<CrossProjectEntry[]> {
-    return searchAllProjects(queries, limit);
+  async searchGlobal(queries: string[], limit = 10, projectFilter?: string): Promise<CrossProjectEntry[]> {
+    const results = await searchAllProjects(queries, limit);
+    // D2 (v0.46.1) — cross-repo project narrowing (PG parity, post-filter).
+    const pf = (projectFilter ?? "").trim().toLowerCase();
+    if (!pf) return results;
+    return results.filter((r) =>
+      r.projectLabel?.toLowerCase().includes(pf) || r.projectHash?.toLowerCase().startsWith(pf));
   }
 
   async getKbStats(projectPath: string): Promise<KbStats> {

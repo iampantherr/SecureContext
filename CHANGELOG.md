@@ -4,6 +4,128 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.46.1] — 2026-07-17 — Temporal-reasoning ranking round (S11) + delivery-tool kit
+
+### S11 — Interrogative-scaffolding stripper (the TR "ranking-semantics" lever)
+- **Miss analysis first** (new `--types` filter + per-question detail dump in the
+  bench): temporal-reasoning questions are event descriptions wrapped in
+  interrogative-temporal scaffolding — "How many weeks ago did I attend the friends
+  and family sale at Nordstrom?" — and the scaffolding dominated the QUERY EMBEDDING,
+  so the vector channel matched question-form instead of the event. (The temporal
+  parser was ruled out first: it sets no windows on these shapes.)
+- **Fix**: `stripInterrogativeScaffolding` (temporal_parse.ts) removes whole
+  scaffolding PHRASES ("how many days/weeks…", "have passed since", "…ago",
+  "which event happened first", order-question forms) before BM25 + embedding, in
+  BOTH stores. Declarative queries pass through byte-identical; <3-word results
+  revert to the original; kill switch `ZC_QUERY_DESCAFFOLD=0`. 7 unit tests.
+- **Measured (same corpus, same day, before → after):** temporal-reasoning
+  hit@5 **38.5% → 53.3%**, hit@10 **53.8% → 60%**, MRR **0.171 → 0.335**; the two
+  archetypal scaffolding misses flipped to rank 1. Remaining misses are multi-event
+  ordering questions that need date arithmetic over multiple gold sessions — a
+  reasoning feature, not a ranking one; recorded as future work, not claimed.
+
+### TR-2 — Compound-question decomposition + timeline/staleness surfacing
+- **Multi-event decomposition (both stores):** compound temporal questions ("how many
+  days passed between the day I started X and the day I Y", 3-event ordering lists)
+  embed as a blend that matches none of the events. Search now splits them into event
+  clauses (`splitEventClauses`, interrogative-residue filtered), retrieves per clause
+  PLUS the full query, and RRF-fuses the lists. Temporal-scoped (only fires on
+  `isTemporalQuestion` shapes), recursion-guarded, `ZC_QUERY_DECOMPOSE=0` kill switch.
+- **Timeline + staleness for agents:** temporal questions now get a chronological
+  "## Timeline" block above search results (ISO dates + day-gaps between results — 
+  ordering/interval answers read straight off it), and EVERY result older than
+  `ZC_STALE_NOTE_DAYS` (30) carries `[⏳ Nd old — verify still current]` so agents on
+  long-running projects stop acting on stale docs. `createdAt` now flows through
+  search results in both stores. 13 unit tests across the temporal helpers.
+- **Measured (LongMemEval temporal-reasoning):** recall@5 53.3→57.1, recall@10
+  60→64.3, MRR 0.335→**0.404** — on top of the stripper, cumulative vs v0.46.0:
+  recall@5 33.3→57.1, MRR 0.157→0.404 (2.6×). The compound between-day questions
+  flipped from miss to rank-1; event-ordering flipped to a hit.
+
+### D1 — Program memory (long-horizon delivery state)
+- **`zc_program`** (PG migration 39: `programs_pg` + `program_phases_pg`): named
+  multi-phase programs over a project. `status` is THE HANDOFF PRIMITIVE — phases,
+  burn-down, the open phase's acceptance checklist, and an explicit NEXT instruction
+  in one call. `close_phase` REQUIRES the acceptance evidence table and
+  AUTO-GENERATES the checkpoint document (metadata + acceptance + MERGE deliverables
+  + spend in the phase window), stored in the KB as `checkpoint:<program>:<phase>`
+  (summary retention — retrievable forever). Evidence-less closes are rejected.
+  Replaces the hand-written CHECKPOINT_*.md ritual (18 such files in one real repo).
+
+### D2 — Cross-repo reference retrieval
+- `zc_search_global` gains a `project` filter (name substring / hash prefix) in both
+  stores — the "how did SecureContext implement replay?" lookup while building
+  another project against it.
+
+### D3 — Delivery discipline as default
+- `augment-role-prompt.mjs` (A2A repo): orchestrators get a DELIVERY DISCIPLINE
+  mandate (phase briefs → run acceptance-gate; UI ASSIGNs must carry web-e2e-verify
+  and their MERGEs must include its evidence block); workers get the UI-evidence
+  requirement. The skills stop being optional.
+
+### D4 — Embed-lane watchdog (harness self-health)
+- `src/embed_watchdog.ts`: every 5 min, flags **stalled** when vectors are pending,
+  none have been written for `ZC_EMBED_STALL_MIN` (10) minutes, AND Ollama answers —
+  the exact silent-degradation class measured on 2026-07-17 (embeds dead for hours
+  while `/health` said ok). Verdict surfaced as `embedLane` in `/health`.
+  `ZC_EMBED_WATCHDOG=0` disables.
+
+### Fixes caught by the live terminal-agent E2E (2026-07-17)
+- **Timeline block never rendered:** the formatter lazily `require()`d
+  temporal_parse — but the dist is ESM, `require` is undefined, and the catch
+  silently disabled the feature. Static import; staleness notes (no require)
+  had worked all along, which is what exposed the asymmetry.
+- **`zc_search_global` 500 on Postgres since v0.31:** `CASE WHEN $3 > 0` made PG
+  infer the backlink-weight param as *integer*, so `W_BACKLINK=0.08` failed with
+  "invalid input syntax for type integer" on every call. Explicit `::float8`
+  casts. (Project-level search boosts client-side — only the global path was hit.)
+- **Project-name filter had nothing to match:** only the telemetry handler wrote
+  `project_paths_pg`, so projects indexed via `/api/v1/index` had no name row and
+  the D2 filter matched nothing. `validateProjectPath` now fire-and-forget
+  registers every hash→path it sees; `searchGlobal` filters/labels via that map
+  (labels render as the project folder name instead of a bare hash).
+- **Self-heal head-of-line blocking:** one EMPTY file (`__init__.py` — Ollama
+  returns a zero-length vector for empty content) sat first in the missing-vector
+  list and aborted every heal pass, pinning 699 entries "pending" forever. Empty
+  content is now excluded from both the pending count and the drain, and the heal
+  skips individual failures — only 3 CONSECUTIVE failures (lane down) abort a pass.
+- **Token-dense content overflowed the embed context:** char-based truncation is a
+  poor proxy for tokens — ~3.4k chars of dialogue/code 500'd Ollama with "input
+  length exceeds the context length", and three such docs in a row re-blocked the
+  drain. `getEmbedding` now detects that specific error as a CONTENT error (never
+  counted toward the availability streak) and halves the input up to 3× before
+  giving up on that document.
+
+### Fix — event-loop starvation during backlink rebuilds on bulk-ingested corpora
+- Root-caused the "sc-api pegged at 100% CPU, ingest frozen, pool timeouts,
+  Ollama breaker open" wedge (hit twice on 2026-07-17 during benchmark ingest):
+  the debounced co-reference scan is O(rows × sources) over multi-KB strings and
+  ran SYNCHRONOUSLY — thousands of bulk-ingested session entries blocked the Node
+  event loop for minutes, so every connection attempt inside the process timed out.
+  Three-part fix: (1) basename regexes are compiled once per extraction instead of
+  per row (large constant factor); (2) background rebuilds use a new
+  `extractCoReferencesAsync` that yields to the event loop every few rows;
+  (3) automatic rebuilds skip corpora above `ZC_GRAPH_MAX_NODES` (3000) — explicit
+  `zc_graph_rebuild` still runs, yielding. PG store wired; SQLite shares the
+  precompiled-regex win.
+
+### Fix — chk_sss_score constraint vs 11-check scans (PG migration 40)
+- v0.37.0 widened the admission scan from 8 to 11 checks with RELATIVE gating, but
+  the scan-row CHECK constraint still capped score at 8 — every CLEAN skill's scan
+  INSERT failed and the boot backfill logged failures forever. Bound relaxed to 0..32.
+
+### Delivery-tool kit (SecureContext as the tool that ships enterprise projects)
+- **`web-e2e-verify` skill**: packaged the standing "verify in a real browser with
+  screenshot evidence per acceptance criterion" discipline as a reusable skill
+  (Playwright-driven, evidence block for MERGE summaries, negative-state coverage).
+- **`acceptance-gate` skill**: phase-level definition-of-done — falsifiable
+  checklist written BEFORE work starts (stored in shared memory), evidence-table
+  close-out where any FAIL/UNVERIFIED keeps the phase open.
+- **A2A dispatcher retire damper** (A2A_dispatcher repo): a worker younger than
+  `A2A_RETIRE_MIN_AGE_MIN` (default 10) is not retired on the first request — the
+  coordinator is asked to re-send to confirm. Stops the RETIRE/LAUNCH window
+  thrashing observed in long multi-department runs.
+
 ## [0.46.0] — 2026-07-17 — Team / multi-user memory (S3) + OTel Gen-AI conformance (S5)
 
 Per-user API keys, shared workspaces, and write attribution — memory a whole team can

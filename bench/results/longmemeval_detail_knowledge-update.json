@@ -1,0 +1,321 @@
+{
+  "scoredAt": "2026-07-17T15:43:33.368Z",
+  "byType": {
+    "knowledge-update": {
+      "n": 14,
+      "hit5": 11,
+      "hit10": 12,
+      "mrr": 8.2
+    }
+  },
+  "detail": [
+    {
+      "id": "6aeb4375",
+      "type": "knowledge-update",
+      "question": "How many Korean restaurants have I tried in my city?",
+      "gold": [
+        "session:answer_3f9693b7_1",
+        "session:answer_3f9693b7_2"
+      ],
+      "rank": 3,
+      "top10": [
+        "session:ultrachat_205259",
+        "session:answer_02e66dec_1",
+        "session:answer_3f9693b7_2",
+        "session:ultrachat_441391",
+        "session:answer_3f9693b7_1",
+        "session:d3853740",
+        "session:603a8580_1",
+        "session:ultrachat_206990",
+        "session:bf5bfb7b_2",
+        "session:ebb60cb8_2"
+      ]
+    },
+    {
+      "id": "830ce83f",
+      "type": "knowledge-update",
+      "question": "Where did Rachel move to after her recent relocation?",
+      "gold": [
+        "session:answer_0b1a0942_1",
+        "session:answer_0b1a0942_2"
+      ],
+      "rank": 5,
+      "top10": [
+        "session:d87e86f6_1",
+        "session:27d9e492_2",
+        "session:13c55c69_1",
+        "session:71dc2037_2",
+        "session:answer_0b1a0942_1",
+        "session:3581c390_3",
+        "session:d39b7977_2",
+        "session:a8e24e22",
+        "session:c37d1365_1",
+        "session:answer_fea2e4d3"
+      ]
+    },
+    {
+      "id": "852ce960",
+      "type": "knowledge-update",
+      "question": "What was the amount I was pre-approved for when I got my mortgage from Wells Fargo?",
+      "gold": [
+        "session:answer_3a6f1e82_1",
+        "session:answer_3a6f1e82_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_3a6f1e82_1",
+        "session:32cf110f_1",
+        "session:d39b7977_2",
+        "session:answer_3a6f1e82_2",
+        "session:6519afa8",
+        "session:answer_e2f4f947_2",
+        "session:32a67b35",
+        "session:e4b80d3f",
+        "session:ultrachat_137778",
+        "session:689b46e2_4"
+      ]
+    },
+    {
+      "id": "945e3d21",
+      "type": "knowledge-update",
+      "question": "How often do I attend yoga classes to help with my anxiety?",
+      "gold": [
+        "session:answer_6a4f8626_1",
+        "session:answer_6a4f8626_2"
+      ],
+      "rank": null,
+      "top10": [
+        "session:c58fa3aa",
+        "session:ad8d9f0f",
+        "session:87472dfd_3",
+        "session:ae1343ee",
+        "session:ultrachat_20860",
+        "session:51d338f6",
+        "session:8dd540f8_1",
+        "session:a6074da9_1",
+        "session:cfb76389_2",
+        "session:6d4b7a55_4"
+      ]
+    },
+    {
+      "id": "d7c942c3",
+      "type": "knowledge-update",
+      "question": "Is my mom using the same grocery list method as me?",
+      "gold": [
+        "session:answer_eecb10d9_1",
+        "session:answer_eecb10d9_2"
+      ],
+      "rank": 2,
+      "top10": [
+        "session:84503ce4_1",
+        "session:answer_eecb10d9_2",
+        "session:a450dfaf",
+        "session:990f3ef9_7",
+        "session:aae4411b_2",
+        "session:answer_eecb10d9_1",
+        "session:616fdd27",
+        "session:55e0c6db_2",
+        "session:0bad887e_1",
+        "session:1d8f4d6a"
+      ]
+    },
+    {
+      "id": "71315a70",
+      "type": "knowledge-update",
+      "question": "How many hours have I spent on my abstract ocean sculpture?",
+      "gold": [
+        "session:answer_c44b9df4_1",
+        "session:answer_c44b9df4_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_c44b9df4_2",
+        "session:answer_c44b9df4_1",
+        "session:8e895867",
+        "session:29dff1d0_5",
+        "session:sharegpt_NCNptCi_0",
+        "session:9bec5593_1",
+        "session:de93e859",
+        "session:8ecdf40e",
+        "session:2f310ba0",
+        "session:sharegpt_tmFunkX_20"
+      ]
+    },
+    {
+      "id": "89941a93",
+      "type": "knowledge-update",
+      "question": "How many bikes do I currently own?",
+      "gold": [
+        "session:answer_e1403127_1",
+        "session:answer_e1403127_2"
+      ],
+      "rank": 2,
+      "top10": [
+        "session:1ef63c66",
+        "session:answer_e1403127_1",
+        "session:answer_2880eb6c_3",
+        "session:4fe27c66_1",
+        "session:232dba46_1",
+        "session:01f1e64a_5",
+        "session:2e21c7d5",
+        "session:cc021f81_2",
+        "session:65bc93cf_7",
+        "session:sharegpt_bn0XI2B_0"
+      ]
+    },
+    {
+      "id": "ce6d2d27",
+      "type": "knowledge-update",
+      "question": "What day of the week do I take a cocktail-making class?",
+      "gold": [
+        "session:answer_73540165_1",
+        "session:answer_73540165_2"
+      ],
+      "rank": null,
+      "top10": [
+        "session:23450b93_1",
+        "session:8064b6ca",
+        "session:sharegpt_AOlktMk_0",
+        "session:6c0ba52d_2",
+        "session:sharegpt_9iUZNsL_0",
+        "session:a803f50b_2",
+        "session:a7189b75",
+        "session:1e3c8adb",
+        "session:0c891c0b_1",
+        "session:fed9e0eb_1"
+      ]
+    },
+    {
+      "id": "9ea5eabc",
+      "type": "knowledge-update",
+      "question": "Where did I go on my most recent family trip?",
+      "gold": [
+        "session:answer_02e66dec_1",
+        "session:answer_02e66dec_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_02e66dec_2",
+        "session:answer_02e66dec_1",
+        "session:f10be626",
+        "session:8fa64936_1",
+        "session:22f9f163_1",
+        "session:93bed3d8_1",
+        "session:3704970d",
+        "session:805e571c_1",
+        "session:bc5a8417",
+        "session:9bbd38a6"
+      ]
+    },
+    {
+      "id": "07741c44",
+      "type": "knowledge-update",
+      "question": "Where do I initially keep my old sneakers?",
+      "gold": [
+        "session:answer_7e9ad7b4_1",
+        "session:answer_7e9ad7b4_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_7e9ad7b4_2",
+        "session:dcb68250_4",
+        "session:21a51dee_1",
+        "session:answer_7e9ad7b4_1",
+        "session:60db2dd6_1",
+        "session:e42e7876_5",
+        "session:aeab3296",
+        "session:5534efcb_2",
+        "session:d1d3fd12_1",
+        "session:1dfef591_2"
+      ]
+    },
+    {
+      "id": "a1eacc2a",
+      "type": "knowledge-update",
+      "question": "How many short stories have I written since I started writing regularly?",
+      "gold": [
+        "session:answer_0eb23770_1",
+        "session:answer_0eb23770_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_0eb23770_1",
+        "session:521255f7_2",
+        "session:5cfdb3bc",
+        "session:6ce1ea1b",
+        "session:be324b2e_1",
+        "session:ffe473f3_1",
+        "session:answer_0eb23770_2",
+        "session:d6b17438_1",
+        "session:a50b0d73_1",
+        "session:495cf518_1"
+      ]
+    },
+    {
+      "id": "184da446",
+      "type": "knowledge-update",
+      "question": "How many pages of 'A Short History of Nearly Everything' have I read so far?",
+      "gold": [
+        "session:answer_e2f4f947_1",
+        "session:answer_e2f4f947_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_e2f4f947_2",
+        "session:answer_e2f4f947_1",
+        "session:41743aae_1",
+        "session:da1797c4_1",
+        "session:aa71db11_1",
+        "session:sharegpt_igR6Bmm_0",
+        "session:48a72204_3",
+        "session:fbfda981",
+        "session:a7b1b27c",
+        "session:7daa121d_2"
+      ]
+    },
+    {
+      "id": "031748ae",
+      "type": "knowledge-update",
+      "question": "How many engineers do I lead when I just started my new role as Senior Software Engineer? How many engineers do I lead now?",
+      "gold": [
+        "session:answer_8748f791_1",
+        "session:answer_8748f791_2"
+      ],
+      "rank": 6,
+      "top10": [
+        "session:e255d6fc_2",
+        "session:4fe91719_2",
+        "session:1ecc86e7",
+        "session:sharegpt_WZzri9J_0",
+        "session:2e4430d8_2",
+        "session:answer_8748f791_1",
+        "session:93c5e61f",
+        "session:08256f84_2",
+        "session:114c1fb7_4",
+        "session:109e07e8_1"
+      ]
+    },
+    {
+      "id": "4d6b87c8",
+      "type": "knowledge-update",
+      "question": "How many titles are currently on my to-watch list?",
+      "gold": [
+        "session:answer_766ab8da_1",
+        "session:answer_766ab8da_2"
+      ],
+      "rank": 2,
+      "top10": [
+        "session:dbdbca48_2",
+        "session:answer_766ab8da_2",
+        "session:answer_86c505e7_2",
+        "session:f7a61595_4",
+        "session:9fa1d135_1",
+        "session:3c3fee41",
+        "session:128082f8_1",
+        "session:8c81ba07",
+        "session:26d9aaaf",
+        "session:0908a2e6"
+      ]
+    }
+  ]
+}

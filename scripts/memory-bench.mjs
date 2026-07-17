@@ -265,9 +265,13 @@ async function runLongMemEval(file, limit) {
   // head-slice covers exactly one type (measured: first 50 = all
   // single-session-user). Interpret --limit as PER-TYPE: take the first N of
   // each type in dataset order (deterministic, no RNG).
+  // S9b — optional type filter (--types a,b) so a targeted round (e.g.
+  // temporal-reasoning) re-scores in minutes against the already-ingested corpus.
+  const typesFilter = (val("--types") ?? "").split(",").map((t) => t.trim()).filter(Boolean);
   const perType = new Map();
   for (const q of all) {
     const t = q.question_type ?? "unknown";
+    if (typesFilter.length > 0 && !typesFilter.includes(t)) continue;
     if (!perType.has(t)) perType.set(t, []);
     if (perType.get(t).length < (limit || 15)) perType.get(t).push(q);
   }
@@ -344,6 +348,7 @@ async function runLongMemEval(file, limit) {
   // Score retrieval proxy per question type. Per-question resilience: a stalled
   // search skips the question (counted) instead of killing the run.
   const byType = {};
+  const detail = [];
   let scoreFailures = 0;
   for (const q of questions) {
     const goldSet = new Set((q.answer_session_ids ?? []).map((s) => `session:${s}`));
@@ -361,6 +366,9 @@ async function runLongMemEval(file, limit) {
     const rank = sources.findIndex((s) => goldSet.has(s)) + 1; // 0 = miss
     const t = (byType[q.question_type ?? "unknown"] ??= { n: 0, hit5: 0, hit10: 0, mrr: 0 });
     t.n++; if (rank && rank <= 5) t.hit5++; if (rank && rank <= 10) t.hit10++; if (rank) t.mrr += 1 / rank;
+    // S9b — per-question detail for miss analysis.
+    detail.push({ id: q.question_id, type: q.question_type, question: q.question,
+      gold: [...goldSet], rank: rank || null, top10: sources.slice(0, 10) });
     await new Promise((r2) => setTimeout(r2, 400));
     process.stdout.write(".");
   }
@@ -370,8 +378,15 @@ async function runLongMemEval(file, limit) {
     [k, { n: t.n, "hit@5%": pct(t.hit5, t.n), "hit@10%": pct(t.hit10, t.n), mrr: +(t.mrr / (t.n || 1)).toFixed(3) }])));
   const dir = new URL("../bench/results/", import.meta.url);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(new URL(`longmemeval.json`, dir), JSON.stringify({ scoredAt: new Date().toISOString(), byType }, null, 2));
-  console.log("saved bench/results/longmemeval.json");
+  // A partial (--types) run must not clobber the full-run headline numbers.
+  const partial = typesFilter.length > 0;
+  if (!partial) {
+    writeFileSync(new URL(`longmemeval.json`, dir), JSON.stringify({ scoredAt: new Date().toISOString(), byType }, null, 2));
+    console.log("saved bench/results/longmemeval.json");
+  }
+  writeFileSync(new URL(`longmemeval_detail${partial ? "_" + typesFilter.join("-") : ""}.json`, dir),
+    JSON.stringify({ scoredAt: new Date().toISOString(), byType, detail }, null, 2));
+  console.log("saved per-question detail");
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────

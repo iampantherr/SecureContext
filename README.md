@@ -267,12 +267,31 @@ Retrieval recall on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (`l
 
 | Question type | n | recall@5 | recall@10 | MRR |
 |---|---|---|---|---|
-| knowledge-update | 15 | **66.7%** | **86.7%** | 0.419 |
-| single-session-assistant | 15 | 46.7% | 46.7% | 0.356 |
-| temporal-reasoning | 15 | 33.3% | 46.7% | 0.157 |
-| single-session-user | 13 | 30.8% | 46.2% | 0.178 |
-| multi-session | 15 | 26.7% | 33.3% | 0.128 |
-| single-session-preference | 15 | 20.0% | 20.0% | 0.113 |
+| knowledge-update | 15 | **80.0%** | **86.7%** | 0.572 |
+| temporal-reasoning | 14 | 57.1% | 64.3% | 0.404 |
+| single-session-user | 14 | 50.0% | 57.1% | 0.333 |
+| single-session-assistant | 15 | 46.7% | 46.7% | 0.383 |
+| multi-session | 15 | 26.7% | 26.7% | 0.189 |
+| single-session-preference | 15 | 20.0% | 20.0% | 0.117 |
+
+<details><summary>What moved these numbers (v0.44 → v0.46.1)</summary>
+
+- **Chunked embeddings (v0.46.0):** long sessions previously embedded only their
+  first 4k chars; per-chunk vectors + max-pooled similarity lifted
+  single-session-user recall@5 from 21.4% to ~50%.
+- **Interrogative-scaffolding stripper (v0.46.1):** temporal questions ("How many
+  weeks ago did I…") no longer let the question-form dominate the query embedding —
+  temporal-reasoning recall@5 38.5% → 53.3%, MRR ×2; knowledge-update and
+  multi-session also improved; no category regressed.
+- **Compound-question decomposition (v0.46.1):** "how many days between the day I
+  started X and the day Y" embeds as a blend matching neither event. Temporal
+  questions now split into event clauses, retrieve per clause, and RRF-fuse —
+  the compound between-questions flipped from miss to rank-1, taking
+  temporal-reasoning to 57.1% recall@5 / MRR 0.404 (2.6× the v0.46.0 MRR).
+- Remaining known weakness: generic-phrase questions ("visited a museum with a
+  friend" — no distinctive lexical/semantic anchor) and preference questions.
+  Tracked, not spun.
+</details>
 
 **Methodology (read before comparing):** this is a *retrieval* metric — whether the gold answer session appears in the top-K search results over a **5,674-session haystack** (the union of 90 stratified questions' haystacks, 15 per type; 2 questions dropped to API timeouts). It is **not** end-to-end QA accuracy, so it is not directly comparable to LLM-judged accuracy numbers in vendor papers. Embeddings are fully local (`nomic-embed-text`, 274 MB) — no cloud embedder. Knowledge-update is the strongest category because of v0.44's temporal supersession work (retrieval prefers current facts). Version: measured on v0.44.0-dev; results JSON in `bench/results/longmemeval.json`.
 

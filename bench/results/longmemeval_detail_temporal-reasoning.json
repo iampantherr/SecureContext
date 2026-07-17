@@ -1,0 +1,310 @@
+{
+  "scoredAt": "2026-07-17T15:33:40.941Z",
+  "byType": {
+    "temporal-reasoning": {
+      "n": 14,
+      "hit5": 8,
+      "hit10": 9,
+      "mrr": 5.658333333333333
+    }
+  },
+  "detail": [
+    {
+      "id": "gpt4_59149c77",
+      "type": "temporal-reasoning",
+      "question": "How many days passed between my visit to the Museum of Modern Art (MoMA) and the 'Ancient Civilizations' exhibit at the Metropolitan Museum of Art?",
+      "gold": [
+        "session:answer_d00ba6d0_1",
+        "session:answer_d00ba6d0_2"
+      ],
+      "rank": 2,
+      "top10": [
+        "session:b70ac29f_1",
+        "session:answer_d00ba6d0_2",
+        "session:8e226a86",
+        "session:286aa281_5",
+        "session:e1616c77",
+        "session:d76030af_2",
+        "session:25b2b29d",
+        "session:ultrachat_411180",
+        "session:418c27fa",
+        "session:answer_645b0329"
+      ]
+    },
+    {
+      "id": "71017276",
+      "type": "temporal-reasoning",
+      "question": "How many weeks ago did I meet up with my aunt and receive the crystal chandelier?",
+      "gold": [
+        "session:answer_0b4a8adc_1"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_0b4a8adc_1",
+        "session:2bfcaf4f_2",
+        "session:4344c2f1_2",
+        "session:9970ac13_2",
+        "session:64266f80_1",
+        "session:18795cc5_1",
+        "session:02f9bedb_2",
+        "session:51a15e24_1",
+        "session:ultrachat_6893",
+        "session:cc5a6057_1"
+      ]
+    },
+    {
+      "id": "b46e15ed",
+      "type": "temporal-reasoning",
+      "question": "How many months have passed since I participated in two charity events in a row, on consecutive days?",
+      "gold": [
+        "session:answer_4bfcc250_4",
+        "session:answer_4bfcc250_3",
+        "session:answer_4bfcc250_2",
+        "session:answer_4bfcc250_1"
+      ],
+      "rank": null,
+      "top10": [
+        "session:0840765f_1",
+        "session:db50c0f6",
+        "session:dfe646a7_1",
+        "session:f87fb137_1",
+        "session:e84415e5",
+        "session:e60407fd_2",
+        "session:9334f70b_3",
+        "session:700c16e2_1",
+        "session:00cbfcfd",
+        "session:5850de18_2"
+      ]
+    },
+    {
+      "id": "gpt4_fa19884c",
+      "type": "temporal-reasoning",
+      "question": "How many days passed between the day I started playing along to my favorite songs on my old keyboard and the day I discovered a bluegrass band?",
+      "gold": [
+        "session:answer_ff201786_1",
+        "session:answer_ff201786_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_ff201786_1",
+        "session:debc34d7_1",
+        "session:e3cc9931_1",
+        "session:32d6bf49",
+        "session:385ad31d",
+        "session:answer_ff201786_2",
+        "session:bc660b5f_1",
+        "session:a0b8b0ad_3",
+        "session:9f091256_2",
+        "session:f999b05c_2"
+      ]
+    },
+    {
+      "id": "0bc8ad92",
+      "type": "temporal-reasoning",
+      "question": "How many months have passed since I last visited a museum with a friend?",
+      "gold": [
+        "session:answer_f4ea84fb_3",
+        "session:answer_f4ea84fb_2",
+        "session:answer_f4ea84fb_1"
+      ],
+      "rank": null,
+      "top10": [
+        "session:sharegpt_oXgiN7q_131",
+        "session:d60381f2_1",
+        "session:1bc87711_1",
+        "session:286aa281_1",
+        "session:e2a9a5fc_2",
+        "session:fd961e54_1",
+        "session:aaf22693",
+        "session:answer_02e66dec_2",
+        "session:29dff1d0_5",
+        "session:afa0c2e7_2"
+      ]
+    },
+    {
+      "id": "af082822",
+      "type": "temporal-reasoning",
+      "question": "How many weeks ago did I attend the friends and family sale at Nordstrom?",
+      "gold": [
+        "session:answer_b51b6115_1"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_b51b6115_1",
+        "session:ultrachat_93574",
+        "session:06d1a1a0",
+        "session:2b16f3d6_1",
+        "session:sharegpt_eEXN4gU_63",
+        "session:0abaca24_1",
+        "session:db50c0f6",
+        "session:3410b52a_1",
+        "session:answer_ef74281f_2",
+        "session:449b918c_1"
+      ]
+    },
+    {
+      "id": "gpt4_4929293a",
+      "type": "temporal-reasoning",
+      "question": "Which event happened first, my cousin's wedding or Michael's engagement party?",
+      "gold": [
+        "session:answer_add9b012_2",
+        "session:answer_add9b012_1"
+      ],
+      "rank": 5,
+      "top10": [
+        "session:28621d6a_2",
+        "session:8e78fa70_1",
+        "session:cb5637b3",
+        "session:0cd57281_1",
+        "session:answer_add9b012_2",
+        "session:3a0f3278_4",
+        "session:b70358bc_2",
+        "session:ad2135af",
+        "session:1853ce05_1",
+        "session:27d9e492_2"
+      ]
+    },
+    {
+      "id": "gpt4_b5700ca9",
+      "type": "temporal-reasoning",
+      "question": "How many days ago did I attend the Maundy Thursday service at the Episcopal Church?",
+      "gold": [
+        "session:answer_a17423e7_1"
+      ],
+      "rank": 3,
+      "top10": [
+        "session:554b054e_2",
+        "session:66cffcc7",
+        "session:answer_a17423e7_1",
+        "session:a17423e7_1",
+        "session:6ea1541e_1",
+        "session:ultrachat_329602",
+        "session:c60d5c8a_1",
+        "session:c7847b66_1",
+        "session:09f2c6c5",
+        "session:b2542345_2"
+      ]
+    },
+    {
+      "id": "9a707b81",
+      "type": "temporal-reasoning",
+      "question": "How many days ago did I attend a baking class at a local culinary school when I made my friend's birthday cake?",
+      "gold": [
+        "session:answer_dba89487_2",
+        "session:answer_dba89487_1"
+      ],
+      "rank": null,
+      "top10": [
+        "session:4889cd54_1",
+        "session:880ee13e",
+        "session:47727b14",
+        "session:d3cc5bdc_1",
+        "session:fde788fb_1",
+        "session:3cec6e2b_2",
+        "session:e839253d",
+        "session:a98ff421_1",
+        "session:394f846b",
+        "session:6d6c92fe"
+      ]
+    },
+    {
+      "id": "gpt4_1d4ab0c9",
+      "type": "temporal-reasoning",
+      "question": "How many days passed between the day I started watering my herb garden and the day I harvested my first batch of fresh herbs?",
+      "gold": [
+        "session:answer_febde667_1",
+        "session:answer_febde667_2"
+      ],
+      "rank": 1,
+      "top10": [
+        "session:answer_febde667_1",
+        "session:4d6927c2_2",
+        "session:27c10839_2",
+        "session:82ea1455_2",
+        "session:answer_febde667_2",
+        "session:answer_9cddca88",
+        "session:f8140c6c_2",
+        "session:9f8fa5e4_2",
+        "session:baaaeb00",
+        "session:347bd498"
+      ]
+    },
+    {
+      "id": "gpt4_e072b769",
+      "type": "temporal-reasoning",
+      "question": "How many weeks ago did I start using the cashback app 'Ibotta'?",
+      "gold": [
+        "session:answer_c19bd2bf_1"
+      ],
+      "rank": 8,
+      "top10": [
+        "session:616fdd27",
+        "session:e2f70c45_1",
+        "session:1d8f4d6a",
+        "session:6a3b5c13_3",
+        "session:705b5399_3",
+        "session:689fec3d_1",
+        "session:a33cf36a_1",
+        "session:answer_c19bd2bf_1",
+        "session:answer_7cb94507",
+        "session:6b7da5fd_2"
+      ]
+    },
+    {
+      "id": "0db4c65d",
+      "type": "temporal-reasoning",
+      "question": "How many days had passed since I finished reading 'The Seven Husbands of Evelyn Hugo' when I attended the book reading event at the local library, where the author of 'The Silent Patient' is discussing her latest thriller novel?",
+      "gold": [
+        "session:answer_b9e32ff8_1",
+        "session:answer_b9e32ff8_2"
+      ],
+      "rank": null,
+      "top10": [
+        "session:47c5482a",
+        "session:dc880372_3",
+        "session:0908a2e6",
+        "session:78764b10_2",
+        "session:44165708",
+        "session:f62bfe2b_1",
+        "session:fbfda981",
+        "session:b67748d1_1",
+        "session:d22c2f04_5",
+        "session:d44dfa75"
+      ]
+    },
+    {
+      "id": "gpt4_1d80365e",
+      "type": "temporal-reasoning",
+      "question": "How many days did I spend on my solo camping trip to Yosemite National Park?",
+      "gold": [
+        "session:answer_661b711f_1",
+        "session:answer_661b711f_2"
+      ],
+      "rank": 2,
+      "top10": [
+        "session:answer_5d8c99d3_3",
+        "session:answer_661b711f_2",
+        "session:answer_661b711f_1",
+        "session:661b711f_1",
+        "session:1e32d50a",
+        "session:ea27c6f5_1",
+        "session:db6ab13b_1",
+        "session:20fa75e8_4",
+        "session:answer_5d8c99d3_2",
+        "session:6414f676_2"
+      ]
+    },
+    {
+      "id": "gpt4_7f6b06db",
+      "type": "temporal-reasoning",
+      "question": "What is the order of the three trips I took in the past three months, from earliest to latest?",
+      "gold": [
+        "session:answer_5d8c99d3_1",
+        "session:answer_5d8c99d3_2",
+        "session:answer_5d8c99d3_3"
+      ],
+      "rank": null,
+      "top10": []
+    }
+  ]
+}

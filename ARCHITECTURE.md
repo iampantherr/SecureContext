@@ -1,4 +1,4 @@
-# SecureContext — Architecture Reference (v0.46.0)
+# SecureContext — Architecture Reference (v0.46.1)
 
 ## Overview
 
@@ -194,6 +194,40 @@ recall (slower, lossier, and more expensive than reading it). Recall is now a bo
   (operator) + the dashboard Security-tab panel — full-chain multi-key re-verification,
   per-agent activity, skill-admission events, and `created_by` attribution rendered as
   an auditor-ready markdown document.
+
+---
+
+## Delivery-Tool Layer (v0.46.1)
+
+v0.46.1 is a positioning release: SecureContext is the local, open-source tool that
+**builds production-grade enterprise projects** — so this round adds the program-delivery
+primitives an orchestrator needs over multi-week efforts.
+
+- **Temporal retrieval round 2** (`src/temporal_parse.ts`, both stores):
+  `stripInterrogativeScaffolding` (S11) removes question-form tokens before BM25/embedding;
+  `isTemporalQuestion` + `splitEventClauses` decompose compound temporal questions into
+  event clauses, retrieve per clause + full query, and RRF-fuse (K=60, recursion-guarded
+  via `_noDecompose`). `zc_search` renders a chronological **Timeline** block for temporal
+  questions and stamps results older than `ZC_STALE_NOTE_DAYS` (30) with a staleness note.
+  Kill switches: `ZC_QUERY_DESCAFFOLD=0`, `ZC_QUERY_DECOMPOSE=0`.
+  LongMemEval temporal-reasoning: recall@5 33.3→57.1, MRR 0.157→0.404 cumulative.
+- **Program memory** (`src/program.ts`, PG migration 39, `zc_program` tool,
+  `/api/v1/program`): named multi-phase programs; `status` is the handoff primitive
+  (phases + open-phase acceptance checklist + explicit NEXT); `close_phase` requires
+  acceptance evidence (≥40 chars) and auto-generates a checkpoint document (phase meta +
+  acceptance fact + MERGE broadcasts + spend) indexed as `checkpoint:<program>:<phase>`
+  with summary retention. PG-only (like the task queue — coordination is a stack feature).
+- **Cross-repo reference retrieval:** `zc_search_global` accepts `project` (name
+  substring / hash prefix) in both stores.
+- **Delivery mandates** (A2A repo `augment-role-prompt.mjs`): orchestrators must run
+  `acceptance-gate` on phase briefs and attach `web-e2e-verify` to UI ASSIGNs; workers
+  must include browser-evidence blocks in UI MERGEs.
+- **Embed-lane watchdog** (`src/embed_watchdog.ts`): flags `stalled` in `/health`
+  (`embedLane`) when vectors are pending, the lane has been quiet ≥ `ZC_EMBED_STALL_MIN`
+  (10) min, and Ollama still answers — the silent-timeout degradation class.
+  `ZC_EMBED_WATCHDOG=0` disables.
+- **Fix:** `chk_sss_score` widened to 0..32 (PG migration 40) — the 11-check scan
+  (v0.37+) was violating the old 0..8 bound on every clean-skill scan insert.
 
 ---
 

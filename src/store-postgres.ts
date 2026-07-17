@@ -38,7 +38,7 @@ import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from
 import { classifyFactKind, type EpistemicOpts } from "./memory.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance } from "./recall_budget.js";
-import { extractCoReferences, classifyRelation } from "./indexing/community.js";
+import { extractCoReferences, extractCoReferencesAsync, classifyRelation, graphMaxNodes } from "./indexing/community.js";
 import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict, autoResolveVictim } from "./contradiction_heuristics.js";
 import { llmExtractEntities, entityEdgesFor, ENTITY_EXTRACT_ENABLED, ENTITY_BUDGET } from "./indexing/entity_extract.js";
 import { detectCommunitiesFromRows } from "./indexing/community.js";
@@ -839,7 +839,76 @@ export class PostgresStore implements Store {
     return { reembedded, remaining: Math.max(0, Number(remainingRes.rows[0]!.n) - reembedded), ollamaDown: false };
   }
 
+  /**
+   * v0.46.1 (D4) — SELF-HEAL for the embed lane: budgeted embed of KB entries that
+   * have NO head vector for the active model. These are orphans left behind when
+   * index-time embedding died (timeouts under CPU contention, process restarts
+   * mid-bulk-ingest, breaker-open windows) — previously they stayed BM25-only
+   * FOREVER because nothing ever retried them. Called by the embed watchdog when
+   * it detects a stalled lane; each pass drains up to `budget` entries.
+   */
+  async embedMissingVectors(budget = 50): Promise<{ embedded: number; remaining: number; ollamaDown: boolean }> {
+    // Empty/whitespace content can NEVER embed (Ollama returns a zero-length
+    // vector) — exclude it here AND in the watchdog's pending count, or a single
+    // empty __init__.py head-of-line-blocks the whole drain forever (live-caught
+    // 2026-07-17: 699 entries stuck behind one empty file).
+    const missingSql = `FROM knowledge_entries ke
+      WHERE LENGTH(TRIM(ke.content)) > 0 AND NOT EXISTS (SELECT 1 FROM embeddings e
+        WHERE e.project_hash = ke.project_hash AND e.source = ke.source AND e.model_name = $1)`;
+    const missing = (await this.pool.query<{ project_hash: string; source: string; content: string }>(
+      `SELECT ke.project_hash, ke.source, ke.content ${missingSql} LIMIT $2`, [ACTIVE_MODEL, budget])).rows;
+    let embedded = 0;
+    let consecutiveFails = 0;
+    for (const m of missing) {
+      const ok = await this._storeEmbedding(m.project_hash, m.content, m.source);
+      if (ok) { embedded++; consecutiveFails = 0; continue; }
+      // Skip individual failures (a poison document must not block the queue);
+      // only abort when failures are consecutive — that means the LANE is down.
+      consecutiveFails++;
+      if (consecutiveFails >= 3) {
+        const rem0 = await this.pool.query<{ n: string }>(`SELECT COUNT(*)::text AS n ${missingSql}`, [ACTIVE_MODEL]);
+        return { embedded, remaining: Number(rem0.rows[0]?.n ?? 0), ollamaDown: true };
+      }
+    }
+    const rem = await this.pool.query<{ n: string }>(`SELECT COUNT(*)::text AS n ${missingSql}`, [ACTIVE_MODEL]);
+    return { embedded, remaining: Number(rem.rows[0]?.n ?? 0), ollamaDown: false };
+  }
+
   async search(projectPath: string, queries: string[], opts: SearchOptions = {}): Promise<KnowledgeEntry[]> {
+    // TR-2 (v0.46.1) — COMPOUND temporal questions ("how many days between the
+    // day I did X and the day I did Y") embed as a blend that matches neither
+    // event. Decompose into event clauses, search each INDEPENDENTLY (plus the
+    // full query), and RRF-fuse the lists. Temporal-scoped + recursion-guarded;
+    // ZC_QUERY_DECOMPOSE=0 disables (splitEventClauses returns []).
+    if (!opts._noDecompose) {
+      const raw = queries.join(" ");
+      const { isTemporalQuestion, stripInterrogativeScaffolding: stripQ, splitEventClauses } =
+        await import("./temporal_parse.js");
+      if (isTemporalQuestion(raw)) {
+        const clauses = splitEventClauses(stripQ(raw));
+        if (clauses.length >= 2) {
+          const sub = { ...opts, _noDecompose: true };
+          const lists = await Promise.all([
+            this.search(projectPath, queries, sub),
+            ...clauses.map((c) => this.search(projectPath, [c], sub)),
+          ]);
+          const K = 60;
+          const scored = new Map<string, { entry: KnowledgeEntry; score: number; bestRank: number }>();
+          for (const list of lists) {
+            list.forEach((entry, i) => {
+              const cur = scored.get(entry.source);
+              const add = 1 / (K + i + 1);
+              if (cur) { cur.score += add; if (i + 1 < cur.bestRank) { cur.bestRank = i + 1; cur.entry = entry; } }
+              else scored.set(entry.source, { entry, score: add, bestRank: i + 1 });
+            });
+          }
+          return [...scored.values()]
+            .sort((a, b) => b.score - a.score)
+            .slice(0, opts.limit ?? Config.MAX_RESULTS)
+            .map((x) => ({ ...x.entry, rank: x.score }));
+        }
+      }
+    }
     const projectHash = ph(projectPath);
     const limit       = opts.limit ?? Config.MAX_RESULTS;
     const candidates  = Config.BM25_CANDIDATES;
@@ -850,9 +919,13 @@ export class PostgresStore implements Store {
     // R4 (v0.42.0) — NL temporal window in KB search: "docs indexed last week about X"
     // constrains candidates by created_at; the cleaned text (time phrase removed)
     // does the matching so keyword/vector relevance concentrates on the topic.
-    const { parseTemporalQuery: parseTQ } = await import("./temporal_parse.js");
+    const { parseTemporalQuery: parseTQ, stripInterrogativeScaffolding } = await import("./temporal_parse.js");
     const tw = parseTQ(rawQueryText);
-    const queryText = (tw.from || tw.to) && tw.cleaned.trim() ? tw.cleaned : rawQueryText;
+    // S11 (v0.46.1) — strip interrogative-temporal scaffolding ("how many weeks
+    // ago did I…") so BM25 + the query embedding concentrate on the EVENT content.
+    // Declarative queries pass through unchanged; ZC_QUERY_DESCAFFOLD=0 disables.
+    const queryText = stripInterrogativeScaffolding(
+      (tw.from || tw.to) && tw.cleaned.trim() ? tw.cleaned : rawQueryText);
 
     // BM25 candidates via ts_rank (PostgreSQL full-text)
     type CandRow = { source: string; content: string; rank: number; source_type: string; synthetic?: boolean; created_at?: string | Date };
@@ -1101,6 +1174,7 @@ export class PostgresStore implements Store {
           snippet:        r.content.slice(0, 200),
           rank:           r.hybridScore,
           vectorScore:    r.vectorScore,
+          createdAt:      r.created_at ? new Date(r.created_at as string | Date).toISOString() : undefined,
           backlinkScore:  blBoost(r.source) || undefined,
           sourceType:     r.source_type,
           nonAsciiSource: /[^\x00-\x7F]/.test(r.source),
@@ -1126,6 +1200,7 @@ export class PostgresStore implements Store {
         content:        r.content,
         snippet:        r.content.slice(0, 200),
         rank,
+        createdAt:      r.created_at ? new Date(r.created_at as string | Date).toISOString() : undefined,
         backlinkScore:  boost || undefined,
         sourceType:     r.source_type,
         nonAsciiSource: /[^\x00-\x7F]/.test(r.source),
@@ -1152,27 +1227,37 @@ export class PostgresStore implements Store {
     return results;
   }
 
-  async searchGlobal(queries: string[], limit = 10): Promise<CrossProjectEntry[]> {
+  async searchGlobal(queries: string[], limit = 10, projectFilter?: string): Promise<CrossProjectEntry[]> {
     const queryText = queries.join(" ");
+    // D2 — optional project narrowing for cross-repo reference lookups. Names
+    // resolve via project_paths_pg (hash → filesystem path, telemetry-populated —
+    // the same source the dashboard uses; project_meta labels are optional extras).
+    const pf = (projectFilter ?? "").trim();
+    const filterClause = pf
+      ? ` AND (COALESCE(pm.value, '') ILIKE $5 OR ke.project_hash LIKE $6
+             OR ke.project_hash IN (SELECT pp2.project_hash FROM project_paths_pg pp2 WHERE pp2.project_path ILIKE $5))`
+      : "";
+    const filterParams = pf ? [`%${pf}%`, `${pf.toLowerCase()}%`] : [];
     const res = await this.pool.query<{
       source: string; content: string; rank: number;
       source_type: string; project_hash: string; project_label: string;
     }>(`
       SELECT ke.source, ke.content,
              ts_rank(to_tsvector('english', ke.content), plainto_tsquery('english', $1))
-               + (CASE WHEN $3 > 0 AND bl.weighted_in IS NOT NULL
-                       THEN $3 * (ln(1 + bl.weighted_in) / ln(1 + $4)) ELSE 0 END) AS rank,
+               + (CASE WHEN $3::float8 > 0 AND bl.weighted_in IS NOT NULL
+                       THEN $3::float8 * (ln(1 + bl.weighted_in) / ln(1 + $4::float8)) ELSE 0 END) AS rank,
              COALESCE(sm.source_type, 'internal') as source_type,
              ke.project_hash,
-             COALESCE(pm.value, ke.project_hash) as project_label
+             COALESCE(pm.value, pp.project_path, ke.project_hash) as project_label
       FROM   knowledge_entries ke
       LEFT JOIN source_meta sm ON sm.project_hash = ke.project_hash AND sm.source = ke.source
       LEFT JOIN project_meta pm ON pm.project_hash = ke.project_hash AND pm.key = 'project_label'
+      LEFT JOIN project_paths_pg pp ON pp.project_hash = ke.project_hash
       LEFT JOIN kb_backlinks_pg bl ON bl.project_hash = ke.project_hash AND bl.source = ke.source
-      WHERE  to_tsvector('english', ke.content) @@ plainto_tsquery('english', $1)
+      WHERE  to_tsvector('english', ke.content) @@ plainto_tsquery('english', $1)${filterClause}
       ORDER  BY rank DESC
       LIMIT  $2
-    `, [queryText, limit, Config.W_BACKLINK, Config.BACKLINK_LOG_BASE]);
+    `, [queryText, limit, Config.W_BACKLINK, Config.BACKLINK_LOG_BASE, ...filterParams]);
 
     return res.rows.map(r => ({
       source:         r.source,
@@ -1182,7 +1267,8 @@ export class PostgresStore implements Store {
       sourceType:     r.source_type,
       nonAsciiSource: /[^\x00-\x7F]/.test(r.source),
       projectHash:    r.project_hash,
-      projectLabel:   r.project_label,
+      // A path label renders as its folder name ("SecureContext"), not the full path.
+      projectLabel:   /[/\\]/.test(r.project_label) ? (r.project_label.split(/[/\\]/).pop() || r.project_label) : r.project_label,
     }));
   }
 
@@ -1252,7 +1338,8 @@ export class PostgresStore implements Store {
   }
 
   async rebuildBacklinks(projectPath: string): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }> {
-    return this._rebuildBacklinksByHash(ph(projectPath));
+    // Explicit (tool/API) rebuild — bypasses the auto-rebuild node cap.
+    return this._rebuildBacklinksByHash(ph(projectPath), { force: true });
   }
 
   /**
@@ -1277,7 +1364,8 @@ export class PostgresStore implements Store {
     return { projects: rows.length, edges };
   }
 
-  private async _rebuildBacklinksByHash(projectHash: string): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }> {
+  private static _capLogged = new Set<string>();
+  private async _rebuildBacklinksByHash(projectHash: string, opts: { force?: boolean } = {}): Promise<{ edges: number; nodes: number; topHub: { source: string; weightedIn: number } | null }> {
     // v0.36.0 — memory-aware extraction (SQLite parity): live working-memory facts join the
     // co-reference scan as "memory:<agent>:<key>" pseudo-sources (eviction-archival naming),
     // so a fact mentioning "session.ts" creates a memory→file edge and the file gains boost.
@@ -1287,7 +1375,17 @@ export class PostgresStore implements Store {
        SELECT ('memory:' || agent_id || ':' || key) AS source, value AS content
          FROM working_memory WHERE project_hash = $1 AND valid_to IS NULL`, [projectHash]
     )).rows;
-    const typed = extractCoReferences(rows).map((e) => ({
+    // v0.46.1 — the O(N²) scan on a bulk-ingested corpus blocked the event loop for
+    // minutes (pool timeouts, breaker-open, frozen ingest). Auto rebuilds skip huge
+    // corpora; explicit zc_graph_rebuild still runs (yielding via the async extractor).
+    if (!opts.force && rows.length > graphMaxNodes()) {
+      if (!PostgresStore._capLogged.has(projectHash)) {
+        PostgresStore._capLogged.add(projectHash);
+        console.error(`[backlinks] auto-rebuild skipped for ${projectHash}: ${rows.length} nodes > ZC_GRAPH_MAX_NODES(${graphMaxNodes()}) — run zc_graph_rebuild to force`);
+      }
+      return { edges: 0, nodes: rows.length, topHub: null };
+    }
+    const typed = (await extractCoReferencesAsync(rows)).map((e) => ({
       from: e.from, to: e.to, relation: classifyRelation(e.from, e.to, e.matchKind), matchKind: e.matchKind, weight: e.weight,
     }));
     const client = await this.pool.connect();

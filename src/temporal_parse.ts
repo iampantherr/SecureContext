@@ -135,3 +135,98 @@ export function parseTemporalQuery(query: string, now: Date = new Date()): Tempo
 export function hasTemporalConstraint(w: TemporalWindow): boolean {
   return !!(w.from || w.to || w.asOf);
 }
+
+// ─── S11 (v0.46.1) — interrogative-scaffolding stripper ─────────────────────
+//
+// LongMemEval temporal-reasoning miss analysis: questions like "How many weeks
+// ago did I attend the friends and family sale at Nordstrom?" retrieve poorly
+// because the interrogative-temporal SCAFFOLDING ("how many weeks ago did I…",
+// "…have passed since…") dominates the QUERY EMBEDDING — the discriminative
+// content is the event description, but the vector mostly encodes the question
+// form. BM25 is less affected (English stopwords) yet still spends weight on
+// "days/weeks/passed".
+//
+// This helper removes only WHOLE scaffolding PHRASES (never bare content
+// words), so declarative queries pass through byte-identical. Conservative
+// guard: if stripping leaves fewer than 3 words, the original is returned.
+// Kill switch: ZC_QUERY_DESCAFFOLD=0.
+
+const SCAFFOLD_PHRASES: RegExp[] = [
+  /\bhow\s+(?:many|much)\s+(?:days?|weeks?|months?|years?|hours?|time)\b/gi,
+  /\bhow\s+long\s+(?:ago|has\s+it\s+been|had\s+it\s+been)?\b/gi,
+  /\b(?:have|had|has)\s+(?:passed|elapsed|gone\s+by)\b/gi,
+  /\bpassed\s+(?=between|since)\b/gi,   // keep the connective, drop "passed"
+  /\b(?:days?|weeks?|months?|years?)\s+ago\b/gi,
+  /\bago\b/gi,
+  /\bwhat\s+is\s+the\s+order\s+of\b/gi,
+  /\bin\s+what\s+order\b/gi,
+  /\bwhich\s+(?:\w+\s+)?(?:events?\s+)?happened\s+(?:first|last|earlier|later)\b/gi,
+  /\bfrom\s+(?:first|earliest)\s+to\s+(?:last|latest)\b/gi,
+  /\bwhen\s+did\s+(?:i|we)\b/gi,
+];
+
+export function stripInterrogativeScaffolding(query: string): string {
+  if (process.env["ZC_QUERY_DESCAFFOLD"] === "0") return query;
+  let out = query;
+  for (const re of SCAFFOLD_PHRASES) out = out.replace(re, " ");
+  out = out.replace(/\s{2,}/g, " ").trim();
+  // Conservative guard — never hand the matcher an empty/near-empty query.
+  const words = out.split(/\s+/).filter((w) => /\w/.test(w));
+  if (words.length < 3) return query;
+  return out;
+}
+
+// ─── TR-2 (v0.46.1) — temporal-question detection + event-clause splitting ──
+//
+// Second lever from the LongMemEval miss analysis: the remaining temporal
+// misses are COMPOUND questions — "How many days passed between the day I
+// started watering my herb garden and the day I harvested…" — whose single
+// query embedding is a blend of several events that matches none of them.
+// `splitEventClauses` breaks such a question into its event descriptions so
+// the search layer can retrieve PER CLAUSE and fuse the lists (RRF).
+// Decomposition is TEMPORAL-SCOPED: the search layer only applies it when
+// `isTemporalQuestion` fired, keeping the blast radius near zero for normal
+// queries. Kill switch: ZC_QUERY_DECOMPOSE=0.
+
+const TEMPORAL_QUESTION_RE = new RegExp(
+  [
+    String.raw`\bhow\s+(?:many|much)\s+(?:days?|weeks?|months?|years?|hours?|time)\b`,
+    String.raw`\bhow\s+long\b`,
+    String.raw`\b(?:days?|weeks?|months?|years?)\s+(?:ago|passed|had\s+passed|have\s+passed)\b`,
+    String.raw`\bwhat\s+is\s+the\s+order\b`,
+    String.raw`\bin\s+what\s+order\b`,
+    String.raw`\bhappened\s+(?:first|last|earlier|later)\b`,
+    String.raw`\bfrom\s+(?:first|earliest)\s+to\s+(?:last|latest)\b`,
+    String.raw`\bwhen\s+did\s+(?:i|we)\b`,
+  ].join("|"),
+  "i",
+);
+
+/** True when the query is a temporal QUESTION (ordering / interval / when). */
+export function isTemporalQuestion(query: string): boolean {
+  return TEMPORAL_QUESTION_RE.test(query);
+}
+
+/**
+ * Split a (descaffolded) compound temporal question into its event clauses.
+ * Returns [] when the query is not usefully compound (fewer than 2 clauses
+ * with ≥3 content words each) — callers treat [] as "search as-is".
+ */
+export function splitEventClauses(query: string): string[] {
+  if (process.env["ZC_QUERY_DECOMPOSE"] === "0") return [];
+  // Clause boundaries seen in real temporal questions: "…X and the day I Y…",
+  // "…X when I Y…", "…X or Y…", "between X and Y", list commas before "the day I".
+  const seeded = query
+    .replace(/\bbetween\b/gi, " ")
+    .split(/(?:,\s*)|(?:\b(?:and|or|when|while|before|after)\s+(?:the\s+day\s+)?(?:i|we|my)\b)|(?:\bthe\s+day\s+(?:i|we)\b)/i);
+  const clauses = seeded
+    .map((c) => c.replace(/[?.!]+$/g, "").replace(/^\W+|\W+$/g, "").trim())
+    // Drop interrogative residue ("Which three events happened in the order…")
+    // — clauses must be EVENT descriptions, not leftover question framing.
+    .filter((c) => !/^(which|what|how|when|who|where|why)/i.test(c))
+    .filter((c) => {
+      const words = c.split(/\s+/).filter((w) => w.length > 2 && !/^(the|and|did|was|were|have|had|has|that|this|with|for)$/i.test(w));
+      return words.length >= 2;
+    });
+  return clauses.length >= 2 ? clauses.slice(0, 4) : [];
+}
