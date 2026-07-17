@@ -60,7 +60,11 @@
     "SECURITY_REPORT.md",
     "CLAUDE.md",
     "llms.txt",
-    "tsconfig.json"
+    "tsconfig.json",
+    "init.mjs",
+    "bootstrap.sh",
+    "bootstrap.ps1",
+    "docker/"
   ],
   "scripts": {
     "build": "tsc",
@@ -97,5 +101,8 @@
     "typescript": "^5.3.3",
     "typescript-eslint": "^8.58.2",
     "vitest": "^4.1.0"
+  },
+  "bin": {
+    "zc-ctx": "./init.mjs"
   }
 }

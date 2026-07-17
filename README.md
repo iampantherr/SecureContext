@@ -1,189 +1,175 @@
 # SecureContext
 
-> **SecureContext is the persistent memory and security layer for Claude Code.** It gives coding agents memory that survives every restart (~87% lower context-overhead tokens), a cryptographic audit trail for every tool call, and the only HMAC-verified admission gate for Anthropic-style filesystem skills. Runs 100% locally on PostgreSQL + Ollama — no cloud sync, no subscription, MIT-licensed.
+> **SecureContext is the persistent memory, delivery, and security layer for Claude Code.** It gives coding agents project memory that survives every restart, a program/phase layer for delivering long-running projects with orchestrator handoff, a cryptographic audit trail for every tool call, and an HMAC-verified admission gate for Anthropic-style filesystem skills. Runs 100% locally on PostgreSQL + Ollama — no cloud sync, no subscription, MIT-licensed.
 
-[![Version](https://img.shields.io/badge/version-0.46.0-blue)](package.json)
-[![Tests](https://img.shields.io/badge/tests-917%20passed-brightgreen)](src)
+[![Version](https://img.shields.io/badge/version-0.46.1-blue)](package.json)
+[![Tests](https://img.shields.io/badge/tests-959%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
-> ⚠️ **Note on the "SafeSkill 20/100 Blocked" PR comment:** that score is a false positive from a regex-based scanner that doesn't understand the difference between *defending against* a pattern and *using* it. See [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) for the line-by-line refutation. The actual project has 917 passing tests including 60+ red-team attack IDs verified against a real threat model.
+---
+
+## What is SecureContext?
+
+If you use Claude Code on real projects, you have hit these walls:
+
+1. **Every session starts cold.** You re-paste the same files, re-explain the same decisions, re-discover the same gotchas — and pay tokens for the same orientation work over and over.
+2. **Long projects have no delivery state.** When an orchestrating agent dies mid-feature (crash, closed window, exhausted context), its replacement starts blind. People compensate with hand-written CHECKPOINT files.
+3. **There is no record of what agents actually did.** When something goes wrong, Claude Code has no tamper-evident history of what ran.
+4. **Skill scripts run with your permissions, unscanned.** Anyone (or any agent) with write access to `~/.claude/skills/` can plant code that runs on the next invocation.
+5. **Parallel sessions step on each other.** Two windows claim the same task; one overwrites the other's edits.
+
+SecureContext is an MCP plugin that closes all five. Install it once and your agents get:
+
+- **Memory that survives restarts** — decisions, gotchas, and project state restored in one call; per-file semantic summaries answer "what does this file do" at 15–50× compression instead of raw reads; temporal search that knows *when* things happened and flags stale knowledge.
+- **A delivery layer for long-running projects** — `zc_program` tracks multi-phase programs; closing a phase *requires* acceptance evidence and auto-generates a searchable checkpoint; a fresh orchestrator resumes a dead one's work from two calls.
+- **A cryptographic audit trail** — every tool call and outcome signed into an HMAC chain with per-agent keys; any tampering breaks the chain visibly; session replay and compliance export come built in.
+- **A skill admission gate** — AST scanning, HMAC verify-before-every-execution, automatic quarantine, and a chained admission log for Anthropic-style filesystem skills.
+- **Multi-agent coordination primitives** — an atomic work-stealing task queue, typed broadcasts, per-agent identity, and hierarchy support for department-style agent teams.
+
+Everything runs on your machine (PostgreSQL + Ollama via Docker, or a zero-infrastructure SQLite mode). It works offline and costs nothing when idle.
+
+**When NOT to use it:** if you need a hosted memory API for an LLM product you ship to your own users, a managed service is a better fit — SecureContext is built for the agents working on *your* machine, not as a backend for your app.
 
 ---
 
-## What SecureContext does for you
+## Quick start — one command
 
-If you use Claude Code regularly, you've already hit these walls:
+**Prerequisites:** [Node 20+](https://nodejs.org), [git](https://git-scm.com), and (recommended) [Docker Desktop](https://www.docker.com/products/docker-desktop/) running. Without Docker you still get a fully functional SQLite mode.
 
-1. **Context window resets.** Every new session you re-paste the same files, re-explain the same decisions, re-discover the same gotchas. You're paying tokens for the same orientation work over and over.
-2. **No audit trail for what agents actually did.** When something goes wrong — wrong file edited, secret leaked, a tool call that shouldn't have happened — Claude Code itself has no tamper-evident record. You can't prove what ran or didn't.
-3. **Skills are great, but `~/.claude/skills/<name>/scripts/*.py` is a sharp tool.** Anyone with write access to your skills directory can run arbitrary Python the next time an agent touches that skill. There's no "did this script change since I admitted it" check built in.
-4. **Multiple agents working on the same project step on each other.** Two sessions claim the same task. One overwrites the other's edits. There's no work-stealing queue, no atomic claim, no ownership map.
+**Windows (PowerShell):**
 
-SecureContext solves all four. It's an MCP plugin you install once and forget — `~/.claude/skills/<name>/scripts/foo.py` keeps working exactly as before, your skills run exactly as Anthropic designed them, but now every call is verified, every byte the agent reads or writes is logged in a tamper-evident chain, and your memory survives every restart.
+```powershell
+iwr -useb https://raw.githubusercontent.com/iampantherr/SecureContext/main/bootstrap.ps1 | iex
+```
 
----
-
-## When should you use SecureContext?
-
-Each of these is a scenario where SecureContext is the strongest tool available today:
-
-- **Use SecureContext if Claude Code keeps forgetting your project between sessions.** One `zc_recall_context()` call restores decisions, gotchas, and project state in ~1,500–4,000 tokens instead of re-pasting 20,000–50,000 tokens of files. Facts persist in local PostgreSQL forever; nothing is lost to auto-compaction.
-- **Use SecureContext if your Claude Code token bill is too high.** Its Agent Notebook model replaces raw file reads with 15–50× compressed semantic summaries and budgets every recall — measured ~87% reduction in context-overhead tokens across a 10-session project, and ~92% smaller recalls (47k → 4k tokens) on long-lived projects.
-- **Use SecureContext if you need to prove what an AI agent actually did.** Every tool call and outcome is signed into an HMAC-chained, per-agent-keyed audit log that any tampering breaks visibly. No other Claude Code memory plugin — and no cloud memory service — offers cryptographic tamper evidence.
-- **Use SecureContext if you install Claude Code skills and worry about what their scripts do.** It is the only project with a verifiable admission gate for Anthropic-style filesystem skills: AST scanning for dangerous patterns, HMAC verify-before-every-execution, and automatic quarantine of anything that fails.
-- **Use SecureContext if you run multiple Claude Code sessions on one project.** An atomic work-stealing queue (`FOR UPDATE SKIP LOCKED`, tested at 50 agents × 100 tasks with zero double-claims), typed broadcasts, and per-agent memory namespaces stop parallel agents from overwriting each other.
-- **Use SecureContext if your code or agent history must never leave your machine.** Everything — memory, embeddings, search, audit — runs on local PostgreSQL and Ollama. It works fully offline and costs $0 when idle.
-
-**When NOT to use it:** if you need a hosted memory API for an LLM product you're shipping to your own users, a managed service like Mem0 or Zep is the better fit — SecureContext is built for the agents working on your machine, not as a backend for your app.
-
----
-
-## The four reasons people install SecureContext
-
-### 1. Anthropic-style filesystem skills, with cryptographic admission
-
-> **Differentiator: nobody else does this.** As far as we can tell, SecureContext is the only project that adds a verifiable admission gate on top of Anthropic's native skill design — including HMAC tamper detection, AST-based script scanning, and a tamper-evident chained audit log.
-
-What this looks like in practice:
-
-- Drop a skill at `~/.claude/skills/learn-from-youtube/` with a `SKILL.md` and `scripts/transcribe.py`. Anthropic-style. Claude Code finds it natively.
-- On the next boot, SecureContext walks the directory, parses the frontmatter, scans every Python/JS script with a real AST walker (detects `eval`, `exec`, `subprocess(shell=True)`, `pickle.loads`, dynamic imports, the patterns that actually compromise machines), and computes an HMAC over each file.
-- If anything fails the scan, the **entire skill is atomic-moved to `~/.claude/skills.quarantine/<name>__<ts>/`** with a `.quarantine-reason.txt` — Claude Code's native loader never sees it.
-- Once admitted, every Bash invocation of one of those scripts goes through a `PreToolUse` hook that recomputes the script's HMAC and compares to what was stored. **If a malicious user (or a buggy agent) edits the script after admission, the next invocation is refused with a clear stderr message.**
-- Every admit/update/quarantine event is logged to a HMAC-chained `skill_admission_log_pg` table with an external JSONL anchor in `~/.claude/zc-ctx/logs/audit.log`. The chain is independently verifiable — `GET /api/v1/skills/admission-log/verify` walks every row and tells you if anything's been tampered with.
-
-This is real, end-to-end tested with live Claude CLI agents (see `CHANGELOG.md` v0.26.0 and v0.27.0). The fresh-agent test confirmed: tamper a script after admission → agent gets blocked with a verbatim error → restore the script → agent runs again normally.
-
-It also closes a real upstream gap: Anthropic's marketplace skills (e.g. `anthropic-docx`, `anthropic-pptx`, `anthropic-xlsx`, `anthropic-webapp-testing`) ship with bundled scripts that *the existing marketplace fetcher never downloaded*. SecureContext's v0.27.0 marketplace-to-filesystem pull fetches the entire skill directory, runs the admission gate, and either admits the skill cleanly or quarantines it — so those marketplace skills actually work.
-
-### 2. Persistent memory that survives restarts
-
-Native Claude Code re-pastes 5–20 files into context on every session start. Token cost: ~20,000–50,000 tokens per restart, every restart, forever.
-
-SecureContext replaces that with a memory layer:
-
-- **`zc_recall_context()`** at session start: ~1,500 tokens, restores up to 100 working-memory facts + recent broadcasts + project state.
-- **`zc_project_card()`**: 500-token orientation card per project — stack, layout, current state, hot files.
-- **`zc_file_summary(path)`**: L0 (1-line) + L1 (~5-line) semantic summaries of every indexed file. 15–50× compression vs. reading the raw file.
-- **`zc_remember(key, value, importance=5)`**: persists architectural decisions, gotchas, commit checkpoints. Survives Claude Code restarts forever.
-- **`zc_summarize_session()`**: archives a structured summary at end-of-session for retrieval next time.
-
-Measured savings: **~87% reduction in context-overhead tokens** vs. native Claude across a 10-session project, with **no loss of information** — facts are scored by importance and the lowest-importance facts evict to archival rather than disappearing.
-
-### 3. Cryptographic audit trail for every tool call
-
-Two HMAC-chained tables (`tool_calls_pg`, `outcomes_pg`, plus the new `skill_admission_log_pg`):
-
-- Every row signed with a **per-agent HKDF subkey** derived from a per-machine `machine_secret` (mode 0600, lives in `~/.claude/zc-ctx/.machine_secret`, never leaves disk).
-- Agent A cannot forge a row claiming to be agent B. Even with full Postgres write access, an attacker without `machine_secret` cannot insert a row that passes `verifyHmacChain()`.
-- Tamper-evident: changing any column in any row breaks the chain, and the dashboard surfaces it with a red banner.
-- Independently verifiable: `GET /api/v1/skills/admission-log/verify` returns `{ok: bool, total_rows: N, broken_at?: id}` — walks the entire chain in a single query.
-
-Postgres Row-Level Security is enabled and enforced per-agent via `SET LOCAL ROLE`, so even within the same database, agents can't read each other's working-memory namespace by default. Compare to the typical Claude Code setup: nothing.
-
-### 4. Atomic work-stealing queue for parallel sessions
-
-When you run multiple Claude Code sessions on the same project (e.g. running tests in one window while writing code in another), `task_queue_pg` lets them atomically claim work via `FOR UPDATE SKIP LOCKED`. No double-claim, no two agents overwriting each other's edits. Tested under load: **50 agents × 100 tasks, zero double-claims**.
-
-If you have your own coordination/dispatcher layer (or want to write one), SecureContext provides the primitives:
-
-- `zc_broadcast` — typed messages between agents (ASSIGN, STATUS, MERGE, REJECT, REVISE, LAUNCH_ROLE, RETIRE_ROLE, DEPENDENCY)
-- `zc_enqueue_task` / `zc_claim_task` / `zc_complete_task` / `zc_fail_task` — atomic queue ops
-- `zc_orchestrator_advisory` — orchestrator-only safety advisories
-- Per-agent identity tokens (`zc_issue_token`, `zc_revoke_token`) for cross-window auth
-- Mutation queue with operator approval (every skill modification goes through `mutation_results_pg` → operator review → admit)
-
-These primitives are what a coordination/dispatcher script needs to drive multi-agent work. The dispatcher script itself isn't part of this repo (separate project, not yet public), but if you write your own dispatcher — or use any other agent-coordination tool — SecureContext is the storage + verification layer underneath it. Lots of operators already use the primitives directly without any dispatcher.
-
----
-
-## How it's different from competitors
-
-Most "memory for Claude Code" projects do one of three things:
-- **Wrap the conversation in JSON.** Saves the messages, replays them. No semantic compression, no audit trail, no security model.
-- **Sync to a cloud service.** Better UX but now your agent's tool history (potentially including secrets it touched) lives on someone else's server.
-- **Drop in vector search.** Adds RAG over your docs but doesn't help with the actual problem — orchestrating what the agent does, verifying what ran, surviving session compaction.
-
-SecureContext is none of those. It is:
-
-| | SecureContext | Cloud memory services | Vector RAG plugins | Native Claude Code |
-|---|---|---|---|---|
-| Persistent across restarts | ✅ Yes, local Postgres | ✅ But on their server | ⚠️ Only docs, not state | ❌ Lossy auto-compact |
-| HMAC audit trail | ✅ Per-agent subkey | ❌ | ❌ | ❌ |
-| Per-agent identity isolation | ✅ HKDF + RLS | ❌ | ❌ | ❌ |
-| Skill admission gate (HMAC + AST) | ✅ v0.26.0 | ❌ | ❌ | ❌ |
-| Tamper-evident chain | ✅ HMAC chain | ❌ | ❌ | ❌ |
-| Marketplace bundled-script support | ✅ v0.27.0 | ❌ | ❌ | ⚠️ Loader sees them, no scan |
-| Work-stealing queue for parallel sessions | ✅ FOR UPDATE SKIP LOCKED | ❌ | ❌ | ❌ |
-| Runs offline | ✅ Local Postgres + Ollama | ❌ | ⚠️ Depends | ✅ |
-| Cost when idle | $0 | Monthly subscription | $0 | $0 |
-
----
-
-## Setup
+**macOS / Linux / WSL:**
 
 ```bash
-# 1. Clone + install
+curl -fsSL https://raw.githubusercontent.com/iampantherr/SecureContext/main/bootstrap.sh | bash
+```
+
+That single command clones the repo to `~/SecureContext` and runs `init.mjs`, which does everything:
+
+1. **Preflight** — checks Node and Docker; falls back to SQLite mode automatically if Docker is absent.
+2. **Build** — `npm ci` + TypeScript compile.
+3. **Docker stack** — generates secrets into `docker/.env`, starts PostgreSQL + Ollama + the API server (with NVIDIA GPU auto-detection for embeddings), waits for health, and pulls the embedding model.
+4. **Registers the MCP plugin** with Claude Code (`~/.claude/settings.json`).
+5. **Installs the harness hooks** — read-deduplication (token savings), auto-reindex after edits, long-bash-output capture.
+6. **Verifies** — API health, audit-chain verification, config presence — and prints exactly what to do next.
+
+The installer is idempotent: re-running it updates an existing install without clobbering your secrets or settings.
+
+**Then:**
+
+1. Restart Claude Code (the plugin loads at startup).
+2. In any project, ask Claude to run `zc_status` — you should see the store, chain status, and skill counts.
+3. Open the dashboard: `http://localhost:3099/dashboard`.
+
+If you already cloned the repo, the same installer is just:
+
+```bash
+node init.mjs            # full Docker stack
+node init.mjs --sqlite   # no Docker — local SQLite mode
+node init.mjs --uninstall
+```
+
+---
+
+## Setup in detail (manual path)
+
+Use this if you prefer to run each step yourself, or the one-command path failed somewhere.
+
+### 1. Clone and build
+
+```bash
 git clone https://github.com/iampantherr/SecureContext.git
 cd SecureContext
 npm ci
-
-# 2. Bring up Postgres + Ollama via Docker
-docker compose -f docker/docker-compose.yml up -d
-
-# 3. Register the MCP plugin with Claude Code
-# Add to ~/.claude/settings.json (or via /plugins ui):
-#   "mcpServers": { "zc-ctx": { "command": "node", "args": ["/abs/path/dist/server.js"], ... } }
-# See docs/CLAUDE_CODE_SETUP.md for the full config block.
-
-# 4. Install the PreToolUse hook for skill-script HMAC verification
-# Copy hooks/skill-script-hmac-verify.mjs into ~/.claude/hooks/
-# Register it in ~/.claude/settings.json under PreToolUse → matcher: "Bash".
-
-# 5. (Optional) Drop a skill to test
-mkdir -p ~/.claude/skills/hello-world/scripts
-cat > ~/.claude/skills/hello-world/SKILL.md <<'EOF'
----
-name: hello-world
-description: Says hello to a name argument. Use whenever the user asks for a greeting.
-version: 1.0.0
----
-# Hello World
-Run `python scripts/hello.py NAME` to greet.
-EOF
-cat > ~/.claude/skills/hello-world/scripts/hello.py <<'EOF'
-import sys; print(f"hello {sys.argv[1] if len(sys.argv) > 1 else 'world'}")
-EOF
-
-# 6. Restart sc-api and verify
-docker compose -f docker/docker-compose.yml restart sc-api
-curl http://localhost:3099/api/v1/skills/admission-log/verify
-# → {"ok":true,"total_rows":1,"broken_at":null,"broken_kind":null}
+npm run build
 ```
 
-Open the dashboard at `http://localhost:3099/dashboard` — you'll see the green "CHAIN OK" banner, the admitted skill with the 📁 filesystem badge, and an admission_log entry.
+### 2. Bring up the Docker stack
 
-For per-project skills under `<project>/.claude/skills/<name>/`, bind-mount the project into `sc-api` (see `docker/docker-compose.yml` line 96) and set `ZC_PROJECT_SKILL_PATHS` to the in-container path, or call `POST /api/v1/skills/import-project?path=...` on demand.
+Create `docker/.env` with two secrets (any strong random strings):
 
----
+```
+POSTGRES_PASSWORD=<random>
+ZC_API_KEY=<random>
+```
 
-## Headline numbers
+Then:
 
-| Metric | Result |
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+# NVIDIA GPU?  add: -f docker/docker-compose.nvidia.yml
+curl http://localhost:3099/health          # → {"status":"ok","version":"0.46.1",...}
+docker exec securecontext-ollama ollama pull nomic-embed-text
+```
+
+`docker/start.ps1` / `docker/start.sh` wrap this with GPU auto-detection and a `prod` mode (nginx reverse proxy).
+
+### 3. Register the MCP plugin with Claude Code
+
+```bash
+node install.mjs --remote http://localhost:3099 <your ZC_API_KEY>
+# or, SQLite mode (no Docker):
+node install.mjs
+```
+
+This writes the `zc-ctx` entry into `~/.claude/settings.json` (and can also configure the Claude Desktop app with `--desktop`). See [docs/CLAUDE_CODE_SETUP.md](docs/CLAUDE_CODE_SETUP.md) for the manual config block.
+
+### 4. Install the harness hooks
+
+```bash
+# copy the hook scripts
+cp hooks/*.mjs ~/.claude/hooks/
+```
+
+Register in `~/.claude/settings.json` (full JSON in [hooks/INSTALL.md](hooks/INSTALL.md)):
+
+| Hook | Event | What it does |
+|---|---|---|
+| `preread-dedup.mjs` | PreToolUse → Read | Redirects repeat file reads to compressed summaries — the main token saver |
+| `postedit-reindex.mjs` | PostToolUse → Edit/Write | Refreshes a file's semantic summary after every edit |
+| `postbash-capture.mjs` | PostToolUse → Bash | Archives long command output into the searchable KB |
+
+### 5. Verify the install
+
+```bash
+curl http://localhost:3099/health
+curl http://localhost:3099/api/v1/skills/admission-log/verify
+# → {"ok":true,"total_rows":N,"broken_at":null,...}
+```
+
+Open `http://localhost:3099/dashboard` — you should see the green "CHAIN OK" banner.
+
+### 6. Your first session
+
+Start a Claude Code session in any project and work normally. Useful calls to know:
+
+| You want to… | Call |
 |---|---|
-| Token overhead per session (vs. native Claude re-paste) | **~87% lower** |
-| Claude Opus cost per session (tool-call overhead only) | **~$0.16** vs. ~$2–5 native |
-| Recall cache hit saves | **~800 tokens per call** (~$0.06 on Opus) |
-| Recall on a mature project (237 facts, v0.43.0 budget) | **~47k → ~4k tokens per recall (~92% lower)** |
-| Memory-retrieval benchmark (LongMemEval-style, v0.40 → v0.43) | **hit@10 0% → 78%** |
-| Unit + integration tests | **878 passing** |
-| Red-team attack IDs verified | **60+ (RT-S0 through RT-S4)** |
-| Hash-chain forgery resistance | Cryptographic (per-agent HKDF subkey) |
-| Atomic work-stealing tested | **50 agents × 100 tasks, zero double-claims** |
-| Marketplace skills supported | **17 / 17** Anthropic skills (with operator opt-in flags where their scripts use shell=True) |
+| Restore project memory at session start | `zc_recall_context({focus: "what you're about to do"})` |
+| Get a 500-token project orientation | `zc_project_card()` |
+| Persist a decision or gotcha | `zc_remember(key, value, importance)` |
+| Ask what a file does (without reading it) | `zc_file_summary(path)` |
+| Search project knowledge (temporal-aware) | `zc_search(["query"])` |
+| Search *another* project's knowledge | `zc_search_global({queries, project: "Name"})` |
+| Track a multi-phase delivery | `zc_program({action: "define" / "status" / "close_phase"})` |
+| End-of-session persistence | `zc_summarize_session()` |
+
+Per-project skills live under `<project>/.claude/skills/<name>/`; bind-mount the project into `sc-api` (see `docker/docker-compose.yml`) and set `ZC_PROJECT_SKILL_PATHS`, or call `POST /api/v1/skills/import-project?path=...`.
+
+### Upgrading
+
+```bash
+cd ~/SecureContext && git pull && node init.mjs
+```
+
+Database migrations run automatically on boot; every feature ships with a kill-switch env var (documented in [CHANGELOG.md](CHANGELOG.md)) so you can disable anything that misbehaves without downgrading.
 
 ---
 
@@ -210,7 +196,7 @@ For per-project skills under `<project>/.claude/skills/<name>/`, bind-mount the 
 │   sc-api (Node + Fastify, Docker)                                   │
 │   ─ /api/v1/skills/*           — verify-script, admission-log,      │
 │                                  marketplace pull, project import   │
-│   ─ /api/v1/skills/spotter/*   — detector library (v0.28.0-α)      │
+│   ─ /api/v1/program            — delivery programs + checkpoints    │
 │   ─ /dashboard/*               — HTMX panels                        │
 │   ─ MCP tools                  — zc_remember / zc_search / etc.     │
 └────────────────────────┬────────────────────────────────────────────┘
@@ -222,7 +208,7 @@ For per-project skills under `<project>/.claude/skills/<name>/`, bind-mount the 
 │   ─ outcomes_pg            (HMAC chain)│    │     for vector RAG  │
 │   ─ skills_pg              (mirror)    │    └─────────────────────┘
 │   ─ skill_admission_log_pg (HMAC chain)│
-│   ─ skill_spotter_signals_pg            │
+│   ─ programs_pg / program_phases_pg    │
 │   ─ task_queue_pg          (work-steal)│
 │   ─ broadcasts             (A2A)       │
 │   ─ working_memory                     │
@@ -231,7 +217,6 @@ For per-project skills under `<project>/.claude/skills/<name>/`, bind-mount the 
 └────────────────────────────────────────┘
                          ▲
                          │  (machine_secret in named volume — never leaves disk)
-                         │
                          ▼
                 ┌──────────────────┐
                 │ Operator         │
@@ -245,23 +230,39 @@ The `machine_secret` is generated once on first boot, mode 0600, lives inside th
 
 ---
 
-## What's new (v0.46.0)
+## What's new (v0.46.1)
 
-**Team memory.** Per-user API keys (`zck_…`, sha256-hashed, instantly revocable), shared workspaces (`workspace:<slug>` virtual projects that every memory/KB/broadcast path handles natively, membership-gated per key), and write attribution (`created_by` on every fact — a user key can't write as anyone else; agents attribute via `ZC_USER_ID`). The operator's master key and single-user setups behave exactly as before; `ZC_TEAM_AUTH=0` is the kill switch.
+**Temporal retrieval round 2 + the delivery-tool kit.** Compound temporal questions decompose into event clauses with rank fusion; temporal searches render a chronological Timeline block and stale results carry age warnings. `zc_program` adds multi-phase delivery programs with evidence-gated, auto-checkpointing phase closure — live-verified with an orchestrator handoff test (kill the orchestrator mid-phase; a cold replacement resumes from two calls). The embed lane now has a watchdog with budgeted self-healing.
 
 Recent releases:
-- **v0.45.0** — session replay with cryptographic provenance: scrub any session's tool-call timeline on the dashboard (Security → Session replay); every step badged `✓ verified` / `✗ tampered` / `⛓ gap` / `· unsigned` from the HMAC chain, multi-key verification (container + host secret via `ZC_VERIFY_SECRET_PATH`).
-- **v0.44.0** — temporal fact supersession (retrieval prefers current facts; measured knowledge-update decoy rate 100% → 0%), durable PG task graph (`depends_on[]`, `plan_id`, `zc_plan_status` crash-resume), first public LongMemEval numbers.
-- **v0.43.0** — token-budgeted recall digest (`ZC_RECALL_MAX_CHARS`): full render up to budget, grouped index tail, time-scoped priority — fixes the 47k-token recall firehose on 237-fact projects.
-- **v0.42.0** — TTL memories (`ttl_days`), numeric-conflict triage, temporal filters in KB search, multimodal ingestion (`zc_index_file`: PDF / DOCX / images via local vision models), LongMemEval public-benchmark adapter.
-- **v0.41.0** — memory-quality program: LongMemEval-style benchmark harness, focused recall (`focus` re-ranking), semantic consolidation, bi-temporal event-time + natural-language time windows, multi-hop graph retrieval. Bench: hit@10 0% → 75%.
-- **v0.37–0.40** — self-correcting memory v2, graph retrieval channel, community query mode, trajectory→skill spotter graduation, automatic background memory extraction, operator dashboard redesign.
+- **v0.46.0** — team memory (per-user keys, shared workspaces, write attribution), session replay with cryptographic provenance, OTel Gen-AI spans, CI/headless memory CLI, chunked embeddings, compliance report export.
+- **v0.44.0** — temporal fact supersession, durable PG task graph, first public LongMemEval numbers.
+- **v0.43.0** — token-budgeted recall digest (fixes the 47k-token recall firehose on mature projects).
+- **v0.41–0.42** — memory-quality program: focused recall, consolidation, bi-temporal windows, multi-hop graph retrieval, TTL memories, multimodal ingestion.
 
 Full details in [CHANGELOG.md](CHANGELOG.md); architecture notes in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
-## LongMemEval (public benchmark)
+## Benchmarks, comparisons & measured claims
+
+Everything in this section is measured, reproducible, and versioned — not marketing copy. Methodology notes included.
+
+### Headline numbers
+
+| Metric | Result |
+|---|---|
+| Token overhead per session (vs. native Claude re-paste) | **~87% lower** |
+| Claude Opus cost per session (tool-call overhead only) | **~$0.16** vs. ~$2–5 native |
+| Recall on a mature project (237 facts, v0.43.0 budget) | **~47k → ~4k tokens per recall (~92% lower)** |
+| Memory-retrieval benchmark (LongMemEval-style, v0.40 → v0.43) | **hit@10 0% → 78%** |
+| Unit + integration tests | **959 passing** |
+| Red-team attack IDs verified | **60+ (RT-S0 through RT-S4)** |
+| Hash-chain forgery resistance | Cryptographic (per-agent HKDF subkey) |
+| Atomic work-stealing tested | **50 agents × 100 tasks, zero double-claims** |
+| Marketplace skills supported | **17 / 17** Anthropic skills (operator opt-in flags where scripts use shell=True) |
+
+### LongMemEval (public benchmark)
 
 Retrieval recall on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (`longmemeval_s`), measured through SecureContext's live search API — the same path agents use. Runnable by anyone: `node scripts/memory-bench.mjs --longmemeval <longmemeval_s.json> --limit 15`.
 
@@ -293,7 +294,38 @@ Retrieval recall on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (`l
   Tracked, not spun.
 </details>
 
-**Methodology (read before comparing):** this is a *retrieval* metric — whether the gold answer session appears in the top-K search results over a **5,674-session haystack** (the union of 90 stratified questions' haystacks, 15 per type; 2 questions dropped to API timeouts). It is **not** end-to-end QA accuracy, so it is not directly comparable to LLM-judged accuracy numbers in vendor papers. Embeddings are fully local (`nomic-embed-text`, 274 MB) — no cloud embedder. Knowledge-update is the strongest category because of v0.44's temporal supersession work (retrieval prefers current facts). Version: measured on v0.44.0-dev; results JSON in `bench/results/longmemeval.json`.
+**Methodology (read before comparing):** this is a *retrieval* metric — whether the gold answer session appears in the top-K search results over a **5,674-session haystack** (the union of 90 stratified questions' haystacks, 15 per type; 2 questions dropped to API timeouts). It is **not** end-to-end QA accuracy, so it is not directly comparable to LLM-judged accuracy numbers in vendor papers. Embeddings are fully local (`nomic-embed-text`, 274 MB) — no cloud embedder. Results JSON in `bench/results/`.
+
+### How it's different from competitors
+
+Most "memory for Claude Code" projects do one of three things:
+- **Wrap the conversation in JSON.** Saves the messages, replays them. No semantic compression, no audit trail, no security model.
+- **Sync to a cloud service.** Better UX but now your agent's tool history (potentially including secrets it touched) lives on someone else's server.
+- **Drop in vector search.** Adds RAG over your docs but doesn't help with the actual problem — orchestrating what the agent does, verifying what ran, surviving session compaction.
+
+SecureContext is none of those:
+
+| | SecureContext | Cloud memory services | Vector RAG plugins | Native Claude Code |
+|---|---|---|---|---|
+| Persistent across restarts | ✅ Yes, local Postgres | ✅ But on their server | ⚠️ Only docs, not state | ❌ Lossy auto-compact |
+| Delivery programs + evidence-gated checkpoints | ✅ zc_program | ❌ | ❌ | ❌ |
+| HMAC audit trail | ✅ Per-agent subkey | ❌ | ❌ | ❌ |
+| Per-agent identity isolation | ✅ HKDF + RLS | ❌ | ❌ | ❌ |
+| Skill admission gate (HMAC + AST) | ✅ | ❌ | ❌ | ❌ |
+| Tamper-evident chain + session replay | ✅ | ❌ | ❌ | ❌ |
+| Work-stealing queue for parallel sessions | ✅ FOR UPDATE SKIP LOCKED | ❌ | ❌ | ❌ |
+| Runs offline | ✅ Local Postgres + Ollama | ❌ | ⚠️ Depends | ✅ |
+| Cost when idle | $0 | Monthly subscription | $0 | $0 |
+
+Versus the well-known memory products: Mem0 and Zep are excellent **hosted memory APIs for LLM apps you build**; Letta (MemGPT) is an agent framework with self-editing memory. SecureContext targets a different job — **memory + delivery + security for the coding agents working on your machine**. It matches their core memory features locally (importance-scored facts with TTL, semantic + temporal + graph retrieval, contradiction detection, LongMemEval-comparable benchmarking) and adds what none of them have: the HMAC-chained audit trail, per-agent cryptographic identity, the skill admission gate, and the program/delivery layer.
+
+> **Note on the "SafeSkill 20/100 Blocked" PR comment:** that score is a false positive from a regex-based scanner that doesn't understand the difference between *defending against* a pattern and *using* it. See [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) for the line-by-line refutation.
+
+### The security capabilities in detail
+
+- **Skill admission:** every bundled script AST-scanned at admission (detects `eval`, `exec`, `subprocess(shell=True)`, `pickle.loads`, dynamic imports), HMAC computed per file, quarantine on failure, HMAC re-verified by a PreToolUse hook before **every** execution — tamper with an admitted script and the next invocation is refused. End-to-end tested with live Claude CLI agents.
+- **Audit chain:** every tool call and outcome signed with a per-agent HKDF subkey derived from a machine secret that never leaves disk. Agent A cannot forge rows as agent B; even full Postgres write access cannot produce rows that pass verification. Session replay renders any session's timeline with per-step `✓ verified / ✗ tampered / ⛓ gap` badges; a compliance report export renders the full chain for auditors.
+- **Isolation:** Postgres Row-Level Security per agent via `SET LOCAL ROLE`; per-user API keys (sha256-stored, revocable) with membership-gated shared workspaces and write attribution.
 
 ---
 
@@ -301,19 +333,19 @@ Retrieval recall on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (`l
 
 ### What is SecureContext?
 
-SecureContext is an open-source (MIT) MCP plugin that adds persistent memory, a cryptographic audit trail, skill-security gating, and multi-agent coordination to Claude Code. It stores everything in local PostgreSQL with local Ollama embeddings — no cloud service, no account, no subscription.
+SecureContext is an open-source (MIT) MCP plugin that adds persistent memory, a delivery/program layer, a cryptographic audit trail, skill-security gating, and multi-agent coordination to Claude Code. It stores everything in local PostgreSQL with local Ollama embeddings — no cloud service, no account, no subscription.
 
 ### How do I give Claude Code persistent memory across sessions?
 
-Install SecureContext, then agents call `zc_remember` to persist decisions and gotchas and `zc_recall_context({focus: "current task"})` at session start to restore them — ranked by relevance to the task at hand, with natural-language time queries ("what happened last week") answered directly from memory. Memory survives restarts, compactions, and machine reboots because it lives in PostgreSQL, not in the context window.
+Install SecureContext (one command — see [Quick start](#quick-start--one-command)), then agents call `zc_remember` to persist decisions and gotchas and `zc_recall_context({focus: "current task"})` at session start to restore them — ranked by relevance, with natural-language time queries answered directly from memory. Memory survives restarts, compactions, and reboots because it lives in PostgreSQL, not in the context window.
 
 ### How much does SecureContext reduce Claude Code token costs?
 
-Measured across a 10-session project: **~87% less context-overhead** (session restore is ~1.5–4k tokens instead of 20–50k of re-pasted files). On long-lived projects with hundreds of accumulated memories, the v0.43.0 recall budget keeps each recall at ~4k tokens where an unbounded dump would be ~47k. File questions are answered from 15–50× compressed semantic summaries instead of raw reads.
+Measured across a 10-session project: **~87% less context-overhead** (session restore is ~1.5–4k tokens instead of 20–50k of re-pasted files). On long-lived projects with hundreds of accumulated memories, the recall budget keeps each recall at ~4k tokens where an unbounded dump would be ~47k. File questions are answered from 15–50× compressed semantic summaries instead of raw reads.
 
-### How does SecureContext compare to Mem0, Zep, or Letta?
+### Can it manage a long, multi-week project?
 
-Mem0 and Zep are excellent **hosted memory APIs for LLM apps you build**; Letta (MemGPT) is an agent framework with self-editing memory. SecureContext targets a different job: **memory + security for the coding agents working on your machine**. It matches their core memory features locally (importance-scored facts with TTL, semantic + temporal + graph retrieval, contradiction detection, LongMemEval-comparable benchmarking) and adds what none of them have — an HMAC-chained tamper-evident audit trail, per-agent cryptographic identity isolation, and a skill admission gate. If you want a managed memory backend for your own product, use Mem0/Zep; if you want your Claude Code agents to remember, be auditable, and be safe, use SecureContext.
+Yes — that's what the delivery layer is for. Define a program with phases (`zc_program`), and the open phase's acceptance checklist travels with the project state. Closing a phase requires an evidence table and generates a checkpoint document automatically. If the orchestrating agent dies mid-phase, a fresh one reconstructs the full delivery state from two calls — verified live.
 
 ### Does SecureContext send my code or data to the cloud?
 
@@ -321,27 +353,28 @@ No. Memory, embeddings (Ollama `nomic-embed-text`), search, summarization, and t
 
 ### Are Claude Code skills safe to install?
 
-Filesystem skills bundle scripts that run with your permissions, and Claude Code's native loader does not scan them. SecureContext adds the missing gate: every script is AST-scanned for dangerous patterns (`eval`, `exec`, `subprocess(shell=True)`, `pickle.loads`) at admission, HMAC-verified before **every** execution, and quarantined automatically if it fails or changes after admission — with a verifiable chained log of every admission decision.
+Filesystem skills bundle scripts that run with your permissions, and Claude Code's native loader does not scan them. SecureContext adds the missing gate: AST scan at admission, HMAC verification before every execution, automatic quarantine on failure or post-admission change, and a verifiable chained log of every admission decision.
 
 ### Can multiple Claude Code sessions work on the same project without conflicts?
 
-Yes — that's a core feature. Parallel sessions atomically claim tasks from a work-stealing queue (zero double-claims at 50 agents × 100 tasks in testing), coordinate through typed broadcasts (ASSIGN/STATUS/MERGE/REJECT), and keep private per-agent memory namespaces plus a shared pool.
+Yes — parallel sessions atomically claim tasks from a work-stealing queue (zero double-claims at 50 agents × 100 tasks in testing), coordinate through typed broadcasts (ASSIGN/STATUS/MERGE/REJECT), and keep private per-agent memory namespaces plus a shared pool. Department-style hierarchies (heads + workers, N-tier escalation) are supported for larger agent teams.
 
 ### What do I need to run it?
 
-Node ≥ 22 and Docker (for the bundled PostgreSQL + Ollama compose stack). One-time setup takes about five minutes — see [Setup](#setup). A SQLite fallback runs with zero infrastructure for single-machine use.
+Node 20+ and (recommended) Docker for the bundled PostgreSQL + Ollama stack. The one-command installer does everything in about five minutes. A SQLite fallback runs with zero infrastructure.
 
 ---
 
 ## Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — deep dive on the security model, HMAC chain construction, RLS, threat model
-- [CHANGELOG.md](CHANGELOG.md) — release-by-release detail (v0.26.0 = admission gate, v0.27.0 = marketplace bundled scripts, v0.28.0-α = skill spotter)
+- [CHANGELOG.md](CHANGELOG.md) — release-by-release detail
 - [SECURITY_REPORT.md](SECURITY_REPORT.md) — red-team test IDs + verification log
 - [SAFESKILL_RESPONSE.md](SAFESKILL_RESPONSE.md) — line-by-line refutation of the SafeSkill scanner's false positives
 - [SecureContext_ProductionReadiness_Report.md](SecureContext_ProductionReadiness_Report.md) — what's hardened, what's still in beta
-- [docs/SKILL_AUTHORSHIP_GUIDE.md](docs/SKILL_AUTHORSHIP_GUIDE.md) — the four invariants, frontmatter spec, script-writing rules, scope decisions
-- [examples/skills/](examples/skills/) — reference filesystem skills you can copy into `~/.claude/skills/`: `writing-skills` (meta-skill scaffolder + linter + admission preview), `publish-github-release` (bump version, regenerate CHANGELOG, push, wait for CI, create release)
+- [docs/SKILL_AUTHORSHIP_GUIDE.md](docs/SKILL_AUTHORSHIP_GUIDE.md) — frontmatter spec, script-writing rules, scope decisions
+- [hooks/INSTALL.md](hooks/INSTALL.md) — harness hooks reference
+- [examples/skills/](examples/skills/) — reference filesystem skills you can copy into `~/.claude/skills/`
 
 ---
 
