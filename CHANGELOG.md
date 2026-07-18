@@ -24,6 +24,28 @@ For full release notes including the v0.2.0–v0.8.0 history, see the **[Changel
   ordering questions that need date arithmetic over multiple gold sessions — a
   reasoning feature, not a ranking one; recorded as future work, not claimed.
 
+## [0.46.2] — 2026-07-18
+
+Bugfix release — every item below was caught during live operation of the
+6-department enterprise delivery run and verified fixed on the running stack.
+
+- **Verify-key loss is now LOUD:** when the host machine-secret bind-mount broke
+  (Windows Docker silently turned it into an empty directory after a redeploy),
+  every host-signed audit row rendered "✗ tampered" with zero signal anywhere.
+  Replay now logs `VERIFY KEY UNAVAILABLE` with the reason, and `/health` carries
+  `verifyKeys: {container, host}` so a broken mount is visible at a glance.
+- **Contradiction triage self-maintains:** 1,053 of 1,123 open flags referenced
+  facts that were already retired/superseded/evicted — zombie entries nothing
+  ever re-checked. Every scan now auto-closes flags whose facts aren't both
+  live (first live run: 806 closed), in BOTH stores. `acceptance_*` workflow
+  keys (phase checklists) are exempt from detection — they're state, not claims.
+- **Cost attribution for suffixed model ids:** `claude-opus-4-8[1m]` priced as
+  $0.0000 because the exact-match lookup missed the launcher's context-window
+  suffix AND the table lacked an opus-4-8 entry. Lookup now normalizes the
+  suffix; opus-4-8 added with a signed table-version bump. (Historical rows keep
+  their stored cost — they're HMAC-signed and immutable by design.)
+- Favicon served (auth-exempt inline SVG) — no more 401 noise per browser tab.
+
 ### TR-2 — Compound-question decomposition + timeline/staleness surfacing
 - **Multi-event decomposition (both stores):** compound temporal questions ("how many
   days passed between the day I started X and the day I Y", 3-event ordering lists)

@@ -64,10 +64,26 @@ export interface ReplayStep {
   key: string | null;
 }
 
+/** v0.46.2 — status of each candidate verify key, surfaced in /health.
+ *  Caught live 2026-07-18: the host-secret bind-mount silently became an empty
+ *  DIRECTORY after a Windows redeploy, the catch below swallowed EISDIR, and
+ *  every host-signed row rendered "✗ tampered" with no signal anywhere. A lost
+ *  verification key must be LOUD. */
+let _verifyKeyStatus: Record<string, string> = {};
+let _verifyKeyLogged = "";
+export function getVerifyKeyStatus(): Record<string, string> {
+  // Populate on demand (cheap: two small file reads) so /health reports key
+  // availability even before any replay has run this process.
+  if (Object.keys(_verifyKeyStatus).length === 0) verifySecrets();
+  return _verifyKeyStatus;
+}
+
 /** Candidate root secrets for verification, labeled. */
 function verifySecrets(): Array<{ label: string; secret: Buffer }> {
   const out: Array<{ label: string; secret: Buffer }> = [];
-  try { out.push({ label: "container", secret: getMachineSecret() }); } catch { /* none */ }
+  const status: Record<string, string> = {};
+  try { out.push({ label: "container", secret: getMachineSecret() }); status["container"] = "ok"; }
+  catch (e) { status["container"] = `error: ${(e as Error).message}`; }
   const extPath = process.env["ZC_VERIFY_SECRET_PATH"];
   if (extPath) {
     try {
@@ -84,8 +100,28 @@ function verifySecrets(): Array<{ label: string; secret: Buffer }> {
       } else {
         secret = raw;
       }
-      out.push({ label: "host", secret });
-    } catch { /* mount absent — container-only verification */ }
+      if (secret.length < 16) {
+        status["host"] = `error: secret at ${extPath} is only ${secret.length} bytes — mount broken?`;
+      } else {
+        out.push({ label: "host", secret });
+        status["host"] = "ok";
+      }
+    } catch (e) {
+      // EISDIR here means the bind-mount source failed to resolve and Docker
+      // created a directory — the exact silent failure this status exists for.
+      status["host"] = `error: ${(e as Error).message}`;
+    }
+  } else {
+    status["host"] = "not configured";
+  }
+  _verifyKeyStatus = status;
+  const bad = Object.entries(status).filter(([, v]) => v.startsWith("error"));
+  const badKey = JSON.stringify(bad);
+  if (bad.length && badKey !== _verifyKeyLogged) {
+    _verifyKeyLogged = badKey;
+    for (const [label, v] of bad) {
+      console.error(`[replay] VERIFY KEY UNAVAILABLE (${label}): ${v} — rows signed with this key will show "tampered" until fixed`);
+    }
   }
   return out;
 }

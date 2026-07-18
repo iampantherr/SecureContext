@@ -256,6 +256,9 @@ export async function createApiServer(storeOverride?: Store) {
     // no secrets). Task submission/query under /a2a/* stays behind the bearer gate.
     if (request.url === "/.well-known/agent.json") return;
 
+    // v0.46.2 — favicon is public (static inline SVG, no data).
+    if (request.url === "/favicon.ico") return;
+
     // v0.26.0 Step 4 — PreToolUse hook (~/.claude/hooks/skill-script-hmac-verify.mjs)
     // calls /api/v1/skills/<name>/verify-script to ask "is this script's HMAC
     // intact?" The hook is spawned per Bash invocation by Claude Code; it doesn't
@@ -336,6 +339,10 @@ export async function createApiServer(storeOverride?: Store) {
       // D4 (v0.46.1) — embed-lane watchdog verdict (stalled = pending vectors +
       // quiet lane + Ollama reachable; the silent-degradation class).
       embedLane:       getEmbedLaneHealth(),
+      // v0.46.2 — replay verification key availability. "error: EISDIR ..." here
+      // means the host-secret bind-mount broke (Windows Docker can silently turn
+      // it into a directory) and host-signed rows will render "tampered".
+      verifyKeys:      await import("./replay.js").then((m) => m.getVerifyKeyStatus()),
       ollamaAvailable: ollama.available,
       ollamaUrl:       ollama.available ? ollama.url.replace("/api/embeddings", "") : null,
       searchMode:      ollama.available ? "hybrid (BM25 + vector)" : "BM25-only (Ollama unavailable)",
@@ -473,6 +480,13 @@ export async function createApiServer(storeOverride?: Store) {
       card(counts.facts, "live memory facts", "memory", false) +
       `</div>`;
     reply.type("text/html; charset=utf-8").send(html);
+  });
+
+  // v0.46.2 — favicon: exempt from auth, serve an inline SVG. Previously every
+  // browser tab load logged a 401 for /favicon.ico (cosmetic but noisy).
+  app.get("/favicon.ico", async (_request, reply) => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0b0f14"/><path d="M16 4l9 4v7c0 6-3.8 10.4-9 13-5.2-2.6-9-7-9-13V8z" fill="none" stroke="#34d399" stroke-width="2.2"/><circle cx="16" cy="15" r="3.2" fill="#34d399"/></svg>`;
+    reply.type("image/svg+xml").header("Cache-Control", "public, max-age=86400").send(svg);
   });
 
   // v0.46.1 (D1) — Delivery programs panel: per-program phase burn-down so the

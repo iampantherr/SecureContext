@@ -114,6 +114,9 @@ export async function detectContradictions(
   for (let i = 0; i < facts.length; i++) {
     for (let j = i + 1; j < facts.length; j++) {
       const a = facts[i]!, b = facts[j]!;
+      // v0.46.2 (parity with PG) — acceptance_* keys are workflow checklists,
+      // not claims; two phases' checklists sharing phrasing is not a conflict.
+      if (a.key.startsWith("acceptance_") || b.key.startsWith("acceptance_")) continue;
       const va = vectors.get(a.key), vb = vectors.get(b.key);
       if (!va || !vb) continue;
       const sim = cosineSimilarity(va, vb);
@@ -128,6 +131,20 @@ export async function detectContradictions(
 
   const db = openDb(projectPath);
   ensureTable(db);
+  // v0.46.2 (parity with PG) — sweep zombie flags: an open contradiction whose
+  // facts are no longer BOTH live is moot and self-closes.
+  try {
+    const pruned = db.prepare(`
+      UPDATE memory_contradictions SET status = 'dismissed', reviewed_at = ?, resolution_mode = 'auto',
+             detail = detail || ' [auto-closed: a side was retired/superseded/evicted]'
+       WHERE status = 'open'
+         AND (NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.key = key_a
+                            AND w.agent_id IN (memory_contradictions.agent_id, 'default') AND w.valid_to IS NULL)
+           OR NOT EXISTS (SELECT 1 FROM working_memory w WHERE w.key = key_b
+                            AND w.agent_id IN (memory_contradictions.agent_id, 'default') AND w.valid_to IS NULL))
+    `).run(new Date().toISOString());
+    if (Number(pruned.changes) > 0) console.error(`[contradictions] auto-closed ${pruned.changes} stale flag(s)`);
+  } catch { /* pre-migration DB without valid_to — skip pruning */ }
   const now = new Date().toISOString();
   const openStmt = db.prepare(`
     INSERT INTO memory_contradictions(agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by, surfaced_at)

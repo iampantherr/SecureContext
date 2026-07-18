@@ -71,9 +71,16 @@ export interface CostCalculation {
 // As of 2026-04-18. Update when pricing changes.
 
 const PRICING_TABLE: PricingTable = {
-  version: "2026-04-18.1",
+  version: "2026-07-18.1",
   models: {
     // ── Anthropic Claude family ──
+    "claude-opus-4-8": {
+      input_per_mtok:  15.0,
+      output_per_mtok: 75.0,
+      cached_input_per_mtok: 1.5,
+      updated: "2026-07-18",
+      batch_supported: true,
+    },
     "claude-opus-4-7": {
       input_per_mtok:  15.0,
       output_per_mtok: 75.0,
@@ -294,7 +301,11 @@ export function computeCost(
     };
   }
 
-  const pricing = PRICING_TABLE.models[model];
+  // v0.46.2 — normalize launcher-decorated model ids before lookup:
+  // "claude-opus-4-8[1m]" (context-window suffix) must price as "claude-opus-4-8".
+  // Caught live: every orchestrator session showed $0.0000 because the exact-match
+  // lookup missed the suffixed id and silently fell back to known:false.
+  const pricing = PRICING_TABLE.models[model] ?? PRICING_TABLE.models[model.replace(/\[[^\]]*\]$/, "")];
   if (!pricing) {
     return {
       model,

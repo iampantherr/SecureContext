@@ -1471,7 +1471,36 @@ export class PostgresStore implements Store {
     return this._scanContradictionsByHash(ph(projectPath), sanitize(agentId, 64));
   }
 
+  /**
+   * v0.46.2 — close open contradictions whose facts are no longer BOTH live.
+   * Caught live: 1,053 of 1,123 open flags referenced a retired/superseded/
+   * evicted fact — zombie triage debt that grew forever because nothing ever
+   * re-checked liveness. A contradiction about a dead fact is moot by definition.
+   */
+  private async _pruneStaleContradictions(projectHash: string): Promise<number> {
+    try {
+      const r = await this.pool.query(
+        `UPDATE memory_contradictions_pg mc
+            SET status = 'dismissed', reviewed_at = NOW(), resolution_mode = 'auto',
+                detail = mc.detail || ' [auto-closed: a side was retired/superseded/evicted]'
+          WHERE mc.project_hash = $1 AND mc.status = 'open'
+            AND (NOT EXISTS (SELECT 1 FROM working_memory w
+                              WHERE w.project_hash = mc.project_hash AND w.key = mc.key_a
+                                AND w.agent_id IN (mc.agent_id, 'default') AND w.valid_to IS NULL)
+              OR NOT EXISTS (SELECT 1 FROM working_memory w
+                              WHERE w.project_hash = mc.project_hash AND w.key = mc.key_b
+                                AND w.agent_id IN (mc.agent_id, 'default') AND w.valid_to IS NULL))`,
+        [projectHash]);
+      return r.rowCount ?? 0;
+    } catch { return 0; }
+  }
+
   private async _scanContradictionsByHash(projectHash: string, safeAgent: string, sinceDays?: number): Promise<{ scanned: number; flagged: number; ollamaAvailable: boolean; skipped?: number }> {
+    // v0.46.2 — every scan first sweeps zombie flags so the triage queue
+    // self-maintains instead of accumulating forever.
+    void this._pruneStaleContradictions(projectHash).then((n) => {
+      if (n > 0) console.log(`[contradictions] auto-closed ${n} stale flag(s) for ${projectHash} (retired/evicted facts)`);
+    });
     // sinceDays (cron only) restricts the scan to RECENT facts so the periodic sweep flags fresh
     // conflicts rather than re-embedding + re-flagging years of accumulated history every cycle.
     // The recall-time path passes nothing ⇒ scans all facts (unchanged).
@@ -1527,6 +1556,12 @@ export class PostgresStore implements Store {
     for (let i = 0; i < facts.length; i++) {
       for (let j = i + 1; j < facts.length; j++) {
         const a = facts[i]!, b = facts[j]!;
+        // v0.46.2 — acceptance_* keys are WORKFLOW STATE (per-phase checklists
+        // from the acceptance-gate skill), not claims about the world. Two
+        // phases' checklists naturally share phrasing and differ in numbers —
+        // flagging them as contradictions is pure noise (seen live:
+        // acceptance_E4_security vs acceptance_e4_final).
+        if (a.key.startsWith("acceptance_") || b.key.startsWith("acceptance_")) continue;
         const va = vectors.get(a.key), vb = vectors.get(b.key);
         if (!va || !vb) continue;
         const sim = cosineSimilarity(va, vb);
