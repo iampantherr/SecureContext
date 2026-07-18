@@ -24,6 +24,50 @@ For full release notes including the v0.2.0–v0.8.0 history, see the **[Changel
   ordering questions that need date arithmetic over multiple gold sessions — a
   reasoning feature, not a ranking one; recorded as future work, not claimed.
 
+## [0.47.0] — 2026-07-18
+
+**The TKG round — SecureContext's temporal knowledge-graph story, 100% local.**
+Design derived from a 105-agent verified research pass on Graphiti/Zep (arXiv
+2501.13956): their bi-temporal model is pure schema, their retrieval is pure
+algorithm, and their only LLM-hard piece (contradiction-driven invalidation) is
+here replaced with an algorithmic-first loop escalating to an EVIDENCE-SELECTED
+local model. Live-verified with real terminal agents on fresh + mature projects
+(one fix-and-retest cycle; final 4/4 + 4/4).
+
+### T1 — KB bi-temporality
+- `first_seen_at` (immutable) + `last_indexed_at` (bumped) on knowledge entries —
+  PG migration 41; on `source_meta` for SQLite (FTS5 tables cannot ALTER).
+  Re-indexing preserves first-seen; temporal Timelines order by first-seen.
+  Fixes the created_at-bump-on-reindex date-clustering defect. (Historical
+  entries backfill first_seen from the already-bumped created_at — only new
+  indexing benefits fully; documented, not spun.)
+
+### T2 — Point-in-time queries (as-of)
+- `as_of` on `zc_search`: the KB as it existed at a past date (tool → proxy →
+  API → both stores; fail-open for pre-migration entries).
+- `as_of` on `zc_recall_context`: the M3 reconstruction path existed server-side
+  since v0.41 but was never exposed as a tool parameter (caught by the live
+  terminal-agent E2E). Facts live AT that moment: includes since-retired,
+  excludes later-created.
+
+### T3 — Invalidation loop (bakeoff-selected local adjudicator)
+- `bench/t3/`: 52-case gold set (real triage history + synthetic) + 6-model
+  bakeoff harness. Result: qwen2.5-coder:14b is the only local model with ZERO
+  false contradictions + 5/5 true-conflict recall; llama3.1:8b DISQUALIFIED
+  (27 false conflicts); 32B was worse than 14B. No model picks sides reliably
+  (~40% current-side accuracy) ⇒ policy: the model CLASSIFIES, RECENCY picks
+  the survivor, "contradiction" verdicts only ever open operator triage.
+- `src/llm_adjudicator.ts` + scan integration (both stores): ambiguous pairs get
+  one constrained-JSON judgment (budget 8/scan; ZC_LLM_ADJUDICATE=0 kill switch,
+  _MODEL/_BUDGET/_TIMEOUT_MS overrides). "compatible" suppresses the flag
+  (live: 6 real A2A work-journal false positives silently dismissed);
+  "update" invalidates the older side.
+- `invalid_from` world-time column (PG migration 42 / SQLite 41) completes the
+  four-timestamp bi-temporal square (created_at/valid_to + valid_at/invalid_from).
+- Clock-time conflicts now detected: "runs at 02:00" vs "04:30" previously
+  parsed as TWO differing numbers and never matched the one-number-changed
+  template (caught by the live E2E; HH:MM now normalizes to one numeral).
+
 ## [0.46.2] — 2026-07-18
 
 Bugfix release — every item below was caught during live operation of the

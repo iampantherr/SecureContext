@@ -1,0 +1,522 @@
+[
+ {
+  "id": "real-upd-0",
+  "source": "auto-resolved",
+  "key_a": "E6_ENGINEERING_MERGE_2026-07-18",
+  "key_b": "E7A_FIX_2026-07-18",
+  "value_a": "platform-lead MERGEd TASK_E6_ENGINEERING at commit c490398 (2581 insertions). CR-1 provenance: modules/signer.py (ISigner ABC + HmacSha256Signer), signing_keys table (unique partial index = 1 active key/tenant), migration M-E6-001 (key_id+hmac on telemetry_audit_chain), 5-verdict verify_audit_chain (verified/tampered/gap/pre_chain/key_missing) w/ signer cache, atomic retire-but-keep rotation, 4 endpoints. CR-2 replay: apps/web replay/page.tsx (530L timeline UI) + 4 replay proxy routes (sessions,",
+  "value_b": "platform-lead fixed E7a at commit b6d9bd8. CRIT1: _custom_openapi() 2-pass operationId dedup was on disk but container had STALE image -> rebuilt hub -> openapi-spec-validator PASSES (0 duplicates, 219 paths, 8 tags). CRIT6: PostgresDbAdapter missing get_agent_hmac_secret + create_agent_hmac_secret_if_missing (verify_agent_token raised AttributeError on PG) -> both added reading from agent_keys table; per-agent HMAC rotation path now exercisable. Routed to qa-lead for E7a re-verify (crit1 valida",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-1",
+  "source": "auto-resolved",
+  "key_a": "BUG_Z_AGENT_GIT_COMMIT_NO_SIG_NOTE_2026-05-03",
+  "key_b": "VERIFY_BUGFIX_BLEED_APPROVE_2026-06-10",
+  "value_a": "Wave 7 BUG: agent_tools.git_commit (a2a_control_plane/hub/modules/agent_tools.py:253-316) per D4a is supposed to: (1) git commit, (2) POST /api/sign for Ed25519 signature, (3) git notes --ref=refs/notes/signatures add. Step 3 is failing silently or step 2 returning empty. CR 9da9ce15 commit_sha=c7e474c7d55a has NO signature note — verified live: /merge rejected with \"signature_invalid: no git note found\". The step-2 except clause at line 311-312 (`except Exception: pass — signing is best-effort`",
+  "value_b": "Developer MERGE verified. (1) Context-bleed: agent.py.j2 handle_project_brief() now clears conversation_history/turn_counts/_outgoing_recent. (2) Approve-gate: cr-card.tsx canReview gates on awaiting_review|tests_passed (removed PENDING_REVIEW legacy), added canRunTests + run-tests proxy route. 91/91 tests pass. GOTCHA: .gitignore lines 65 (test_*.py) + 118 (projects/) hide the new regression tests + proxy route from git — they won't commit without git add -f.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-2",
+  "source": "auto-resolved",
+  "key_a": "E4_CRIT6_FIX_2026-07-18",
+  "key_b": "OWNERSHIP_DEV_MERGE_PUSH_FIX_2026-06-10",
+  "value_a": "platform-lead fixed E4 crit6 + /register at commit e6e8ca5. (1) api_release_agent now calls run_container(agent.name) after clearing quarantine (gated PYTEST_RUNNING!='1', try/except idempotent) -> container Exited->Up on release. (2) /register: pre-built _meta_dict=metadata.dict() with provider_type/model_name overridden, then **_meta_dict to Agent() -> TypeError gone. Routed to qa-lead for FINAL re-verify: crit6 (release restarts real container Exited->Up + /route&MCP work) + /register works +",
+  "value_b": "Developer owns TASK_DEV_MERGE_PUSH_TARGET: fix operator approve→merge (api_merge_cr in hub/main.py ~3118, approve ~3347) which fails HTTP400 merge_push_failed 'refusing to update checked out branch refs/heads/master, non-bare repo'. Push must target bare wave7 projects/{pid}/master/ not legacy non-bare projects/{pid}/repo/. Surfaced by E2E 2026-06-10 on pid d3ebf24e.",
+  "gold": "update",
+  "gold_current": "a"
+ },
+ {
+  "id": "real-upd-3",
+  "source": "auto-resolved",
+  "key_a": "OWNERSHIP_DEV_PROVIDER_CREDENTIALS_2026-06-01",
+  "key_b": "last_session_summary",
+  "value_a": "Developer EXCLUSIVE OWNS (importance 9) TASK_DEV_PROVIDER_CREDENTIALS_VAULT. Fix: existing per-agent encrypted_api_key vault is NEVER read by container-deploy code (main.py lines 3638, 988, 1372 all build env_vars without _decrypt_agent_api_key call) — vault is dead-end. PLUS: add org-level provider_credentials table + endpoints + dashboard /credentials page so user pastes a key ONCE and any agent can reference it. Files: main.py (creds endpoints + 3-line injects at 3 deploy sites + migration), ",
+  "value_b": "Security-lead session complete. All three enterprise security specs delivered on branch enterprise-features: E4 injection/DLP/trust-score/containment spec (commit 1869679), E6 forensic replay + multi-key provenance spec with signing_keys schema and key_id FK migration (commit 067383c), E7 mTLS trust model + cert lifecycle + P-07 secret rotation spec with 3 DB migrations (commit 948ed69). Queue drained (empty). Skill outcomes recorded for access-control and acceptance-gate. MERGE broadcast #2515 ",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-4",
+  "source": "auto-resolved",
+  "key_a": "FINDING_CONNECTDEPT_LEAD_NOT_ROLE_AWARE_2026-07-10",
+  "key_b": "QA_MARKETPLACE_2ND_REVISE_2026-06-24",
+  "value_a": "G-COLLAB follow-up: POST /api/groups/{id}/connect-dept picked vald-analyst as target lead instead of vald-architect (role=architect ignored; likely picks by creation order/last member). Workaround: explicit POST /agents/{id}/connect {peer}. Candidate dev task: make lead selection prefer role=architect.",
+  "value_b": "Marketplace 2nd REVISE to developer. GOOD: GET /api/marketplace renders 6 cards (crash fixed) ✓; deploying Software Team DID create dept + 3 ONLINE agents (97 nodes; group TEST-Deploy-Verify members valid) ✓. DEFECTS (backend): (1) deployed agents UNDER-CONFIGURED — GET /api/agents/test-deploy-verify-architect: role=None, model_name='', system_prompt=None. Deploy must apply config.agents role+model; templates lack personas -> enrich templates w/ per-role persona+model. (2) success dialog said '0",
+  "gold": "update",
+  "gold_current": "a"
+ },
+ {
+  "id": "real-upd-5",
+  "source": "auto-resolved",
+  "key_a": "E2_QA_REJECT_CRIT1_2026-07-18",
+  "key_b": "E3_CHAIN_CANONICAL_BUG_2026-07-18",
+  "value_a": "E2 round 1: qa-lead verified 10/11 PASS (live-API evidence on RBAC/auditor-403/SCIM-revoke/break-glass/JWT/cross-tenant/flag). REJECT on crit 1 (OIDC SSO E2E): auth-code exchange fully MOCKED — TestOidcCallback monkeypatches oidc_discover/oidc_exchange_code/oidc_validate_id_token; fake_id_token is a hub HS256 session JWT not a real OIDC id_token; no dex/Keycloak running (docker ps). Report reports/qa/E2_ACCEPTANCE_VERIFICATION_2026-07-18.md, build f411c98. Secondary: (a) crit 8 — qa evidenced br",
+  "value_b": "E3 crit 2 + 6 NOW PASS (qa round2: scripts/e3_crit2_siem_parity.py side-by-side 5 events match SOC-DB<->HEC via real _run_siem_forward_tick; scripts/e3_crit6_chain_export_verify.py stdlib-only standalone verifier matches platform on raw export). BUT qa surfaced BLOCKER E3-FINDING-CHAIN-CANONICAL: compliance._chain_integrity() canonical form (includes id + fixed key order) != db.append_audit_chain._canonical_row() (strips id + sort_keys=True) -> compliance chain-verify reports ALL real Hub rows a",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-6",
+  "source": "auto-resolved",
+  "key_a": "D5A_FINALIZED_2026-05-31",
+  "key_b": "WAVE2_REVIEW_STATE_2026-06-23",
+  "value_a": "TASK_DEV_WAVE7_D5A FINALIZED 2026-05-31. 12/12 orchestrator E2E PASS after dev fixed: (1) telemetry split-brain — now writes to /data/hub.db via db.log_telemetry helper, (2) test report at reports/qa/TASK_DEV_WAVE7_D5A_test_report.md. Hub motto fully realized: HMAC firewall, ACL, SSRF guard, bearer encryption at rest (F-NEW-9), audit-log credential scrubbing (F-NEW-2), telemetry to primary DB. Files: a2a_control_plane/hub/main.py (+395 lines), modules/agent_tools.py (+28 lines), tests/test_mcp_g",
+  "value_b": "Wave 2 both tracks REVISED after orchestrator verification (not accepted): DESIGNER Wave 2a (#1962) — every dashboard page 500s after docker restart a2a-web (shared dashboard-shell render error, likely incomplete nav refactor: stale refs to removed primaryNavSections/moreNavItems/moreOpen); submitted screenshots showed stale OLD UI + crashed Edge + 404 project (never ran new code). DEVELOPER Wave 2b (#1963) — 2b-#1 agents membership join VERIFIED LIVE (group_id/name/label/is_leader on GET /api/a",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-7",
+  "source": "auto-resolved",
+  "key_a": "E5_CRIT3_OWNED_AUDIT_2026-07-18",
+  "key_b": "E5_ENGINEERING_MERGE_2026-07-18",
+  "value_a": "platform-lead owned+audited E5 entitlement gates (commit d7fbdab): validated c2443cd quota-override gate correct; sibling audit found 2 MORE gaps — GET /api/billing/usage-records + GET /api/billing/export-csv returned data to community despite FLAG_COST_DASHBOARD=False; added gates to both (403 entitlement_denied feature:cost_dashboard) + 2 unit tests. 24/24 pass. Now routed to qa-lead for INDEPENDENT re-verify of crit3 (quota-override community 403 / team+enterprise 200) + the 2 new gates (usag",
+  "value_b": "platform-lead MERGEd TASK_E5_ENGINEERING at commit 3203b06 (1673 insertions). CR-1 modules/billing.py (345L: PLAN_CAPS/PLAN_FLAGS/upgrade_prompt + 402 gate in api_create_agent). CR-2 cost roll-up (PROVIDER_PRICE_SEED Anthropic/OpenAI/DeepSeek/Google/Mistral -> DB provider_price_table + compute_usd_cost). CR-3 modules/metering.py (238L: record_metering_event/check_quota/QuotaExceeded) + db_adapter metering_events+quota tables. costs/page.tsx UI + apps/web billing export-csv + usage-records proxy ",
+  "gold": "update",
+  "gold_current": "a"
+ },
+ {
+  "id": "real-upd-8",
+  "source": "auto-resolved",
+  "key_a": "OWNERSHIP_DEV_AGENT_ROLE_PROMPTS_OUTCOME_FOCUSED_2026-05-02",
+  "key_b": "OWNERSHIP_DEV_PERSONA_OVERRIDE_2026-06-12",
+  "value_a": "Developer owns TASK_DEV_AGENT_ROLE_PROMPTS_OUTCOME_FOCUSED. Files: a2a_control_plane/hub/templates/agent.py.j2 (tighten base system prompt around line 33 + per-role _BRIEF_SEED_PROMPTS + add _is_social_noop guard in handle_message_async), a2a_control_plane/hub/tests/test_agent_outcome_prompts.py (NEW), reports/qa/TASK_DEV_AGENT_ROLE_PROMPTS_OUTCOME_FOCUSED_test_report.md (NEW). Brief at TASK_DEV_AGENT_ROLE_PROMPTS_OUTCOME_FOCUSED.md. NO touch to main.py, docker_mgr.py, frontend. Acceptance: re-f",
+  "value_b": "Developer owns TASK_DEV_PERSONA_OVERRIDE (B-8): when an agent has a non-empty system_prompt, pass it as AGENT_PERSONA env var so it FULLY replaces the SW-dev hardcoded persona at agent.py.j2:39-45. Files: hub/main.py api_create_agent deploy section (env_vars building, ~line 4130-4144), possibly hub/templates/agent.py.j2 (no functional change — existing os.environ.get fallback chain already handles this). New test in hub/tests/. No overlap with other workers.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-9",
+  "source": "auto-resolved",
+  "key_a": "D4B_FINAL_VERIFIED_2026-05-02",
+  "key_b": "VERIFY_BUGFIX_BLEED_APPROVE_2026-06-10",
+  "value_a": "Wave 7 D4b FULLY VERIFIED + finalized 2026-05-02. Original TASK_DEV_WAVE7_D4B (broadcast 1412 MERGE) plus follow-up TASK_DEV_D4B_UX_FIXES (broadcast 1427 MERGE) both pass orchestrator's user-perspective walkthrough. All 8 original criteria + 2 UX-gap fixes PASS: state-machine 409 (pytest), per-CR test_command 400 (live curl), create_subprocess_exec not shell (grep+pytest), sig-verify happy path + tampered sig 400 + cr.signature.failed telemetry (pytest), test-log IDOR 3 cases (pytest), Activity ",
+  "value_b": "Developer MERGE verified. (1) Context-bleed: agent.py.j2 handle_project_brief() now clears conversation_history/turn_counts/_outgoing_recent. (2) Approve-gate: cr-card.tsx canReview gates on awaiting_review|tests_passed (removed PENDING_REVIEW legacy), added canRunTests + run-tests proxy route. 91/91 tests pass. GOTCHA: .gitignore lines 65 (test_*.py) + 118 (projects/) hide the new regression tests + proxy route from git — they won't commit without git add -f.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-10",
+  "source": "auto-resolved",
+  "key_a": "REDESIGN_AND_NICETIES_ALL_DONE_2026-07-12",
+  "key_b": "SOC_FIX_01_FINALIZED_2026-07-04",
+  "value_a": "ENTIRE UI/UX redesign + all niceties COMPLETE & browser-verified. Final niceties (4169399): map dept-label collision-avoidance (LabelManager.tsx -- major labels readable/spaced), light-toggle applies on FIRST click now (hydration fix verified: /agents went light after single toggle). Rest-edges (9d09389). All 20 session tasks done. Both dashboards unified amber/graphite; operator has 3D living-org Agent Map (org orbs+arcs+click-to-focus into dept->member agents verified), live-pulse motion, comp",
+  "value_b": "TASK_SOC_FIX_01 FINALIZED (broadcast #2117) after 3 rounds. All 20 findings + 8 revise items browser-verified on SOC dashboard :3001. Key fixes: targets.filter unwrap, alerts status guard, cr_counts normalized at fetch, CR detail page + proxy (Next16 await params), org chart /api/groups + members mapping, Ollama server-side proxy, forensic window, provider attribution, freeze fix (useMemo + 15s poll). Test report: reports/qa/TASK_SOC_FIX_01_test_report.md. NOT COMMITTED yet. Open: tamper break #",
+  "gold": "update",
+  "gold_current": "a"
+ },
+ {
+  "id": "real-upd-11",
+  "source": "auto-resolved",
+  "key_a": "E4_CRIT6_FIX_2026-07-18",
+  "key_b": "E7_FINAL_VERIFY_ASSIGNED_2026-07-18",
+  "value_a": "platform-lead fixed E4 crit6 + /register at commit e6e8ca5. (1) api_release_agent now calls run_container(agent.name) after clearing quarantine (gated PYTEST_RUNNING!='1', try/except idempotent) -> container Exited->Up on release. (2) /register: pre-built _meta_dict=metadata.dict() with provider_type/model_name overridden, then **_meta_dict to Agent() -> TypeError gone. Routed to qa-lead for FINAL re-verify: crit6 (release restarts real container Exited->Up + /route&MCP work) + /register works +",
+  "value_b": "E7 final combined QA verification assigned to qa-lead. Covers 3 items on enterprise-features @ de6a8f7: crit3 (get_tenant_usage returns 200 + usage tick clean under PG/RealDictCursor), crit9 (0 dropped tasks under durable-queue load), CORS defect (trust-scores sparklines render real trend data, ZERO console CORS errors, same-origin proxy path, regression test asserts proxy/CORS header). All PASS => close E7 => ENTERPRISE-PROGRAM-COMPLETE.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-12",
+  "source": "auto-resolved",
+  "key_a": "E3_CHAIN_CANONICAL_BUG_2026-07-18",
+  "key_b": "E3_RECONCILE_2_CORE_GAPS_2026-07-18",
+  "value_a": "E3 crit 2 + 6 NOW PASS (qa round2: scripts/e3_crit2_siem_parity.py side-by-side 5 events match SOC-DB<->HEC via real _run_siem_forward_tick; scripts/e3_crit6_chain_export_verify.py stdlib-only standalone verifier matches platform on raw export). BUT qa surfaced BLOCKER E3-FINDING-CHAIN-CANONICAL: compliance._chain_integrity() canonical form (includes id + fixed key order) != db.append_audit_chain._canonical_row() (strips id + sort_keys=True) -> compliance chain-verify reports ALL real Hub rows a",
+  "value_b": "E3 qa verification: 12/12 by qa's table, 21/21 tests, strong. But 2 CORE criteria vs brief's literal E3 acceptance are under-evidenced: (crit 2) SIEM live delivery — qa did TEST-FIRE only (1 synthetic event captured at real HEC receiver); brief wants 'HEC shows the SAME events the SOC dashboard shows' = real-event side-by-side match. (crit 6) chain re-verify — qa did chain-verify endpoint + tamper detection via platform's OWN compliance.chain_verify; brief wants 'a THIRD PARTY can re-verify from",
+  "gold": "update",
+  "gold_current": "a"
+ },
+ {
+  "id": "real-upd-13",
+  "source": "auto-resolved",
+  "key_a": "OWNERSHIP_CR_MERGE_FILES_BUGS_2026-06-24",
+  "key_b": "last_session_summary",
+  "value_a": "CR-merge + deliverable-visibility bugs (found live). (1) designer OWNS apps/web fix: CR-action buttons 404 — project page (.../projects/[projectId]/page.tsx onMerge/onReject) + their Next proxies call /api/projects/{pid}/change-requests/{cr}/{action} but Hub endpoints are /api/change-requests/{cr}/merge (main.py:4012), /approve (4316), etc (NO project prefix). Audit+fix merge/reject/approve/run-tests/revert to hit correct Hub paths. (2) developer OWNS hub fix: GET /api/projects/{id}/files (api_l",
+  "value_b": "Security-lead session complete. All three enterprise security specs delivered on branch enterprise-features: E4 injection/DLP/trust-score/containment spec (commit 1869679), E6 forensic replay + multi-key provenance spec with signing_keys schema and key_id FK migration (commit 067383c), E7 mTLS trust model + cert lifecycle + P-07 secret rotation spec with 3 DB migrations (commit 948ed69). Queue drained (empty). Skill outcomes recorded for access-control and acceptance-gate. MERGE broadcast #2515 ",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-14",
+  "source": "auto-resolved",
+  "key_a": "OWNERSHIP_DESIGN_DASHBOARD_REDESIGN",
+  "key_b": "REDESIGN_AND_NICETIES_ALL_DONE_2026-07-12",
+  "value_a": "2026-06-06: NEW initiative — full UI/UX redesign of operator dashboard (apps/web). OWNER: designer (to be launched). Use skills web-design-review (audit), anthropic-frontend-design (aesthetic), immersive-web-design (tasteful motion), landing-page-port (if any marketing pages). Scope: all dashboard pages — agents, integrations, skills, credentials, projects/activity, telemetry, security, groups, escalations, dashboard-shell. Phase1=audit+redesign plan (designer), Phase2=design system, Phase3=impl",
+  "value_b": "ENTIRE UI/UX redesign + all niceties COMPLETE & browser-verified. Final niceties (4169399): map dept-label collision-avoidance (LabelManager.tsx -- major labels readable/spaced), light-toggle applies on FIRST click now (hydration fix verified: /agents went light after single toggle). Rest-edges (9d09389). All 20 session tasks done. Both dashboards unified amber/graphite; operator has 3D living-org Agent Map (org orbs+arcs+click-to-focus into dept->member agents verified), live-pulse motion, comp",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-15",
+  "source": "auto-resolved",
+  "key_a": "FINDING_OPERATOR_CHANNEL_HALF_DUPLEX_2026-07-11",
+  "key_b": "OWNERSHIP_DEV_CHAT_ATTRIBUTION_FIX_2026-05-03",
+  "value_a": "CORRECTION to Run-1 finding #4: agents DO receive operator project-chat (all 5 Run-1 agents tried to ACK the stand-down notice) but their replies to 'user' are FIREWALL-DROPPED ('user is not in peer list') — seen in SOC /policy-violations 16h-ago rows. Fix (P1, queue with brief-slicing task): hub should implicitly allow agent->user replies within a project (or add operator to project peer lists). Operator->agent delivery works.",
+  "value_b": "Developer owns TASK_DEV_CHAT_ATTRIBUTION_FIX (~30-40 min). Three coupled bugs. Files: a2a_control_plane/hub/templates/agent.py.j2 (message handler logs source=<self> instead of source=<incoming sender>), a2a_control_plane/hub/main.py:api_post_message (~line 2897 — add fan-out to project members /message endpoints with sender=user role=user), optionally apps/web/src/app/(dashboard)/projects/[projectId]/page.tsx (UI dedupe IF Bug A fix doesn't naturally clean it up). Tests: test_agent_message_attr",
+  "gold": "update",
+  "gold_current": "a"
+ },
+ {
+  "id": "real-upd-16",
+  "source": "auto-resolved",
+  "key_a": "DASHBOARD_REDESIGN_DIRECTION_2026-06-24",
+  "key_b": "QA_WAVE_A_FINDINGS_2026-06-24",
+  "value_a": "User wants a dashboard nav+viz redesign, AUDIT-FIRST (propose, get sign-off before building). Decisions: (1) Agent Map = interactive 3D graph (Three.js/R3F) — departments as glowing 3D clusters + standalone agents + connection edges; click a department -> zoom/expand to its agents + their persona (system_prompt). (2) FULLY MERGE Connections (Agent Links) into the Agent Map — remove the separate /connections nav item; create/manage links from within the map. (3) Redesign the ENTIRE nav — consolid",
+  "value_b": "Orchestrator browser-verified TASK_DESIGN_NAV_CONSOLIDATION. PASS: A1 nav (6 groups, renames, KB->Build, Agent Links removed); A2 Activity merge (Live+Sessions tabs, /sessions+/telemetry redirects); A2 Compliance&Security page+tabs + /security->/compliance + /connections->/network redirects; A3a By-department grouping; A3b Departments terminology; A3d Schedules agent dropdown (real agents). REVISE sent for: (1) BLOCKER Security tab crash security/page.tsx:3222 dept.type.replace undefined (Securi",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-17",
+  "source": "auto-resolved",
+  "key_a": "DECISION_SEED_SKILLS_CURATED_2026-06-03",
+  "key_b": "VERIFY_BUGFIX_BLEED_APPROVE_2026-06-10",
+  "value_a": "Operator confirmed 2026-06-03: seed CURATED skill set on dashboard (not all 57). Set: proxy-route-scaffold, cr-lifecycle-gate, developer-prime-directives, developer-debugging-methodology, developer-git-workflow, multi-iteration-revise-cycle, npm-package-verify, check-package-health, + one qa/testing skill. Author on dashboard via /skills UI (saved to provider_skills), matching local skill quality (frontmatter w/ triggers + body w/ when-to-use table + steps + failure modes). Do as part of post-ME",
+  "value_b": "Developer MERGE verified. (1) Context-bleed: agent.py.j2 handle_project_brief() now clears conversation_history/turn_counts/_outgoing_recent. (2) Approve-gate: cr-card.tsx canReview gates on awaiting_review|tests_passed (removed PENDING_REVIEW legacy), added canRunTests + run-tests proxy route. 91/91 tests pass. GOTCHA: .gitignore lines 65 (test_*.py) + 118 (projects/) hide the new regression tests + proxy route from git — they won't commit without git add -f.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-18",
+  "source": "auto-resolved",
+  "key_a": "E7A_FIX_2026-07-18",
+  "key_b": "E7_FINAL_VERIFY_ASSIGNED_2026-07-18",
+  "value_a": "platform-lead fixed E7a at commit b6d9bd8. CRIT1: _custom_openapi() 2-pass operationId dedup was on disk but container had STALE image -> rebuilt hub -> openapi-spec-validator PASSES (0 duplicates, 219 paths, 8 tags). CRIT6: PostgresDbAdapter missing get_agent_hmac_secret + create_agent_hmac_secret_if_missing (verify_agent_token raised AttributeError on PG) -> both added reading from agent_keys table; per-agent HMAC rotation path now exercisable. Routed to qa-lead for E7a re-verify (crit1 valida",
+  "value_b": "E7 final combined QA verification assigned to qa-lead. Covers 3 items on enterprise-features @ de6a8f7: crit3 (get_tenant_usage returns 200 + usage tick clean under PG/RealDictCursor), crit9 (0 dropped tasks under durable-queue load), CORS defect (trust-scores sparklines render real trend data, ZERO console CORS errors, same-origin proxy path, regression test asserts proxy/CORS header). All PASS => close E7 => ENTERPRISE-PROGRAM-COMPLETE.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-upd-19",
+  "source": "auto-resolved",
+  "key_a": "DESIGN_AUDIT_DELIVERED_2026-07-12",
+  "key_b": "REDESIGN_AND_NICETIES_ALL_DONE_2026-07-12",
+  "value_a": "Design audit delivered (DESIGN_AUDIT_2026-07-12.md @ efcfc23): 25 findings vs DESIGN.md. P0=SOC entirely off-brand blue/indigo/violet (must recolor to amber, ~13 element types, 18 pages). CRITICAL operator bugs: C-1 home fleet links -> /agents/undefined (404), C-2 Activity/telemetry page blank (no state), C-3 light-mode 3D map invisible. P1 operator: mono numerals missing everywhere, currency 4+ decimals, 7 nav-label != h1 mismatches, Agent Map no visible nodes on load, BUILD nav order (Departme",
+  "value_b": "ENTIRE UI/UX redesign + all niceties COMPLETE & browser-verified. Final niceties (4169399): map dept-label collision-avoidance (LabelManager.tsx -- major labels readable/spaced), light-toggle applies on FIRST click now (hydration fix verified: /agents went light after single toggle). Rest-edges (9d09389). All 20 session tasks done. Both dashboards unified amber/graphite; operator has 3D living-org Agent Map (org orbs+arcs+click-to-focus into dept->member agents verified), live-pulse motion, comp",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-open-0",
+  "source": "hand-labeled",
+  "key_a": "E2E_MESSAGES_SCOPE_PASS_2026-06-11",
+  "key_b": "E2E_SW_DEPT_OPS_VALIDATION_2026-06-11",
+  "value_a": "Messages-scope fix REVISED + PASSED. GET /api/projects/{id}/messages now: SELECT includes project_id, returns it on each object, and message_received matches strictly project_id=? (agent-membership NULL fallback removed). Retest vs existing tagged data: Project D(5b7765c4) returns only D msgs (1, project_id present, 0 wrong), Project E(c92164d3) only E msgs (25, all project_id, 0 wrong), 401 legacy NULL rows correctly excluded. All 4 fixes this session now validated. Ready to commit checkpoint.",
+  "value_b": "TASK_DEV_SW_DEPT_OPS validation (BMI-Calc-E2E, deleted after): D1 spin-up endpoint works one-call (3 agents+mesh, HTTP201, DB rows openai/deepseek-chat correct, agents build on DeepSeek) BUT in-memory Agent objects show ollama/None -> /api/agents listing wrong (REVISE sent). D2 churn control VALIDATED: 2 CRs vs 13-26 before. D3 user_gated governance VALIDATED: zero agent self-merges (vs all-merged-in-95s before), operator run-tests+approve HTTP200 -> master 467335f. Pending: developer revision f",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-1",
+  "source": "hand-labeled",
+  "key_a": "FEEDBACK_DESIGNER_VERIFY_BEFORE_MERGE_2026-06-23",
+  "key_b": "last_session_summary",
+  "value_a": "PATTERN: designer has MERGEd UNVERIFIED twice. Wave1: R3F deps not installed in container. Wave2a: dashboard-shell render 500s EVERY dashboard page (likely incomplete nav refactor — stale refs to removed primaryNavSections/moreNavItems/moreOpen), and submitted screenshots showed STALE OLD UI + a crashed Edge + a 404 project (never ran the new code). ROOT CAUSE: Next.js dev (a2a-web) silently serves stale-compiled code until `docker restart a2a-web`; designer screenshots the stale state. HOW TO A",
+  "value_b": "Security-lead session complete. All three enterprise security specs delivered on branch enterprise-features: E4 injection/DLP/trust-score/containment spec (commit 1869679), E6 forensic replay + multi-key provenance spec with signing_keys schema and key_id FK migration (commit 067383c), E7 mTLS trust model + cert lifecycle + P-07 secret rotation spec with 3 DB migrations (commit 948ed69). Queue drained (empty). Skill outcomes recorded for access-control and acceptance-gate. MERGE broadcast #2515 ",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-2",
+  "source": "hand-labeled",
+  "key_a": "E2E_SW_DEPT_OPS_VALIDATION_2026-06-11",
+  "key_b": "last_session_summary",
+  "value_a": "TASK_DEV_SW_DEPT_OPS validation (BMI-Calc-E2E, deleted after): D1 spin-up endpoint works one-call (3 agents+mesh, HTTP201, DB rows openai/deepseek-chat correct, agents build on DeepSeek) BUT in-memory Agent objects show ollama/None -> /api/agents listing wrong (REVISE sent). D2 churn control VALIDATED: 2 CRs vs 13-26 before. D3 user_gated governance VALIDATED: zero agent self-merges (vs all-merged-in-95s before), operator run-tests+approve HTTP200 -> master 467335f. Pending: developer revision f",
+  "value_b": "Security-lead session complete. All three enterprise security specs delivered on branch enterprise-features: E4 injection/DLP/trust-score/containment spec (commit 1869679), E6 forensic replay + multi-key provenance spec with signing_keys schema and key_id FK migration (commit 067383c), E7 mTLS trust model + cert lifecycle + P-07 secret rotation spec with 3 DB migrations (commit 948ed69). Queue drained (empty). Skill outcomes recorded for access-control and acceptance-gate. MERGE broadcast #2515 ",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-3",
+  "source": "hand-labeled",
+  "key_a": "E6_PROVENANCE_SPEC_DONE_2026-07-18",
+  "key_b": "acceptance_E6_replay_provenance",
+  "value_a": "security-lead MERGEd TASK_E6_PROVENANCE_SPEC: reports/security/E6_REPLAY_PROVENANCE_SPEC.md (commit 067383c, 760L). (1) SecureContext key-rotation incident root-caused + designed out: signing_keys retains retired keys FOREVER, every chain row carries key_id FK; (2) telemetry_audit_chain migration M-E6-001 adds key_id + hmac columns (NULLable for pre-E6 rows = pre-chain verdict); (3) ISigner pluggable interface (env-HMAC now / KMS-HSM later toward S-09); (4) replay verdict taxonomy verified/tampe",
+  "value_b": "E6 acceptance gate (15 criteria): AC-1 signing_keys schema, AC-2 auto-created key on startup, AC-3 new rows have key_id+hmac, AC-4 pre-E6 rows key_id=NULL verdict=pre_chain, AC-5 mixed pre-chain+signed replay shows correct verdicts, AC-6 SQL tamper→tampered verdict+red badge, AC-7 key rotation does NOT strand historical rows (old key still verifies), AC-8 retired key retained in signing_keys, AC-9 dual-active key impossible (UNIQUE constraint), AC-10 key_missing verdict on deleted key, AC-11 cro",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-4",
+  "source": "hand-labeled",
+  "key_a": "TWODEPT_RUN_MILESTONE_2026-07-10",
+  "key_b": "TWODEPT_RUN_RESULT_2026-07-10",
+  "value_a": "TwoDept run (project ed6768eb): Phase 1 FULLY AUTONOMOUS (2 core-developer CRs merged incl. test-fail->retry->green cycle). Phase 3 started: vald-analyst CR e6104c0d (VALIDATION_REPORT.md referencing eng CR) in draft. FINDINGS: (1) core-architect looped 41x on cr.role_gate_rejected instead of adapting -> B-10 closer tool + better rejection message; (2) core-qa also wrote a VALIDATION_REPORT (dept scope bleed); (3) operator posted 1 stand-down chat notice (only intervention so far).",
+  "value_b": "Two-dept run CONCLUDED: PARTIAL PASS (report TWODEPT_DELIVERY_RUN_2026-07-10.md @ 5dbd3a1, pushed). Proven: single-dept autonomy incl test-fail recovery (3 merged CRs); real cross-dept validation (vald found 3 real test bugs). Blocked: all vald CRs conflict-dead-ended (scope bleed + swallowed auto-merge exception + no conflict routing + no rebase tool). Developer OWNS TASK_DEV_MERGE_CONFLICT_PATH (#2172, P0). Agents stopped via docker stop (records kept). Findings 2-6 queued in report table.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "real-open-6",
+  "source": "hand-labeled",
+  "key_a": "OWNERSHIP_DEV_CONVERSATION_2026-06-23",
+  "key_b": "OWNERSHIP_DEV_PERSONA_OVERRIDE_2026-06-12",
+  "value_a": "developer OWNS Wave 3 backend = a2a_control_plane/hub/** incl templates/agent.py.j2. W0: new GET /api/projects/{id}/conversation (full-fidelity, untruncated, prefers message_delivered, keyset paginated, ?agent/?q). W1-code: agent.py.j2 rationale wiring (submit_for_review schema + impl + persona) + un-truncation (agent.py.j2:1268, main.py:5106/5211) + provide agent rebuild/redeploy steps. W2: content-hash dedup. Decision lane already built (main.py:2933-2949) — no new code. Brief TASK_DEV_CONVERS",
+  "value_b": "Developer owns TASK_DEV_PERSONA_OVERRIDE (B-8): when an agent has a non-empty system_prompt, pass it as AGENT_PERSONA env var so it FULLY replaces the SW-dev hardcoded persona at agent.py.j2:39-45. Files: hub/main.py api_create_agent deploy section (env_vars building, ~line 4130-4144), possibly hub/templates/agent.py.j2 (no functional change — existing os.environ.get fallback chain already handles this). New test in hub/tests/. No overlap with other workers.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-7",
+  "source": "hand-labeled",
+  "key_a": "E2E_MESSAGES_SCOPE_PASS_2026-06-11",
+  "key_b": "FINDING_CONNECTDEPT_LEAD_NOT_ROLE_AWARE_2026-07-10",
+  "value_a": "Messages-scope fix REVISED + PASSED. GET /api/projects/{id}/messages now: SELECT includes project_id, returns it on each object, and message_received matches strictly project_id=? (agent-membership NULL fallback removed). Retest vs existing tagged data: Project D(5b7765c4) returns only D msgs (1, project_id present, 0 wrong), Project E(c92164d3) only E msgs (25, all project_id, 0 wrong), 401 legacy NULL rows correctly excluded. All 4 fixes this session now validated. Ready to commit checkpoint.",
+  "value_b": "G-COLLAB follow-up: POST /api/groups/{id}/connect-dept picked vald-analyst as target lead instead of vald-architect (role=architect ignored; likely picks by creation order/last member). Workaround: explicit POST /agents/{id}/connect {peer}. Candidate dev task: make lead selection prefer role=architect.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-8",
+  "source": "hand-labeled",
+  "key_a": "TWODEPT_RUN_MILESTONE_2026-07-10",
+  "key_b": "core_architect_role_gate_rejections",
+  "value_a": "TwoDept run (project ed6768eb): Phase 1 FULLY AUTONOMOUS (2 core-developer CRs merged incl. test-fail->retry->green cycle). Phase 3 started: vald-analyst CR e6104c0d (VALIDATION_REPORT.md referencing eng CR) in draft. FINDINGS: (1) core-architect looped 41x on cr.role_gate_rejected instead of adapting -> B-10 closer tool + better rejection message; (2) core-qa also wrote a VALIDATION_REPORT (dept scope bleed); (3) operator posted 1 stand-down chat notice (only intervention so far).",
+  "value_b": "The `core-architect` role has encountered 76 rejections and continues to climb, indicating a persistent issue with the control channel.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-9",
+  "source": "hand-labeled",
+  "key_a": "FEEDBACK_RETIRE_DEV_BEFORE_VERIFY_2026-05-02",
+  "key_b": "FEEDBACK_RETIRE_DEV_ONE_TIME_2026-05-03",
+  "value_a": "SUPERSEDED 2026-05-02. Original rule (retire-before-every-verify) was tied to a one-time host-side fix that has long since landed. New rule from user: retire roles only when not needed for the near future. Do NOT cycle dev between every verify step if more dev work is queued or likely. Only retire at clear end-of-phase points or session shutdown. For multi-step rollouts (like Wave 7 worktree 3-step plan), keep dev alive across the whole sequence; verify in between assignments without retiring.",
+  "value_b": "2026-05-03 user instruction: another host-side fix has been rolled out to agents. AFTER current TASK_DEV_CHAT_ATTRIBUTION_FIX MERGEs and is finalized, do a ONE-TIME retire of developer role so the host-side change takes effect at next spin-up. Then re-launch developer for the next coding task (TASK_DEV_AGENT_HISTORY_SLOT_FIX) and KEEP alive across subsequent tasks per the existing FEEDBACK_RETIRE_DEV_BEFORE_VERIFY_2026-05-02 supersession rule. This is NOT a return to the retire-before-every-veri",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-10",
+  "source": "hand-labeled",
+  "key_a": "FINDING_OPERATOR_CREATE_DEPT_NOOP_2026-07-11",
+  "key_b": "WAVE2_REVIEW_STATE_2026-06-23",
+  "value_a": "GAP: operator dashboard (:3000) /groups 'Create Department' button is a no-op — click produces no modal, no network call, no console error. Combined with /agents/new 404, the operator dashboard cannot deploy departments/agents from the UI at all; deployment currently requires the spin-up API or the SOC dashboard wizard. Both are enterprise 'deploy from dashboard' blockers -> dev task TASK_DEV_OPERATOR_DEPLOY_UI.",
+  "value_b": "Wave 2 both tracks REVISED after orchestrator verification (not accepted): DESIGNER Wave 2a (#1962) — every dashboard page 500s after docker restart a2a-web (shared dashboard-shell render error, likely incomplete nav refactor: stale refs to removed primaryNavSections/moreNavItems/moreOpen); submitted screenshots showed stale OLD UI + crashed Edge + 404 project (never ran new code). DEVELOPER Wave 2b (#1963) — 2b-#1 agents membership join VERIFIED LIVE (group_id/name/label/is_leader on GET /api/a",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-11",
+  "source": "hand-labeled",
+  "key_a": "E2E_SW_DEPT_OPS_VALIDATION_2026-06-11",
+  "key_b": "E4_REVISION_DONE_2026-07-18",
+  "value_a": "TASK_DEV_SW_DEPT_OPS validation (BMI-Calc-E2E, deleted after): D1 spin-up endpoint works one-call (3 agents+mesh, HTTP201, DB rows openai/deepseek-chat correct, agents build on DeepSeek) BUT in-memory Agent objects show ollama/None -> /api/agents listing wrong (REVISE sent). D2 churn control VALIDATED: 2 CRs vs 13-26 before. D3 user_gated governance VALIDATED: zero agent self-merges (vs all-merged-in-95s before), operator run-tests+approve HTTP200 -> master 467335f. Pending: developer revision f",
+  "value_b": "E4 revision complete. Commit e6e8ca5 on enterprise-features. Fix 1: api_release_agent now calls run_container(agent.name) after clearing quarantine (PYTEST_RUNNING guard). Fix 2: /register Agent() constructor uses pre-built _meta_dict to avoid TypeError on provider_type/model_name double-kwarg. All 26 E4 tests pass.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-12",
+  "source": "hand-labeled",
+  "key_a": "OWNERSHIP_DEV_PERSONA_OVERRIDE_2026-06-12",
+  "key_b": "OWNERSHIP_DEV_TEST_TARGET_2026-06-15",
+  "value_a": "Developer owns TASK_DEV_PERSONA_OVERRIDE (B-8): when an agent has a non-empty system_prompt, pass it as AGENT_PERSONA env var so it FULLY replaces the SW-dev hardcoded persona at agent.py.j2:39-45. Files: hub/main.py api_create_agent deploy section (env_vars building, ~line 4130-4144), possibly hub/templates/agent.py.j2 (no functional change — existing os.environ.get fallback chain already handles this). New test in hub/tests/. No overlap with other workers.",
+  "value_b": "Developer owns TASK_DEV_TEST_TARGET (B-7): per-project test_target setting so single-deliverable exercises don't fail non-author CRs. Files: hub/main.py (api_run_tests handler ~line 3410, PATCH project endpoint), hub/db_adapter.py (add test_target column), possibly hub/modules/project.py. No overlap.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-13",
+  "source": "hand-labeled",
+  "key_a": "VERIFY_BUGFIX_BLEED_APPROVE_2026-06-10",
+  "key_b": "acceptance_e2",
+  "value_a": "Developer MERGE verified. (1) Context-bleed: agent.py.j2 handle_project_brief() now clears conversation_history/turn_counts/_outgoing_recent. (2) Approve-gate: cr-card.tsx canReview gates on awaiting_review|tests_passed (removed PENDING_REVIEW legacy), added canRunTests + run-tests proxy route. 91/91 tests pass. GOTCHA: .gitignore lines 65 (test_*.py) + 118 (projects/) hide the new regression tests + proxy route from git — they won't commit without git add -f.",
+  "value_b": "E2 IDENTITY ACCEPTANCE CHECKLIST: 1. OIDC_FLOW: GET /api/identity/oidc/{id}/authorize returns {auth_url} for a configured Okta/Entra/Google provider; 2. OIDC_CALLBACK: POST /api/identity/oidc/{id}/callback with valid code exchange returns {token, user, roles}; 3. RBAC_DENY: auditor-role session calling POST /api/agents → 403; GET /api/agents → 200; 4. RBAC_ADMIN: org_admin session calling PATCH /api/identity/users/{id}/role → 200; 5. RBAC_SOC: soc_analyst session calling GET /api/alerts → 200; D",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "real-open-14",
+  "source": "hand-labeled",
+  "key_a": "FINDING_CONNECTDEPT_LEAD_NOT_ROLE_AWARE_2026-07-10",
+  "key_b": "TWODEPT_RUN2_RESULT_2026-07-11",
+  "value_a": "G-COLLAB follow-up: POST /api/groups/{id}/connect-dept picked vald-analyst as target lead instead of vald-architect (role=architect ignored; likely picks by creation order/last member). Workaround: explicit POST /agents/{id}/connect {peer}. Candidate dev task: make lead selection prefer role=architect.",
+  "value_b": "Run 2 FULL PASS @ 1d07450 (pushed): TwoDept-Delivery-v2 (5a0a70cf) delivered one merged CR per department autonomously — 438ef48e (core2-developer, Phase 1) + b5808d08 (vald2-qa, Phase 3 validation w/ 3 real test fixes). Checkpoint follow-up #1 (definitive vision proof) COMPLETE. Residual dev queue: actionable-rejection-messages P1 (role-gate loop survives prompts, NEW dedup-thrash loop), B-10 closer, proxy saturation, per-role brief slicing, connect-dept lead role-awareness. Conflict routing un",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-SVC_PORT_2026-05-01",
+  "source": "synthetic",
+  "key_a": "SVC_PORT_2026-05-01",
+  "key_b": "SVC_PORT_2026-05-01b",
+  "value_a": "The billing service listens on port 3099 in all environments.",
+  "value_b": "The billing service listens on port 4001 in all environments.",
+  "gold": "contradiction",
+  "gold_current": null
+ },
+ {
+  "id": "syn-AUTH_APPROACH",
+  "source": "synthetic",
+  "key_a": "AUTH_APPROACH",
+  "key_b": "AUTH_DECISION",
+  "value_a": "DECISION: we use JWT bearer tokens for all API auth. Sessions were rejected for statelessness.",
+  "value_b": "DECISION: we use server-side sessions with redis for all API auth. JWT was rejected due to revocation problems.",
+  "gold": "contradiction",
+  "gold_current": null
+ },
+ {
+  "id": "syn-DB_CHOICE_A",
+  "source": "synthetic",
+  "key_a": "DB_CHOICE_A",
+  "key_b": "DB_CHOICE_B",
+  "value_a": "The team standardized on MongoDB for the orders service; all new code must use the mongo driver.",
+  "value_b": "The team standardized on Postgres for the orders service; all new code must use pg.",
+  "gold": "contradiction",
+  "gold_current": null
+ },
+ {
+  "id": "syn-DEPLOY_FREQ_1",
+  "source": "synthetic",
+  "key_a": "DEPLOY_FREQ_1",
+  "key_b": "DEPLOY_FREQ_2",
+  "value_a": "Production deploys happen only on Tuesdays after the change-review meeting.",
+  "value_b": "Production deploys are fully continuous; every merged PR auto-deploys within 10 minutes.",
+  "gold": "contradiction",
+  "gold_current": null
+ },
+ {
+  "id": "syn-RETENTION_A",
+  "source": "synthetic",
+  "key_a": "RETENTION_A",
+  "key_b": "RETENTION_B",
+  "value_a": "Audit logs are retained for 90 days then hard-deleted per the DPA.",
+  "value_b": "Audit logs are retained for 7 years per SOX requirements and never deleted.",
+  "gold": "contradiction",
+  "gold_current": null
+ },
+ {
+  "id": "syn-STAGING_DEPLOY_2026-03-01",
+  "source": "synthetic",
+  "key_a": "STAGING_DEPLOY_2026-03-01",
+  "key_b": "STAGING_DEPLOY_2026-06-15",
+  "value_a": "As of March: staging deploys every Friday at 5pm.",
+  "value_b": "UPDATE June 15: staging now deploys on every merge to main, the Friday window is retired.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "syn-API_VERSION_OLD",
+  "source": "synthetic",
+  "key_a": "API_VERSION_OLD",
+  "key_b": "API_VERSION_NEW",
+  "value_a": "The public API is v2; v1 sunset planned for Q3.",
+  "value_b": "The public API is now v3 (released 2026-06-30); v2 enters 12-month sunset.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "syn-LEAD_2026-01",
+  "source": "synthetic",
+  "key_a": "LEAD_2026-01",
+  "key_b": "LEAD_2026-07",
+  "value_a": "Alice is the tech lead for the payments squad.",
+  "value_b": "As of July reorg, Bob is the tech lead for the payments squad; Alice moved to platform.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "syn-TIMEOUT_CFG_1",
+  "source": "synthetic",
+  "key_a": "TIMEOUT_CFG_1",
+  "key_b": "TIMEOUT_CFG_2",
+  "value_a": "Gateway timeout is configured at 30s.",
+  "value_b": "Gateway timeout raised to 120s on 2026-07-01 after the batch-endpoint incident.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "syn-CI_RUNNER_A",
+  "source": "synthetic",
+  "key_a": "CI_RUNNER_A",
+  "key_b": "CI_RUNNER_B",
+  "value_a": "CI runs on self-hosted runners in the office rack.",
+  "value_b": "Since the office rack decommission (May), CI runs on cloud runners; self-hosted images are archived.",
+  "gold": "update",
+  "gold_current": "b"
+ },
+ {
+  "id": "syn-DEV_DB",
+  "source": "synthetic",
+  "key_a": "DEV_DB",
+  "key_b": "PROD_DB",
+  "value_a": "The dev environment database is Postgres 15 on localhost:5432.",
+  "value_b": "The production database is Postgres 16 on the db cluster with streaming replicas.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-SVC_A_PORT",
+  "source": "synthetic",
+  "key_a": "SVC_A_PORT",
+  "key_b": "SVC_B_PORT",
+  "value_a": "The hub API listens on port 8001.",
+  "value_b": "The web dashboard listens on port 3000.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-PHASE_E1_DONE",
+  "source": "synthetic",
+  "key_a": "PHASE_E1_DONE",
+  "key_b": "PHASE_E2_OPEN",
+  "value_a": "Phase E1 (tenancy) closed with 9/9 acceptance criteria passing.",
+  "value_b": "Phase E2 (identity) is open; OIDC flow implementation in progress.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-QA_ROUND1",
+  "source": "synthetic",
+  "key_a": "QA_ROUND1",
+  "key_b": "QA_ROUND2",
+  "value_a": "QA round 1 rejected the merge: criterion 5 failed on stale container.",
+  "value_b": "QA round 2 passed all 9 criteria after the container rebuild.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-LIMIT_USERS",
+  "source": "synthetic",
+  "key_a": "LIMIT_USERS",
+  "key_b": "LIMIT_PROJECTS",
+  "value_a": "Free tier allows a maximum of 3 users.",
+  "value_b": "Free tier allows a maximum of 5 projects.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-CACHE_TTL_A",
+  "source": "synthetic",
+  "key_a": "CACHE_TTL_A",
+  "key_b": "CACHE_TTL_B",
+  "value_a": "The recall cache TTL is 60 seconds.",
+  "value_b": "The recall cache TTL is 300 seconds in the perf-test branch.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-OWNER_X_1",
+  "source": "synthetic",
+  "key_a": "OWNER_X_1",
+  "key_b": "OWNER_X_2",
+  "value_a": "Marketing owns the launch blog post.",
+  "value_b": "Design owns the launch blog post hero image.",
+  "gold": "compatible",
+  "gold_current": null
+ },
+ {
+  "id": "syn-FLAG_ON",
+  "source": "synthetic",
+  "key_a": "FLAG_ON",
+  "key_b": "FLAG_OFF",
+  "value_a": "Feature flag new_checkout is ON in staging as of 2026-07-01.",
+  "value_b": "Feature flag new_checkout was turned OFF everywhere on 2026-07-10 after the double-charge bug.",
+  "gold": "update",
+  "gold_current": "b"
+ }
+]

@@ -87,7 +87,16 @@ export function tokenJaccard(a: string, b: string): number {
  * flag REASON): measured on a labeled corpus, contradicting same-topic facts hit
  * cosine 0.947 — ABOVE the paraphrase range — so similarity alone can't catch them.
  */
+/** TKG (v0.47.0) — treat clock times as ONE numeral: "02:00" previously
+ *  extracted as two numbers (02, 00), so a schedule change ("runs at 02:00" →
+ *  "runs at 04:30") produced TWO differing slots and could never satisfy the
+ *  one-number-changed template check (caught by the live terminal-agent E2E). */
+export function normalizeNumerals(s: string): string {
+  return s.replace(/\b(\d{1,2}):(\d{2})\b/g, "$1$2");
+}
+
 export function numbersDiffer(a: string, b: string): boolean {
+  a = normalizeNumerals(a); b = normalizeNumerals(b);
   const nums = (s: string) => new Set((s.match(/\d+(?:\.\d+)?/g) ?? []).map(Number));
   const na = nums(a), nb = nums(b);
   if (na.size === 0 && nb.size === 0) return false;
@@ -185,6 +194,7 @@ export function detectConflict(a: FactLite, b: FactLite, sim?: number): { reason
 
 /** S1 — is the (single) differing number a quantity (followed by a unit word) in BOTH texts? */
 export function diffNumberIsQuantity(a: string, b: string): boolean {
+  a = normalizeNumerals(a); b = normalizeNumerals(b);
   const followsWord = (s: string, other: string): boolean => {
     const re = /\d+(?:\.\d+)?/g;
     const oNums = other.match(re) ?? [];
@@ -204,11 +214,12 @@ export function diffNumberIsQuantity(a: string, b: string): boolean {
 
 /** S1 — digit-stripped, whitespace-normalized template of a claim. */
 export function strippedTemplate(s: string): string {
-  return s.replace(/\d+(?:\.\d+)?/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
+  return normalizeNumerals(s).replace(/\d+(?:\.\d+)?/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 /** S1 — how many positional number slots differ between two texts (∞-proxy when counts differ). */
 export function numberDiffCount(a: string, b: string): number {
+  a = normalizeNumerals(a); b = normalizeNumerals(b);
   const nums = (s: string) => s.match(/\d+(?:\.\d+)?/g) ?? [];
   const na = nums(a), nb = nums(b);
   if (na.length !== nb.length) return Math.max(na.length, nb.length);

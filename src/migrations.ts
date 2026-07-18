@@ -1123,6 +1123,30 @@ export const MIGRATIONS: Migration[] = [
     },
   },
 
+  {
+    id: 40,
+    description: "TKG-T1 (v0.47.0): KB bi-temporality — first_seen_at (immutable) + last_indexed_at (bumped on re-index) on knowledge, backfilled from created_at (mirrors PG migration 41). Fixes the created_at-bump-on-reindex gotcha that clustered file dates on the last index day and broke temporal Timeline ordering.",
+    up: (db) => {
+      const safeAdd = (col: string) => {
+        try { db.exec(`ALTER TABLE knowledge ADD COLUMN ${col} TEXT`); } catch { /* exists / table absent */ }
+      };
+      safeAdd("first_seen_at");
+      safeAdd("last_indexed_at");
+      try {
+        db.exec(`UPDATE knowledge SET first_seen_at = created_at WHERE first_seen_at IS NULL`);
+        db.exec(`UPDATE knowledge SET last_indexed_at = created_at WHERE last_indexed_at IS NULL`);
+      } catch { /* table absent on KB-less DB */ }
+    },
+  },
+
+  {
+    id: 41,
+    description: "TKG-T3 (v0.47.0): world-time invalidation — invalid_from on working_memory (mirrors PG migration 42). Records when a fact stopped being true in the world, vs valid_to = when the system retired it.",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE working_memory ADD COLUMN invalid_from TEXT`); } catch { /* exists */ }
+    },
+  },
+
 ];
 
 /**

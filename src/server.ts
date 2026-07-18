@@ -256,6 +256,7 @@ const TOOLS: Tool[] = [
         rerank:   { type: "boolean", description: "v0.20.0 — apply reranker for precision (slower)" },
         mode:     { type: "string", enum: ["default", "hyde", "multihop", "global"], description: "v0.20.0 — retrieval strategy. v0.37.0: 'global' answers CORPUS-LEVEL questions ('what are the main themes / what does this project know about X overall?') by map-reducing over pre-computed knowledge-cluster summaries, and returns drill-down follow-up queries." },
         hopDepth: { type: "integer", minimum: 1, maximum: 3, description: "v0.20.0 — for mode=multihop, how many reference hops to follow (default 2)" },
+        as_of:    { type: "string", description: "v0.47.0 — POINT-IN-TIME view: only knowledge first learned at or before this ISO date/datetime ('what did the KB contain on 2026-06-01'). Combine with zc_recall_context's as-of for a full historical snapshot." },
       },
       required: ["queries"],
     },
@@ -401,6 +402,7 @@ const TOOLS: Tool[] = [
         force:    { type: "boolean", description: "Skip the recall cache and force a fresh pull (default: false)" },
         cite:     { type: "boolean", description: "v0.38.0 — append a provenance citation to every fact: 〔agent · date · origin〕 (origin = what created it: zc_remember, compact:<session>, broadcast:REJECT:<task>). Default false (keeps recall lean)." },
         focus:    { type: "string", description: "v0.41.0 — one line describing your CURRENT task. Re-ranks facts by blended relevance (cosine to focus × importance × salience) so task-relevant facts surface first. Omit for the classic importance ordering." },
+        as_of:    { type: "string", description: "v0.47.0 — POINT-IN-TIME memory reconstruction (ISO date/datetime): returns the facts that were LIVE at that moment — includes facts retired since, excludes facts created after ('what did we believe when phase e3 closed'). Combine with zc_search's as_of for a full historical snapshot." },
       },
       required: [],
     },
@@ -1338,14 +1340,17 @@ type ContraRow = { key_a: string; key_b: string; similarity: number; reason: str
  * queries, entries older than ZC_STALE_NOTE_DAYS (default 30) get a staleness
  * note so agents on long-running projects don't act on outdated docs.
  */
-function _fmtTemporalTimeline(rawQuery: string, results: Array<{ source: string; createdAt?: string }>): string {
+function _fmtTemporalTimeline(rawQuery: string, results: Array<{ source: string; createdAt?: string; firstSeenAt?: string }>): string {
   // Static ESM import — the original lazy `require` was UNDEFINED in the ESM
   // dist and the catch silently disabled the Timeline forever (caught by the
   // 2026-07-17 live terminal-agent E2E: staleness notes rendered, timeline never did).
   if (!_isTemporalQ(rawQuery)) return "";
+  // TKG-T1 — event ordering uses firstSeenAt (immutable first-learned time)
+  // when available; createdAt is bumped on re-index and clusters on the last
+  // index day (the exact defect observed in the 2026-07-17 E2E timeline).
   const dated = results
-    .filter((r) => r.createdAt)
-    .map((r) => ({ source: r.source, t: Date.parse(r.createdAt!) }))
+    .filter((r) => r.firstSeenAt || r.createdAt)
+    .map((r) => ({ source: r.source, t: Date.parse((r.firstSeenAt ?? r.createdAt)!) }))
     .filter((r) => Number.isFinite(r.t))
     .sort((a, b) => a.t - b.t);
   if (dated.length < 2) return "";
@@ -1538,7 +1543,12 @@ async function _handleRemoteTool(
         // M1 (v0.41.0) — focus re-ranks facts by relevance to the caller's current task.
         const recallFocus = typeof body["focus"] === "string" && (body["focus"] as string).trim()
           ? `&focus=${encodeURIComponent((body["focus"] as string).slice(0, 2000))}` : "";
-        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}${recallFocus}`);
+        // TKG-T2 (v0.47.0) — explicit point-in-time reconstruction (the API's
+        // asOf param existed since M3; the tool never exposed it — caught by the
+        // live terminal-agent E2E).
+        const recallAsOf = typeof body["as_of"] === "string" && !Number.isNaN(Date.parse(body["as_of"] as string))
+          ? `&asOf=${encodeURIComponent(body["as_of"] as string)}` : "";
+        const recallRes = await apiCall("GET", `/api/v1/recall?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(recallAgentId)}&role=${encodeURIComponent(agentRole)}${recallFocus}${recallAsOf}`);
         const facts     = recallRes["facts"] as Array<{ key: string; value: string; importance: number; kind?: string; confidence?: number | null; resolution_status?: string | null; agent_id?: string; created_at?: string; valid_at?: string | null; origin?: string | null; created_by?: string | null }> ?? [];
         // v0.38.0 — per-claim citations, opt-in ({cite:true}) so default recall stays lean.
         // S3 (v0.46.0) — the citation chip also names the team member who wrote the
@@ -1648,6 +1658,8 @@ async function _handleRemoteTool(
           rerank:      body["rerank"],
           mode:        body["mode"],
           hopDepth:    body["hopDepth"],
+          // TKG-T2 (v0.47.0) — point-in-time KB view
+          as_of:       body["as_of"],
         });
         // v0.37.0 — corpus-level answer mode.
         if (body["mode"] === "global") {
@@ -1884,7 +1896,14 @@ async function dispatchToolCall(
           try { g = await globalSearchOnDb(gdb, (queries ?? []).join(" ")); } finally { gdb.close(); }
           return { content: [{ type: "text", text: _fmtGlobalAnswer(g) }] };
         }
-        const results = await searchKnowledge(PROJECT_PATH, queries);
+        let results = await searchKnowledge(PROJECT_PATH, queries);
+        // TKG-T2 (v0.47.0) — point-in-time view (in-process SQLite parity;
+        // fail-open for entries without first_seen_at).
+        const asOfArg = (args as { as_of?: string }).as_of;
+        if (asOfArg && !Number.isNaN(Date.parse(asOfArg))) {
+          const cutoff = new Date(asOfArg).toISOString();
+          results = results.filter((r) => !r.firstSeenAt || r.firstSeenAt <= cutoff);
+        }
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No results found in knowledge base." }] };
         }
@@ -2063,11 +2082,20 @@ async function dispatchToolCall(
           const { parseTemporalQuery } = await import("./temporal_parse.js");
           const w = parseTemporalQuery(focus!);
           if (w.from || w.to) recallWin = { from: w.from, to: w.to };
+          // TKG-T2 — explicit as_of param wins over NL-parsed as-of.
+          const explicitAsOf = typeof (args as { as_of?: string }).as_of === "string" && !Number.isNaN(Date.parse((args as { as_of?: string }).as_of!))
+            ? new Date((args as { as_of?: string }).as_of!) : undefined;
           wm = await (await import("./memory.js")).recallWorkingMemoryFocused(
             PROJECT_PATH, agent_id ?? "default", (w.cleaned.trim() || focus!),
-            { from: w.from, to: w.to, asOf: w.asOf });
+            { from: w.from, to: w.to, asOf: explicitAsOf ?? w.asOf });
         } else {
-          wm = recallWorkingMemory(PROJECT_PATH, agent_id);
+          const explicitAsOf = typeof (args as { as_of?: string }).as_of === "string" && !Number.isNaN(Date.parse((args as { as_of?: string }).as_of!))
+            ? new Date((args as { as_of?: string }).as_of!) : undefined;
+          wm = explicitAsOf
+            // Focused path with an empty focus keeps ordering unchanged while
+            // engaging the M3 as-of reconstruction branch.
+            ? await (await import("./memory.js")).recallWorkingMemoryFocused(PROJECT_PATH, agent_id ?? "default", "", { asOf: explicitAsOf })
+            : recallWorkingMemory(PROJECT_PATH, agent_id);
         }
         const events     = getRecentEvents(PROJECT_PATH, 20);
         const broadcasts = recallSharedChannel(PROJECT_PATH, { limit: 30 });

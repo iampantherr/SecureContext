@@ -192,7 +192,16 @@ export class SqliteStore implements Store {
 
   async search(projectPath: string, queries: string[], opts: SearchOptions = {}): Promise<KnowledgeEntry[]> {
     // searchKnowledge signature: (projectPath, queries, depth?)
-    return searchKnowledge(projectPath, queries, (opts.depth ?? "L2") as "L0" | "L1" | "L2");
+    let results = await searchKnowledge(projectPath, queries, (opts.depth ?? "L2") as "L0" | "L1" | "L2");
+    // TKG-T2 (v0.47.0) — point-in-time view (PG parity, post-filter; fail-open
+    // for entries without first_seen_at from pre-migration DBs).
+    if (opts.asOf) {
+      const cutoff = new Date(opts.asOf).toISOString();
+      if (!Number.isNaN(Date.parse(cutoff))) {
+        results = results.filter((r) => !r.firstSeenAt || r.firstSeenAt <= cutoff);
+      }
+    }
+    return results;
   }
 
   async searchGlobal(queries: string[], limit = 10, projectFilter?: string): Promise<CrossProjectEntry[]> {

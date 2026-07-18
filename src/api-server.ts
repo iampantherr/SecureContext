@@ -3699,7 +3699,7 @@ export async function createApiServer(storeOverride?: Store) {
 
   app.post("/api/v1/search", async (request, reply) => {
     try {
-      const { projectPath, queries, limit, agentId, depth, mode, rerank, hopDepth } = request.body as Record<string, unknown>;
+      const { projectPath, queries, limit, agentId, depth, mode, rerank, hopDepth, as_of } = request.body as Record<string, unknown>;
       const pp = validateProjectPath(projectPath);
       if (!Array.isArray(queries) || queries.length === 0) throw new ApiError(400, "queries must be a non-empty array");
       const queryStrs = queries.map(String);
@@ -3726,6 +3726,8 @@ export async function createApiServer(storeOverride?: Store) {
         limit:   limit !== undefined ? Number(limit) : undefined,
         agentId: agentId !== undefined ? String(agentId) : undefined,
         depth:   depth as "L0" | "L1" | "L2" | undefined,
+        // TKG-T2 — point-in-time KB view (ISO date/datetime).
+        asOf:    typeof as_of === "string" && !Number.isNaN(Date.parse(as_of)) ? as_of : undefined,
       });
 
       let results;

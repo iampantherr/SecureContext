@@ -1098,6 +1098,25 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
 
+  {
+    id: 41,
+    description: "TKG-T1 (v0.47.0): KB bi-temporality. knowledge_entries.created_at is BUMPED on every re-index, so 'when did we first learn this' was unanswerable and file dates clustered on the last index day (breaking event ordering in temporal Timelines). first_seen_at is IMMUTABLE (set once, backfilled from created_at), last_indexed_at tracks freshness (backfilled from created_at, bumped by index()). Mirrors Graphiti's transaction-time axis on the KB.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ`);
+      await client.query(`ALTER TABLE knowledge_entries ADD COLUMN IF NOT EXISTS last_indexed_at TIMESTAMPTZ`);
+      await client.query(`UPDATE knowledge_entries SET first_seen_at = created_at::timestamptz WHERE first_seen_at IS NULL`);
+      await client.query(`UPDATE knowledge_entries SET last_indexed_at = created_at::timestamptz WHERE last_indexed_at IS NULL`);
+    },
+  },
+
+  {
+    id: 42,
+    description: "TKG-T3 (v0.47.0): world-time invalidation — invalid_from on working_memory records WHEN a fact stopped being true in the world (vs valid_to = when the SYSTEM retired it). Completes the four-timestamp bi-temporal model (created_at/valid_to system time + valid_at/invalid_from world time). Set by the invalidation loop to the superseding fact's timestamp.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS invalid_from TIMESTAMPTZ`);
+    },
+  },
+
 ];
 
 /**

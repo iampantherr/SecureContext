@@ -1,0 +1,2394 @@
+{
+ "qwen2.5-coder:14b": {
+  "constrained": {
+   "correct": 31,
+   "currentCorrect": 11,
+   "currentTotal": 27,
+   "fail": 0,
+   "msSum": 53870
+  },
+  "free": {
+   "conform": 18,
+   "probed": 18
+  },
+  "n": 52,
+  "perCase": [
+   {
+    "id": "real-upd-0",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 5761
+   },
+   {
+    "id": "real-upd-1",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1364
+   },
+   {
+    "id": "real-upd-2",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 919
+   },
+   {
+    "id": "real-upd-3",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 791
+   },
+   {
+    "id": "real-upd-4",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 889
+   },
+   {
+    "id": "real-upd-5",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1021
+   },
+   {
+    "id": "real-upd-6",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 923
+   },
+   {
+    "id": "real-upd-7",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 948
+   },
+   {
+    "id": "real-upd-8",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1215
+   },
+   {
+    "id": "real-upd-9",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 777
+   },
+   {
+    "id": "real-upd-10",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 846
+   },
+   {
+    "id": "real-upd-11",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 938
+   },
+   {
+    "id": "real-upd-12",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 824
+   },
+   {
+    "id": "real-upd-13",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 803
+   },
+   {
+    "id": "real-upd-14",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1221
+   },
+   {
+    "id": "real-upd-15",
+    "gold": "update",
+    "got": "update",
+    "cur": "a",
+    "ok": true,
+    "ms": 1222
+   },
+   {
+    "id": "real-upd-16",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 909
+   },
+   {
+    "id": "real-upd-17",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 880
+   },
+   {
+    "id": "real-upd-18",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 880
+   },
+   {
+    "id": "real-upd-19",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1401
+   },
+   {
+    "id": "real-open-0",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 878
+   },
+   {
+    "id": "real-open-1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 867
+   },
+   {
+    "id": "real-open-2",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 871
+   },
+   {
+    "id": "real-open-3",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 954
+   },
+   {
+    "id": "real-open-4",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1124
+   },
+   {
+    "id": "real-open-6",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 856
+   },
+   {
+    "id": "real-open-7",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 934
+   },
+   {
+    "id": "real-open-8",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 1204
+   },
+   {
+    "id": "real-open-9",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 1034
+   },
+   {
+    "id": "real-open-10",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 865
+   },
+   {
+    "id": "real-open-11",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 866
+   },
+   {
+    "id": "real-open-12",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 933
+   },
+   {
+    "id": "real-open-13",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 921
+   },
+   {
+    "id": "real-open-14",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 855
+   },
+   {
+    "id": "syn-SVC_PORT_2026-05-01",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 900
+   },
+   {
+    "id": "syn-AUTH_APPROACH",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 821
+   },
+   {
+    "id": "syn-DB_CHOICE_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 762
+   },
+   {
+    "id": "syn-DEPLOY_FREQ_1",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 817
+   },
+   {
+    "id": "syn-RETENTION_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 808
+   },
+   {
+    "id": "syn-STAGING_DEPLOY_2026-03-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 807
+   },
+   {
+    "id": "syn-API_VERSION_OLD",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 884
+   },
+   {
+    "id": "syn-LEAD_2026-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 888
+   },
+   {
+    "id": "syn-TIMEOUT_CFG_1",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 859
+   },
+   {
+    "id": "syn-CI_RUNNER_A",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1086
+   },
+   {
+    "id": "syn-DEV_DB",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 839
+   },
+   {
+    "id": "syn-SVC_A_PORT",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 924
+   },
+   {
+    "id": "syn-PHASE_E1_DONE",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 889
+   },
+   {
+    "id": "syn-QA_ROUND1",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 986
+   },
+   {
+    "id": "syn-LIMIT_USERS",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1029
+   },
+   {
+    "id": "syn-CACHE_TTL_A",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 1030
+   },
+   {
+    "id": "syn-OWNER_X_1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1011
+   },
+   {
+    "id": "syn-FLAG_ON",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 836
+   }
+  ]
+ },
+ "qwen2.5:14b": {
+  "constrained": {
+   "correct": 26,
+   "currentCorrect": 8,
+   "currentTotal": 27,
+   "fail": 0,
+   "msSum": 45464
+  },
+  "free": {
+   "conform": 18,
+   "probed": 18
+  },
+  "n": 52,
+  "perCase": [
+   {
+    "id": "real-upd-0",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 5045
+   },
+   {
+    "id": "real-upd-1",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 783
+   },
+   {
+    "id": "real-upd-2",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 792
+   },
+   {
+    "id": "real-upd-3",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 747
+   },
+   {
+    "id": "real-upd-4",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 778
+   },
+   {
+    "id": "real-upd-5",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 772
+   },
+   {
+    "id": "real-upd-6",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 745
+   },
+   {
+    "id": "real-upd-7",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 987
+   },
+   {
+    "id": "real-upd-8",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 733
+   },
+   {
+    "id": "real-upd-9",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 657
+   },
+   {
+    "id": "real-upd-10",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 765
+   },
+   {
+    "id": "real-upd-11",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 676
+   },
+   {
+    "id": "real-upd-12",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 776
+   },
+   {
+    "id": "real-upd-13",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 752
+   },
+   {
+    "id": "real-upd-14",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 869
+   },
+   {
+    "id": "real-upd-15",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 843
+   },
+   {
+    "id": "real-upd-16",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 695
+   },
+   {
+    "id": "real-upd-17",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 727
+   },
+   {
+    "id": "real-upd-18",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 666
+   },
+   {
+    "id": "real-upd-19",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 886
+   },
+   {
+    "id": "real-open-0",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 940
+   },
+   {
+    "id": "real-open-1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 686
+   },
+   {
+    "id": "real-open-2",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 745
+   },
+   {
+    "id": "real-open-3",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 753
+   },
+   {
+    "id": "real-open-4",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 731
+   },
+   {
+    "id": "real-open-6",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 729
+   },
+   {
+    "id": "real-open-7",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 772
+   },
+   {
+    "id": "real-open-8",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 1021
+   },
+   {
+    "id": "real-open-9",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 1010
+   },
+   {
+    "id": "real-open-10",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 726
+   },
+   {
+    "id": "real-open-11",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 1064
+   },
+   {
+    "id": "real-open-12",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 708
+   },
+   {
+    "id": "real-open-13",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 714
+   },
+   {
+    "id": "real-open-14",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 742
+   },
+   {
+    "id": "syn-SVC_PORT_2026-05-01",
+    "gold": "contradiction",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 718
+   },
+   {
+    "id": "syn-AUTH_APPROACH",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 923
+   },
+   {
+    "id": "syn-DB_CHOICE_A",
+    "gold": "contradiction",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 825
+   },
+   {
+    "id": "syn-DEPLOY_FREQ_1",
+    "gold": "contradiction",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 872
+   },
+   {
+    "id": "syn-RETENTION_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 905
+   },
+   {
+    "id": "syn-STAGING_DEPLOY_2026-03-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 796
+   },
+   {
+    "id": "syn-API_VERSION_OLD",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 971
+   },
+   {
+    "id": "syn-LEAD_2026-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 863
+   },
+   {
+    "id": "syn-TIMEOUT_CFG_1",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 701
+   },
+   {
+    "id": "syn-CI_RUNNER_A",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 823
+   },
+   {
+    "id": "syn-DEV_DB",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 669
+   },
+   {
+    "id": "syn-SVC_A_PORT",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 683
+   },
+   {
+    "id": "syn-PHASE_E1_DONE",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 685
+   },
+   {
+    "id": "syn-QA_ROUND1",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 792
+   },
+   {
+    "id": "syn-LIMIT_USERS",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 756
+   },
+   {
+    "id": "syn-CACHE_TTL_A",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 757
+   },
+   {
+    "id": "syn-OWNER_X_1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 821
+   },
+   {
+    "id": "syn-FLAG_ON",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 869
+   }
+  ]
+ },
+ "qwen3:14b": {
+  "constrained": {
+   "correct": 2,
+   "currentCorrect": 0,
+   "currentTotal": 0,
+   "fail": 50,
+   "msSum": 4350
+  },
+  "free": {
+   "conform": 0,
+   "probed": 18
+  },
+  "n": 52,
+  "perCase": [
+   {
+    "id": "real-upd-0",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-1",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-2",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-3",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-4",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-5",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-6",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-7",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-8",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-9",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-10",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-11",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-12",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-13",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-14",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-15",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-16",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-17",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-18",
+    "error": "no-json"
+   },
+   {
+    "id": "real-upd-19",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-0",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-1",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-2",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-3",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-4",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-6",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-7",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-8",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-9",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-10",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-11",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-12",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-13",
+    "error": "no-json"
+   },
+   {
+    "id": "real-open-14",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-SVC_PORT_2026-05-01",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-AUTH_APPROACH",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-DB_CHOICE_A",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-DEPLOY_FREQ_1",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-RETENTION_A",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-STAGING_DEPLOY_2026-03-01",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-API_VERSION_OLD",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-LEAD_2026-01",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-TIMEOUT_CFG_1",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-CI_RUNNER_A",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-DEV_DB",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-SVC_A_PORT",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 2131
+   },
+   {
+    "id": "syn-PHASE_E1_DONE",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-QA_ROUND1",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-LIMIT_USERS",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 2219
+   },
+   {
+    "id": "syn-CACHE_TTL_A",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-OWNER_X_1",
+    "error": "no-json"
+   },
+   {
+    "id": "syn-FLAG_ON",
+    "error": "no-json"
+   }
+  ]
+ },
+ "phi4:14b": {
+  "constrained": {
+   "correct": 32,
+   "currentCorrect": 9,
+   "currentTotal": 27,
+   "fail": 0,
+   "msSum": 52173
+  },
+  "free": {
+   "conform": 18,
+   "probed": 18
+  },
+  "n": 52,
+  "perCase": [
+   {
+    "id": "real-upd-0",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 13513
+   },
+   {
+    "id": "real-upd-1",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 752
+   },
+   {
+    "id": "real-upd-2",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 705
+   },
+   {
+    "id": "real-upd-3",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 797
+   },
+   {
+    "id": "real-upd-4",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 812
+   },
+   {
+    "id": "real-upd-5",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 946
+   },
+   {
+    "id": "real-upd-6",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 840
+   },
+   {
+    "id": "real-upd-7",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 738
+   },
+   {
+    "id": "real-upd-8",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 621
+   },
+   {
+    "id": "real-upd-9",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 730
+   },
+   {
+    "id": "real-upd-10",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1027
+   },
+   {
+    "id": "real-upd-11",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 667
+   },
+   {
+    "id": "real-upd-12",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 950
+   },
+   {
+    "id": "real-upd-13",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 912
+   },
+   {
+    "id": "real-upd-14",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 758
+   },
+   {
+    "id": "real-upd-15",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 946
+   },
+   {
+    "id": "real-upd-16",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 947
+   },
+   {
+    "id": "real-upd-17",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 771
+   },
+   {
+    "id": "real-upd-18",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 667
+   },
+   {
+    "id": "real-upd-19",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 702
+   },
+   {
+    "id": "real-open-0",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 671
+   },
+   {
+    "id": "real-open-1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 767
+   },
+   {
+    "id": "real-open-2",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 899
+   },
+   {
+    "id": "real-open-3",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 826
+   },
+   {
+    "id": "real-open-4",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 774
+   },
+   {
+    "id": "real-open-6",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 762
+   },
+   {
+    "id": "real-open-7",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 876
+   },
+   {
+    "id": "real-open-8",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 911
+   },
+   {
+    "id": "real-open-9",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 913
+   },
+   {
+    "id": "real-open-10",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 630
+   },
+   {
+    "id": "real-open-11",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 821
+   },
+   {
+    "id": "real-open-12",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 573
+   },
+   {
+    "id": "real-open-13",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 728
+   },
+   {
+    "id": "real-open-14",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 923
+   },
+   {
+    "id": "syn-SVC_PORT_2026-05-01",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 674
+   },
+   {
+    "id": "syn-AUTH_APPROACH",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 676
+   },
+   {
+    "id": "syn-DB_CHOICE_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 765
+   },
+   {
+    "id": "syn-DEPLOY_FREQ_1",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 639
+   },
+   {
+    "id": "syn-RETENTION_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 641
+   },
+   {
+    "id": "syn-STAGING_DEPLOY_2026-03-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 711
+   },
+   {
+    "id": "syn-API_VERSION_OLD",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 683
+   },
+   {
+    "id": "syn-LEAD_2026-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 741
+   },
+   {
+    "id": "syn-TIMEOUT_CFG_1",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 635
+   },
+   {
+    "id": "syn-CI_RUNNER_A",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 701
+   },
+   {
+    "id": "syn-DEV_DB",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 613
+   },
+   {
+    "id": "syn-SVC_A_PORT",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 568
+   },
+   {
+    "id": "syn-PHASE_E1_DONE",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 624
+   },
+   {
+    "id": "syn-QA_ROUND1",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 784
+   },
+   {
+    "id": "syn-LIMIT_USERS",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 696
+   },
+   {
+    "id": "syn-CACHE_TTL_A",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 741
+   },
+   {
+    "id": "syn-OWNER_X_1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 712
+   },
+   {
+    "id": "syn-FLAG_ON",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 694
+   }
+  ]
+ },
+ "llama3.1:8b": {
+  "constrained": {
+   "correct": 20,
+   "currentCorrect": 12,
+   "currentTotal": 27,
+   "fail": 0,
+   "msSum": 45648
+  },
+  "free": {
+   "conform": 18,
+   "probed": 18
+  },
+  "n": 52,
+  "perCase": [
+   {
+    "id": "real-upd-0",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 4823
+   },
+   {
+    "id": "real-upd-1",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 724
+   },
+   {
+    "id": "real-upd-2",
+    "gold": "update",
+    "got": "update",
+    "cur": "a",
+    "ok": true,
+    "ms": 644
+   },
+   {
+    "id": "real-upd-3",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 812
+   },
+   {
+    "id": "real-upd-4",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 917
+   },
+   {
+    "id": "real-upd-5",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 1011
+   },
+   {
+    "id": "real-upd-6",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 1286
+   },
+   {
+    "id": "real-upd-7",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 749
+   },
+   {
+    "id": "real-upd-8",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 944
+   },
+   {
+    "id": "real-upd-9",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 747
+   },
+   {
+    "id": "real-upd-10",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 925
+   },
+   {
+    "id": "real-upd-11",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 786
+   },
+   {
+    "id": "real-upd-12",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 836
+   },
+   {
+    "id": "real-upd-13",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 718
+   },
+   {
+    "id": "real-upd-14",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 767
+   },
+   {
+    "id": "real-upd-15",
+    "gold": "update",
+    "got": "update",
+    "cur": "a",
+    "ok": true,
+    "ms": 1042
+   },
+   {
+    "id": "real-upd-16",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 761
+   },
+   {
+    "id": "real-upd-17",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 680
+   },
+   {
+    "id": "real-upd-18",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 813
+   },
+   {
+    "id": "real-upd-19",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 860
+   },
+   {
+    "id": "real-open-0",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 856
+   },
+   {
+    "id": "real-open-1",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 924
+   },
+   {
+    "id": "real-open-2",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 897
+   },
+   {
+    "id": "real-open-3",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 994
+   },
+   {
+    "id": "real-open-4",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 958
+   },
+   {
+    "id": "real-open-6",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 763
+   },
+   {
+    "id": "real-open-7",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "a",
+    "ok": false,
+    "ms": 662
+   },
+   {
+    "id": "real-open-8",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 1185
+   },
+   {
+    "id": "real-open-9",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 692
+   },
+   {
+    "id": "real-open-10",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 754
+   },
+   {
+    "id": "real-open-11",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 700
+   },
+   {
+    "id": "real-open-12",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 823
+   },
+   {
+    "id": "real-open-13",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 815
+   },
+   {
+    "id": "real-open-14",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 764
+   },
+   {
+    "id": "syn-SVC_PORT_2026-05-01",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 715
+   },
+   {
+    "id": "syn-AUTH_APPROACH",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 693
+   },
+   {
+    "id": "syn-DB_CHOICE_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 653
+   },
+   {
+    "id": "syn-DEPLOY_FREQ_1",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 629
+   },
+   {
+    "id": "syn-RETENTION_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 680
+   },
+   {
+    "id": "syn-STAGING_DEPLOY_2026-03-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 639
+   },
+   {
+    "id": "syn-API_VERSION_OLD",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 839
+   },
+   {
+    "id": "syn-LEAD_2026-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 679
+   },
+   {
+    "id": "syn-TIMEOUT_CFG_1",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 667
+   },
+   {
+    "id": "syn-CI_RUNNER_A",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 828
+   },
+   {
+    "id": "syn-DEV_DB",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 910
+   },
+   {
+    "id": "syn-SVC_A_PORT",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 592
+   },
+   {
+    "id": "syn-PHASE_E1_DONE",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 963
+   },
+   {
+    "id": "syn-QA_ROUND1",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 766
+   },
+   {
+    "id": "syn-LIMIT_USERS",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 728
+   },
+   {
+    "id": "syn-CACHE_TTL_A",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 682
+   },
+   {
+    "id": "syn-OWNER_X_1",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 657
+   },
+   {
+    "id": "syn-FLAG_ON",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 696
+   }
+  ]
+ },
+ "qwen2.5-coder:32b": {
+  "constrained": {
+   "correct": 30,
+   "currentCorrect": 7,
+   "currentTotal": 27,
+   "fail": 0,
+   "msSum": 95677
+  },
+  "free": {
+   "conform": 18,
+   "probed": 18
+  },
+  "n": 52,
+  "perCase": [
+   {
+    "id": "real-upd-0",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 10971
+   },
+   {
+    "id": "real-upd-1",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1921
+   },
+   {
+    "id": "real-upd-2",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1901
+   },
+   {
+    "id": "real-upd-3",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1790
+   },
+   {
+    "id": "real-upd-4",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1544
+   },
+   {
+    "id": "real-upd-5",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1624
+   },
+   {
+    "id": "real-upd-6",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1632
+   },
+   {
+    "id": "real-upd-7",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1688
+   },
+   {
+    "id": "real-upd-8",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 2051
+   },
+   {
+    "id": "real-upd-9",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 2143
+   },
+   {
+    "id": "real-upd-10",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1889
+   },
+   {
+    "id": "real-upd-11",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 2126
+   },
+   {
+    "id": "real-upd-12",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1763
+   },
+   {
+    "id": "real-upd-13",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1740
+   },
+   {
+    "id": "real-upd-14",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1395
+   },
+   {
+    "id": "real-upd-15",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1917
+   },
+   {
+    "id": "real-upd-16",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 2420
+   },
+   {
+    "id": "real-upd-17",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1750
+   },
+   {
+    "id": "real-upd-18",
+    "gold": "update",
+    "got": "compatible",
+    "cur": "none",
+    "ok": false,
+    "ms": 1868
+   },
+   {
+    "id": "real-upd-19",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 1458
+   },
+   {
+    "id": "real-open-0",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1508
+   },
+   {
+    "id": "real-open-1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 2044
+   },
+   {
+    "id": "real-open-2",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1835
+   },
+   {
+    "id": "real-open-3",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1693
+   },
+   {
+    "id": "real-open-4",
+    "gold": "update",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 1684
+   },
+   {
+    "id": "real-open-6",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1691
+   },
+   {
+    "id": "real-open-7",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1739
+   },
+   {
+    "id": "real-open-8",
+    "gold": "compatible",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": false,
+    "ms": 2184
+   },
+   {
+    "id": "real-open-9",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1832
+   },
+   {
+    "id": "real-open-10",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1980
+   },
+   {
+    "id": "real-open-11",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1559
+   },
+   {
+    "id": "real-open-12",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1442
+   },
+   {
+    "id": "real-open-13",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 2070
+   },
+   {
+    "id": "real-open-14",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1901
+   },
+   {
+    "id": "syn-SVC_PORT_2026-05-01",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 1123
+   },
+   {
+    "id": "syn-AUTH_APPROACH",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 1690
+   },
+   {
+    "id": "syn-DB_CHOICE_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 1468
+   },
+   {
+    "id": "syn-DEPLOY_FREQ_1",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 1142
+   },
+   {
+    "id": "syn-RETENTION_A",
+    "gold": "contradiction",
+    "got": "contradiction",
+    "cur": "none",
+    "ok": true,
+    "ms": 1076
+   },
+   {
+    "id": "syn-STAGING_DEPLOY_2026-03-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1496
+   },
+   {
+    "id": "syn-API_VERSION_OLD",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1659
+   },
+   {
+    "id": "syn-LEAD_2026-01",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1418
+   },
+   {
+    "id": "syn-TIMEOUT_CFG_1",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1024
+   },
+   {
+    "id": "syn-CI_RUNNER_A",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1657
+   },
+   {
+    "id": "syn-DEV_DB",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1331
+   },
+   {
+    "id": "syn-SVC_A_PORT",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1155
+   },
+   {
+    "id": "syn-PHASE_E1_DONE",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1425
+   },
+   {
+    "id": "syn-QA_ROUND1",
+    "gold": "compatible",
+    "got": "update",
+    "cur": "b",
+    "ok": false,
+    "ms": 1498
+   },
+   {
+    "id": "syn-LIMIT_USERS",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1388
+   },
+   {
+    "id": "syn-CACHE_TTL_A",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1290
+   },
+   {
+    "id": "syn-OWNER_X_1",
+    "gold": "compatible",
+    "got": "compatible",
+    "cur": "none",
+    "ok": true,
+    "ms": 1379
+   },
+   {
+    "id": "syn-FLAG_ON",
+    "gold": "update",
+    "got": "update",
+    "cur": "b",
+    "ok": true,
+    "ms": 1705
+   }
+  ]
+ }
+}

@@ -309,9 +309,10 @@ export class PostgresStore implements Store {
     const now = new Date().toISOString();
     try {
       await this.pool.query(`
-        INSERT INTO knowledge_entries(project_hash, source, content, created_at)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT(project_hash, source) DO UPDATE SET content = EXCLUDED.content, created_at = EXCLUDED.created_at
+        INSERT INTO knowledge_entries(project_hash, source, content, created_at, first_seen_at, last_indexed_at)
+        VALUES ($1, $2, $3, $4, NOW(), NOW())
+        ON CONFLICT(project_hash, source) DO UPDATE SET content = EXCLUDED.content, created_at = EXCLUDED.created_at,
+          first_seen_at = COALESCE(knowledge_entries.first_seen_at, EXCLUDED.first_seen_at), last_indexed_at = NOW()
       `, [projectHash, source, row.value, now]);
       await this.pool.query(`
         INSERT INTO source_meta(project_hash, source, source_type, retention_tier, created_at, l0_summary, l1_summary)
@@ -663,13 +664,19 @@ export class PostgresStore implements Store {
     const l0 = safeContent.slice(0, Config.TIER_L0_CHARS).trim();
     const l1 = safeContent.slice(0, Config.TIER_L1_CHARS).trim();
 
-    // Upsert knowledge entry
+    // Upsert knowledge entry.
+    // TKG-T1 (v0.47.0) — bi-temporal: first_seen_at is IMMUTABLE (kept from the
+    // existing row on conflict), last_indexed_at always bumps. created_at keeps
+    // its historical bump-on-reindex behavior for backward compat; new temporal
+    // features read the two explicit columns instead.
     await this.pool.query(`
-      INSERT INTO knowledge_entries(project_hash, source, content, created_at)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO knowledge_entries(project_hash, source, content, created_at, first_seen_at, last_indexed_at)
+      VALUES ($1, $2, $3, $4, NOW(), NOW())
       ON CONFLICT(project_hash, source) DO UPDATE SET
-        content    = EXCLUDED.content,
-        created_at = EXCLUDED.created_at
+        content         = EXCLUDED.content,
+        created_at      = EXCLUDED.created_at,
+        first_seen_at   = COALESCE(knowledge_entries.first_seen_at, EXCLUDED.first_seen_at),
+        last_indexed_at = NOW()
     `, [projectHash, safeSource, safeContent, now]);
 
     // Upsert source_meta
@@ -930,7 +937,7 @@ export class PostgresStore implements Store {
     // BM25 candidates via ts_rank (PostgreSQL full-text)
     type CandRow = { source: string; content: string; rank: number; source_type: string; synthetic?: boolean; created_at?: string | Date };
     const bm25Res = await this.pool.query<CandRow>(`
-      SELECT ke.source, ke.content, ke.created_at,
+      SELECT ke.source, ke.content, ke.created_at, ke.first_seen_at,
              ts_rank(to_tsvector('english', ke.content), plainto_tsquery('english', $2)) AS rank,
              COALESCE(sm.source_type, 'internal') as source_type
       FROM   knowledge_entries ke
@@ -954,7 +961,7 @@ export class PostgresStore implements Store {
       if (terms.length >= 2) {
         try {
           const orRes = await this.pool.query<CandRow>(`
-            SELECT ke.source, ke.content, ke.created_at,
+            SELECT ke.source, ke.content, ke.created_at, ke.first_seen_at,
                    ts_rank(to_tsvector('english', ke.content), to_tsquery('english', $2)) AS rank,
                    COALESCE(sm.source_type, 'internal') as source_type
             FROM   knowledge_entries ke
@@ -981,7 +988,7 @@ export class PostgresStore implements Store {
           // entry and the parent takes its BEST chunk's distance (max-pooled
           // similarity), so a match deep inside a long doc surfaces the doc.
           const vecRes = await this.pool.query<CandRow>(`
-            SELECT q.source, q.content, q.created_at, 0 AS rank, q.source_type
+            SELECT q.source, q.content, q.created_at, q.first_seen_at, 0 AS rank, q.source_type
             FROM (
               SELECT DISTINCT ON (ke.source)
                      ke.source, ke.content, ke.created_at,
@@ -1175,6 +1182,7 @@ export class PostgresStore implements Store {
           rank:           r.hybridScore,
           vectorScore:    r.vectorScore,
           createdAt:      r.created_at ? new Date(r.created_at as string | Date).toISOString() : undefined,
+          firstSeenAt:    (r as { first_seen_at?: string | Date }).first_seen_at ? new Date((r as { first_seen_at?: string | Date }).first_seen_at as string | Date).toISOString() : undefined,
           backlinkScore:  blBoost(r.source) || undefined,
           sourceType:     r.source_type,
           nonAsciiSource: /[^\x00-\x7F]/.test(r.source),
@@ -1201,10 +1209,21 @@ export class PostgresStore implements Store {
         snippet:        r.content.slice(0, 200),
         rank,
         createdAt:      r.created_at ? new Date(r.created_at as string | Date).toISOString() : undefined,
+          firstSeenAt:    (r as { first_seen_at?: string | Date }).first_seen_at ? new Date((r as { first_seen_at?: string | Date }).first_seen_at as string | Date).toISOString() : undefined,
         backlinkScore:  boost || undefined,
         sourceType:     r.source_type,
         nonAsciiSource: /[^\x00-\x7F]/.test(r.source),
       }));
+    }
+
+    // TKG-T2 (v0.47.0) — point-in-time KB view: keep only entries first seen at
+    // or before asOf. Entries without a first_seen_at (pre-migration) pass
+    // through — fail-open so old projects don't silently vanish from history.
+    if (opts.asOf) {
+      const cutoff = new Date(opts.asOf).toISOString();
+      if (!Number.isNaN(Date.parse(cutoff))) {
+        results = results.filter((r) => !r.firstSeenAt || r.firstSeenAt <= cutoff);
+      }
     }
 
     // Apply depth filtering (L0/L1/L2)
@@ -1575,7 +1594,16 @@ export class PostgresStore implements Store {
       }
     }
     const agentOf = new Map(facts.map((f) => [f.key, f.agent_id]));
+    const factByKey = new Map(facts.map((f) => [f.key, f]));
     let flagged = 0;
+    // TKG-T3 (v0.47.0) — LLM adjudication budget per scan: ambiguous pairs (no
+    // algorithmic victim) get one constrained local-LLM judgment each, capped so
+    // a noisy scan can't monopolize the model. Bakeoff-derived policy: verdict
+    // "compatible" suppresses the false-positive flag entirely; "update"
+    // invalidates the OLDER side (recency wins — the model never picks);
+    // "contradiction"/failure falls through to open triage exactly as before.
+    let adjudicationsLeft = parseInt(process.env["ZC_LLM_ADJUDICATE_BUDGET"] ?? "8", 10) || 8;
+    const { adjudicatePair, adjudicatorEnabled } = await import("./llm_adjudicator.js");
     for (const f of found) {
       // Operator override wins forever: a pair previously reviewed (dismissed/acknowledged/
       // resolved) is never auto-resolved and never re-opened by the scan.
@@ -1584,12 +1612,48 @@ export class PostgresStore implements Store {
         [projectHash, safeAgent, f.ka, f.kb])).rows[0];
       if (existing && existing.status !== "open") continue;
 
+      if (!f.victim && adjudicatorEnabled() && adjudicationsLeft > 0) {
+        const fa = factByKey.get(f.ka), fb = factByKey.get(f.kb);
+        if (fa && fb) {
+          adjudicationsLeft--;
+          const j = await adjudicatePair({ key: fa.key, value: fa.value }, { key: fb.key, value: fb.value });
+          if (j?.verdict === "compatible") {
+            // False-positive suppression: record as dismissed so the pair is
+            // never re-flagged; operator sees nothing (that's the point).
+            await this.pool.query(
+              `INSERT INTO memory_contradictions_pg(project_hash, agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by, reviewed_at, resolution_mode)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'dismissed','cron',NOW(),'auto-llm')
+               ON CONFLICT (project_hash, agent_id, key_a, key_b) DO UPDATE SET
+                 status = 'dismissed', reviewed_at = NOW(), resolution_mode = 'auto-llm'`,
+              [projectHash, safeAgent, f.ka, f.kb, f.sim, f.reason, `LLM adjudicated compatible (suppressed). ${f.detail}`]);
+            continue;
+          }
+          if (j?.verdict === "update") {
+            // Recency picks the survivor (bakeoff: no model reliably picks sides).
+            const older = new Date(fa.created_at) <= new Date(fb.created_at) ? fa : fb;
+            const newer = older === fa ? fb : fa;
+            f.victim = older.key;
+            f.detail = `LLM adjudicated update; recency invalidated '${older.key}' in favor of '${newer.key}'. ${f.detail}`;
+          }
+          // "contradiction" or null → fall through to the open-triage path below.
+        }
+      }
+
       if (f.victim) {
         const winner = f.victim === f.ka ? f.kb : f.ka;
         const retired = await this._retireFactByHash(
           projectHash, f.victim, agentOf.get(f.victim) ?? "default", winner, "superseded",
         ).catch(() => false);
         if (retired) {
+          // TKG-T3 — world-time invalidation: the victim stopped being true when
+          // the winning fact was recorded (best local approximation of t_invalid).
+          try {
+            const winnerFact = factByKey.get(winner);
+            await this.pool.query(
+              `UPDATE working_memory SET invalid_from = $4 WHERE project_hash = $1 AND key = $2 AND agent_id = $3 AND invalid_from IS NULL`,
+              [projectHash, f.victim, agentOf.get(f.victim) ?? "default",
+               winnerFact ? new Date(winnerFact.created_at) : new Date()]);
+          } catch { /* pre-migration — retirement itself already succeeded */ }
           await this.pool.query(
             `INSERT INTO memory_contradictions_pg(project_hash, agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by, reviewed_at, resolution_mode)
              VALUES ($1,$2,$3,$4,$5,$6,$7,'resolved','cron',NOW(),'auto')

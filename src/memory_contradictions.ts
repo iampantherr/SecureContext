@@ -129,6 +129,28 @@ export async function detectContradictions(
     }
   }
 
+  // TKG-T3 (v0.47.0, parity with PG) — LLM adjudication of ambiguous pairs
+  // BEFORE the synchronous write loop: "compatible" suppresses the flag,
+  // "update" sets a recency victim, "contradiction"/failure → open triage.
+  const suppressed = new Set<(typeof found)[number]>();
+  try {
+    const { adjudicatePair, adjudicatorEnabled } = await import("./llm_adjudicator.js");
+    let budget = parseInt(process.env["ZC_LLM_ADJUDICATE_BUDGET"] ?? "8", 10) || 8;
+    if (adjudicatorEnabled()) {
+      for (const f of found) {
+        if (f.victim || budget <= 0) continue;
+        budget--;
+        const j = await adjudicatePair({ key: f.a.key, value: f.a.value }, { key: f.b.key, value: f.b.value });
+        if (j?.verdict === "compatible") { suppressed.add(f); continue; }
+        if (j?.verdict === "update") {
+          const older = new Date(f.a.created_at) <= new Date(f.b.created_at) ? f.a : f.b;
+          f.victim = older.key;
+          f.detail = `LLM adjudicated update; recency invalidated '${older.key}'. ${f.detail}`;
+        }
+      }
+    }
+  } catch { /* adjudicator unavailable — all pairs keep legacy behavior */ }
+
   const db = openDb(projectPath);
   ensureTable(db);
   // v0.46.2 (parity with PG) — sweep zombie flags: an open contradiction whose
@@ -174,6 +196,16 @@ export async function detectContradictions(
     // Operator override wins forever: previously-reviewed pairs are never auto-resolved or re-opened.
     const existing = statusStmt.get(agentId, ka, kb) as { status: string } | undefined;
     if (existing && existing.status !== "open") continue;
+    if (suppressed.has(f)) {
+      // TKG-T3 — LLM said compatible: dismiss so it never re-flags; no operator noise.
+      try {
+        db.prepare(`INSERT INTO memory_contradictions(agent_id, key_a, key_b, similarity, reason, detail, status, surfaced_by, surfaced_at, reviewed_at, resolution_mode)
+          VALUES (?, ?, ?, ?, ?, ?, 'dismissed', ?, ?, ?, 'auto-llm')
+          ON CONFLICT(agent_id, key_a, key_b) DO UPDATE SET status='dismissed', reviewed_at=excluded.reviewed_at, resolution_mode='auto-llm'`)
+          .run(agentId, ka, kb, f.sim, f.reason, `LLM adjudicated compatible (suppressed). ${f.detail}`, surfacedBy, now, now);
+      } catch { /* pre-migration */ }
+      continue;
+    }
     if (f.victim) {
       const winner = f.victim === f.a.key ? f.b.key : f.a.key;
       const victimAgent = (f.victim === f.a.key ? f.a.agent_id : f.b.agent_id) ?? agentId;

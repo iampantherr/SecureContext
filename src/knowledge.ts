@@ -55,6 +55,8 @@ export interface KnowledgeEntry {
   /** TR-2 (v0.46.1) — index/event date of the entry, for timeline + staleness
    *  rendering on temporal questions. ISO string when known. */
   createdAt?: string;
+  /** TKG-T1 — immutable first-learned timestamp (survives re-indexing). */
+  firstSeenAt?: string;
   vectorScore?: number;
   /** Tier-1 A: the log-damped backlink contribution folded into `rank` (omitted when 0). */
   backlinkScore?: number;
@@ -343,6 +345,14 @@ export function indexContent(
   const safeProv: Provenance = (["EXTRACTED", "INFERRED", "AMBIGUOUS", "UNKNOWN"] as const).includes(provenance)
     ? provenance : "INFERRED";
 
+  // TKG-T1 (v0.47.0) — preserve the immutable first_seen_at across re-index.
+  // It lives on source_meta (FTS5 knowledge table can't take columns); read it
+  // BEFORE the source_meta upsert below rewrites the row.
+  let tkgFirstSeen = now;
+  try {
+    const prev = db.prepare("SELECT first_seen_at FROM source_meta WHERE source = ?").get(source) as { first_seen_at?: string } | undefined;
+    if (prev?.first_seen_at) tkgFirstSeen = prev.first_seen_at;
+  } catch { /* pre-migration DB */ }
   db.prepare("DELETE FROM knowledge WHERE source = ?").run(source);
   db.prepare(
     "INSERT INTO knowledge(source, content, created_at) VALUES (?, ?, ?)"
@@ -367,6 +377,13 @@ export function indexContent(
       ).run(source, sourceType, retentionTier, now);
     }
   }
+
+  // TKG-T1 — the INSERT OR REPLACE above rewrote the row; restore the immutable
+  // first_seen_at (read before the rewrite) and stamp last_indexed_at.
+  try {
+    db.prepare(`UPDATE source_meta SET first_seen_at = ?, last_indexed_at = ? WHERE source = ?`)
+      .run(tkgFirstSeen, now, source);
+  } catch { /* pre-migration DB */ }
 
   db.close();
 
@@ -641,6 +658,17 @@ function _searchDb(
   const sourceTypeMap = new Map<string, string>();
   for (const row of metaRows) sourceTypeMap.set(row.source, row.source_type);
 
+  // TKG-T1 — first_seen_at lives on source_meta in the SQLite store (the FTS5
+  // knowledge table cannot take new columns). Separate lookup so a pre-migration
+  // DB degrades to "no firstSeenAt" instead of failing the whole search.
+  const firstSeenMap = new Map<string, string>();
+  try {
+    const fsRows = db.prepare(
+      `SELECT source, first_seen_at FROM source_meta WHERE source IN (${placeholders}) AND first_seen_at IS NOT NULL`
+    ).all(...sources) as Array<{ source: string; first_seen_at: string }>;
+    for (const row of fsRows) firstSeenMap.set(row.source, row.first_seen_at);
+  } catch { /* pre-migration */ }
+
   // S9 — group head + chunk vectors per PARENT source; cosine below max-pools.
   const embeddingMap = new Map<string, Float32Array[]>();
   for (const row of embedRows) {
@@ -837,6 +865,7 @@ function _searchDb(
       sourceType:    entrySourceType,
       nonAsciiSource,
       createdAt:     (row as { created_at?: string }).created_at || undefined,
+      firstSeenAt:   firstSeenMap.get(row.source),
       _hybrid:       hybridScore,
     });
   }

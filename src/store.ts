@@ -80,6 +80,9 @@ export interface SearchOptions {
   /** TR-2 internal: set on sub-searches spawned by temporal-question
    *  decomposition so they don't decompose recursively. */
   _noDecompose?: boolean;
+  /** TKG-T2 (v0.47.0) — point-in-time KB view: only entries first seen at or
+   *  before this ISO timestamp ("what did the KB contain on date X"). */
+  asOf?: string;
 }
 
 export interface ExplainEntry {
