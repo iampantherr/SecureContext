@@ -7,8 +7,16 @@
  *                                 + end-to-end verification
  *   node init.mjs --sqlite      — no Docker: local SQLite mode (BM25-only until
  *                                 an Ollama is reachable; everything else works)
+ *   node init.mjs --join <url> <key>
+ *                               — TEAMMATE mode: no Docker, no local stack. Point
+ *                                 this machine's Claude Code at a team's existing
+ *                                 SecureContext API (a host on your LAN) using
+ *                                 your personal zck_… key. Registers MCP + hooks
+ *                                 and verifies the connection.
  *   node init.mjs --no-hooks    — skip harness-hook installation
  *   node init.mjs --uninstall   — remove SecureContext from Claude configs
+ *
+ * Also runs via npx once published: `npx securecontext` (bin: zc-ctx).
  *
  * Idempotent: safe to re-run. An existing docker/.env, running stack, prior MCP
  * registration, or already-installed hooks are detected and reused, not clobbered.
@@ -34,6 +42,17 @@ const SQLITE_ONLY = args.includes("--sqlite");
 const NO_HOOKS    = args.includes("--no-hooks");
 const API_PORT    = process.env.SC_API_PORT ?? "3099";
 
+// --join <url> <key> — teammate mode against an existing team stack.
+let JOIN_URL = null, JOIN_KEY = null;
+const joinIdx = args.indexOf("--join");
+if (joinIdx !== -1) {
+  JOIN_URL = args[joinIdx + 1] ?? null;
+  JOIN_KEY = args[joinIdx + 2] ?? null;
+  if (!JOIN_URL || !JOIN_KEY || !JOIN_URL.startsWith("http")) {
+    fail("--join requires two arguments: <api-url> <your-key>\n  Example: node init.mjs --join http://192.168.1.20:3099 zck_yourpersonalkey");
+  }
+}
+
 if (args.includes("--uninstall")) {
   execSync(`node "${join(ROOT, "install.mjs")}" --uninstall`, { stdio: "inherit" });
   process.exit(0);
@@ -53,7 +72,7 @@ const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
 if (nodeMajor < 20) fail(`Node 20+ required (you have ${process.versions.node}).`);
 ok(`Node ${process.versions.node}`);
 
-let dockerMode = !SQLITE_ONLY;
+let dockerMode = !SQLITE_ONLY && !JOIN_URL;
 if (dockerMode && !has("docker")) {
   warn("Docker not found — falling back to local SQLite mode.");
   warn("(Install Docker Desktop and re-run for the full Postgres + Ollama stack.)");
@@ -67,19 +86,34 @@ if (!has("claude")) warn("`claude` CLI not found on PATH — config will still b
 
 // ─── 2. Build ────────────────────────────────────────────────────────────────
 step("Build");
-if (!existsSync(join(ROOT, "node_modules"))) {
-  info("Installing npm dependencies (first run — this takes a minute)…");
-  execSync("npm ci --no-audit --no-fund", { stdio: "inherit", cwd: ROOT });
-}
-if (!existsSync(join(ROOT, "dist", "server.js"))) {
+if (existsSync(join(ROOT, "dist", "server.js"))) {
+  // Published npm package (or previously built checkout) — dist ships prebuilt,
+  // dependencies were installed by npm/npx. Nothing to do.
+  ok("dist/server.js ready (prebuilt)");
+} else {
+  if (!existsSync(join(ROOT, "node_modules")) && existsSync(join(ROOT, "package-lock.json"))) {
+    info("Installing npm dependencies (first run — this takes a minute)…");
+    execSync("npm ci --no-audit --no-fund", { stdio: "inherit", cwd: ROOT });
+  }
+  if (!existsSync(join(ROOT, "src"))) fail("No dist/ and no src/ — corrupted install? Re-clone or reinstall the package.");
   info("Compiling TypeScript…");
   execSync("npm run build", { stdio: "inherit", cwd: ROOT });
+  ok("dist/server.js ready");
 }
-ok("dist/server.js ready");
 
-// ─── 3. Docker stack ─────────────────────────────────────────────────────────
+// ─── 3. Docker stack / team join ─────────────────────────────────────────────
 let apiKey = null;
-if (dockerMode) {
+if (JOIN_URL) {
+  step(`Join team stack at ${JOIN_URL}`);
+  try {
+    const h = JSON.parse(sh(`curl -s --max-time 8 ${JOIN_URL.replace(/\/$/, "")}/health`));
+    if (!h?.version) throw new Error("no version in /health");
+    ok(`Reached team SecureContext v${h.version} (store: ${h.store ?? "?"})`);
+  } catch (e) {
+    fail(`Cannot reach ${JOIN_URL}/health — is the team stack up and this machine on its network? (${e.message})`);
+  }
+  apiKey = JOIN_KEY;
+} else if (dockerMode) {
   step("Docker stack (Postgres + Ollama + API)");
   const envPath = join(ROOT, "docker", ".env");
   if (!existsSync(envPath)) {
@@ -133,7 +167,8 @@ if (dockerMode) {
 
 // ─── 4. Register with Claude Code ────────────────────────────────────────────
 step("Register the MCP plugin with Claude Code");
-const installArgs = dockerMode ? ` --remote http://localhost:${API_PORT} ${apiKey}` : "";
+const remoteUrl = JOIN_URL ?? (dockerMode ? `http://localhost:${API_PORT}` : null);
+const installArgs = remoteUrl ? ` --remote ${remoteUrl} ${apiKey}` : "";
 execSync(`node "${join(ROOT, "install.mjs")}" --cli${installArgs}`, { stdio: "inherit", cwd: ROOT });
 
 // ─── 5. Harness hooks ────────────────────────────────────────────────────────
@@ -174,7 +209,13 @@ step("Verify");
 const settingsTxt = readFileSync(join(homedir(), ".claude", "settings.json"), "utf8");
 if (!settingsTxt.includes("zc-ctx")) fail("zc-ctx missing from ~/.claude/settings.json after install — please report this.");
 ok("MCP plugin registered in ~/.claude/settings.json");
-if (dockerMode) {
+if (JOIN_URL) {
+  try {
+    const r = sh(`curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${apiKey}" ${JOIN_URL.replace(/\/$/, "")}/api/v1/team/workspaces`);
+    if (r.trim() === "200") ok("Your key authenticates against the team API");
+    else warn(`Key check returned HTTP ${r.trim()} — ask your operator to verify the key (dashboard → team keys).`);
+  } catch { warn("Could not test the key — non-fatal."); }
+} else if (dockerMode) {
   try {
     const chain = JSON.parse(sh(`curl -s -H "Authorization: Bearer ${apiKey}" http://localhost:${API_PORT}/api/v1/chain-verify`));
     if (chain.broken_at === null || chain.broken_at === undefined) ok(`Audit chain verified (${chain.total_rows ?? 0} rows, no breaks)`);
@@ -186,7 +227,7 @@ if (dockerMode) {
 console.log(`\n${GREEN}${BOLD}══════════════════════════════════════════════════${RESET}`);
 console.log(`${GREEN}${BOLD}  SecureContext is installed.${RESET}`);
 console.log(`${GREEN}${BOLD}══════════════════════════════════════════════════${RESET}\n`);
-info(`Mode: ${dockerMode ? "Docker stack (Postgres + Ollama + API on :" + API_PORT + ")" : "local SQLite"}`);
+info(`Mode: ${JOIN_URL ? `team member → ${JOIN_URL}` : dockerMode ? "Docker stack (Postgres + Ollama + API on :" + API_PORT + ")" : "local SQLite"}`);
 info("Next steps:");
 info("  1. Restart Claude Code (the MCP plugin loads at startup).");
 info("  2. In any project, ask Claude to run zc_status — you should see the store, chain, and skill counts.");

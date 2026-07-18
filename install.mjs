@@ -108,14 +108,20 @@ function buildMcpEntry() {
 
 // ─── Step 1: Build ────────────────────────────────────────────────────────────
 if (!UNINSTALL) {
-  info("Building SecureContext...");
-  try {
-    execSync("npm ci", { cwd: PLUGIN_DIR, stdio: "inherit" });
-    execSync("npm run build", { cwd: PLUGIN_DIR, stdio: "inherit" });
-    log("Build complete");
-  } catch {
-    warn("Build failed — aborting installation");
-    process.exit(1);
+  // v0.46.2 — published npm packages ship a prebuilt dist/ and have no lockfile
+  // or tsc; only build when running from a source checkout without dist.
+  if (existsSync(SERVER_JS)) {
+    log("Using prebuilt dist/server.js");
+  } else {
+    info("Building SecureContext...");
+    try {
+      execSync("npm ci", { cwd: PLUGIN_DIR, stdio: "inherit" });
+      execSync("npm run build", { cwd: PLUGIN_DIR, stdio: "inherit" });
+      log("Build complete");
+    } catch {
+      warn("Build failed — aborting installation");
+      process.exit(1);
+    }
   }
 
   if (!existsSync(SERVER_JS)) {
