@@ -1,6 +1,6 @@
 {
   "name": "securecontext",
-  "version": "0.47.0",
+  "version": "0.47.1",
   "description": "Persistent memory, delivery programs, and a cryptographic security layer for Claude Code agents — 100% local (Postgres + Ollama), MIT.",
   "keywords": [
     "claude-code",

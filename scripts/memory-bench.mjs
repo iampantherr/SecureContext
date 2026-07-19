@@ -387,6 +387,92 @@ async function runLongMemEval(file, limit) {
   writeFileSync(new URL(`longmemeval_detail${partial ? "_" + typesFilter.join("-") : ""}.json`, dir),
     JSON.stringify({ scoredAt: new Date().toISOString(), byType, detail }, null, 2));
   console.log("saved per-question detail");
+
+  // ── T5 (v0.47.x) — END-TO-END QA protocol (Zep-comparable methodology) ─────
+  // Two conditions per question, SAME local generator, so the SC-vs-baseline
+  // DELTA is comparable to Zep's reported lift (their 71.2% vs 60.2% used
+  // gpt-4o for both conditions; absolute numbers across different generators
+  // are NOT comparable and are reported with that disclosure):
+  //   A) SC memory: top-10 zc_search results as context (~Zep's ~1.6k tokens)
+  //   B) Baseline: the question's own haystack transcript, most-recent-first,
+  //      truncated to fit the local context window (approximates full-context)
+  // Generator: --qa-gen (default qwen2.5-coder:32b, host GPU Ollama).
+  // Judge: --qa-judge (default phi4:14b — a DIFFERENT model, constrained JSON).
+  if (has("--qa")) {
+    const GEN   = val("--qa-gen")   ?? "qwen2.5-coder:32b";
+    const JUDGE = val("--qa-judge") ?? "phi4:14b";
+    const OLL   = process.env.BENCH_OLLAMA_URL ?? "http://localhost:11434";
+    const chat = async (model, prompt, format, numCtx, numPredict) => {
+      const resp = await fetch(`${OLL}/api/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], stream: false,
+          // Reasoning models (gpt-oss) burn tokens in the thinking channel
+          // BEFORE the answer — the budget must cover both.
+          ...(format ? { format } : {}), options: { temperature: 0, num_predict: numPredict ?? 1600, num_ctx: numCtx ?? 8192 } }),
+        signal: AbortSignal.timeout(300_000),
+      });
+      if (!resp.ok) throw new Error(`ollama ${model} http ${resp.status}`);
+      return ((await resp.json()).message?.content ?? "").trim();
+    };
+    const genAnswer = (context, question) => chat(GEN,
+      `You are answering a question about a user based on their past conversation history.\n\nCONTEXT (excerpts from past sessions):\n${context}\n\nQUESTION: ${question}\n\nAnswer concisely using ONLY the context. If the context does not contain the information, answer exactly: "I don't have that information."`,
+      undefined, 16384);
+    const judgeAnswer = async (question, gold, hyp) => {
+      const out = await chat(JUDGE,
+        `Grade a memory system's answer.\nQUESTION: ${question}\nGOLD ANSWER: ${gold}\nMODEL ANSWER: ${hyp}\n\nThe model answer is CORRECT if it conveys the same essential information as the gold answer (paraphrase ok, extra detail ok). If the gold answer indicates the question is unanswerable/abstention, the model is correct only if it declines or says it doesn't know.\nJSON only: {"correct": true|false}`,
+        { type: "object", properties: { correct: { type: "boolean" } }, required: ["correct"] }, 8192);
+      const m = out.match(/\{[\s\S]*\}/);
+      return m ? !!JSON.parse(m[0]).correct : false;
+    };
+    const qaByType = {}; const qaDetail = [];
+    let done = 0;
+    for (const q of questions) {
+      const gold = q.answer ?? q.gold_answer ?? "";
+      if (!gold) continue;
+      try {
+        // Condition A — SC memory. T5b upgrades (each measured against the T5
+        // baseline run):
+        //  - type-aware K: multi-session answers span MANY gold sessions
+        //  - CHRONOLOGICAL DATED context: the T5 run showed the dated session
+        //    stream (baseline format) beat unordered chunks even when retrieval
+        //    recall was higher — so SC context now renders the same way
+        //  - deterministic temporal solver statement leads the context
+        const K = q.question_type === "multi-session" ? 16 : 10;
+        const r = await api("POST", "/api/v1/search", { projectPath: LME_PROJECT, queries: [q.question], limit: K, question_date: q.question_date });
+        const dated = (r.results ?? []).map((x) => ({
+          date: (x.firstSeenAt ?? x.createdAt ?? "").slice(0, 10) || "undated",
+          text: (x.content ?? x.snippet ?? "").slice(0, 4000),
+        })).sort((a, b) => (a.date < b.date ? -1 : 1));
+        const solved = r.temporal?.statement ? `COMPUTED TEMPORAL FACTS (deterministic date math — trust these numbers):\n${r.temporal.statement}\n\n` : "";
+        const scCtx = (solved + dated.map((d) => `SESSION (${d.date}):\n${d.text}`).join("\n\n")).slice(0, 44_000);
+        const scAns = await genAnswer(scCtx || "(no results)", q.question);
+        const scOk = await judgeAnswer(q.question, gold, scAns);
+        // Condition B — truncated full-context baseline (most recent last, cap ~48k chars)
+        const sessions = (q.haystack_sessions ?? []).map((s, i) => ({
+          date: q.haystack_dates?.[i] ?? "", text: (s ?? []).map((t) => `${t.role}: ${t.content}`).join("\n") }));
+        let base = "";
+        for (let i = sessions.length - 1; i >= 0 && base.length < 48_000; i--) {
+          base = `SESSION (${sessions[i].date}):\n${sessions[i].text}\n\n` + base;
+        }
+        const baseAns = await genAnswer(base.slice(-48_000), q.question);
+        const baseOk = await judgeAnswer(q.question, gold, baseAns);
+        const t = (qaByType[q.question_type ?? "unknown"] ??= { n: 0, sc: 0, base: 0 });
+        t.n++; if (scOk) t.sc++; if (baseOk) t.base++;
+        qaDetail.push({ id: q.question_id, type: q.question_type, scOk, baseOk, scAns: scAns.slice(0, 200), baseAns: baseAns.slice(0, 200), gold: String(gold).slice(0, 200) });
+      } catch (e) {
+        qaDetail.push({ id: q.question_id, type: q.question_type, error: e.message.slice(0, 120) });
+      }
+      done++;
+      process.stdout.write(`\rQA ${done}/${questions.length}…  `);
+      writeFileSync(new URL(`longmemeval_qa.json`, dir), JSON.stringify({ scoredAt: new Date().toISOString(), generator: GEN, judge: JUDGE, qaByType, qaDetail }, null, 2));
+    }
+    console.log("\n=== LongMemEval END-TO-END QA (local generator: " + GEN + ", judge: " + JUDGE + ") ===");
+    console.table(Object.fromEntries(Object.entries(qaByType).map(([k, t]) =>
+      [k, { n: t.n, "SC%": pct(t.sc, t.n), "baseline%": pct(t.base, t.n), "delta": +(pct(t.sc, t.n) - pct(t.base, t.n)).toFixed(1) }])));
+    const tot = Object.values(qaByType).reduce((a, t) => ({ n: a.n + t.n, sc: a.sc + t.sc, base: a.base + t.base }), { n: 0, sc: 0, base: 0 });
+    console.log(`OVERALL: SC ${pct(tot.sc, tot.n)}% vs baseline ${pct(tot.base, tot.n)}% (delta ${+(pct(tot.sc, tot.n) - pct(tot.base, tot.n)).toFixed(1)} pts, n=${tot.n})`);
+    console.log("saved bench/results/longmemeval_qa.json");
+  }
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────

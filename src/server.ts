@@ -1670,8 +1670,12 @@ async function _handleRemoteTool(
         if (results.length === 0) return { content: [{ type: "text", text: "No results found." }] };
         // TR-2 — timeline block for temporal questions + per-result staleness notes.
         const timeline = _fmtTemporalTimeline((body["queries"] as string[] ?? []).join(" "), results);
+        // T5b — deterministic temporal computation (interval/ordering/ago) from
+        // the API's solver: the DATE MATH is precomputed; use it as the answer.
+        const tsol = sr["temporal"] as { statement?: string } | undefined;
+        const solved = tsol?.statement ? `## Temporal computation (deterministic — trust these numbers over mental date math)\n${tsol.statement}\n\n` : "";
         const lines = results.map((r, i) => `${i + 1}. [${r.source}]${_staleNote(r.createdAt)}\n   ${r.snippet}`);
-        return { content: [{ type: "text", text: timeline + lines.join("\n\n") }] };
+        return { content: [{ type: "text", text: solved + timeline + lines.join("\n\n") }] };
       }
 
       case "zc_program": {

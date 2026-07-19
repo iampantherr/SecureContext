@@ -3748,7 +3748,21 @@ export async function createApiServer(storeOverride?: Store) {
         results = reranked;
       }
 
-      return { ok: true, results, mode: mode ?? "default", reranked: useRerank };
+      // T5b (v0.47.x) — deterministic temporal solver: interval/ordering/ago
+      // questions get a COMPUTED answer skeleton (per-event dated retrieval +
+      // date arithmetic). LLMs are unreliable at date math; this is a solver,
+      // not a prompt. Best-effort: failure or non-temporal → field absent.
+      let temporal;
+      try {
+        const { solveTemporal } = await import("./temporal_solver.js");
+        const qd = request.body && typeof (request.body as Record<string, unknown>)["question_date"] === "string"
+          ? String((request.body as Record<string, unknown>)["question_date"]) : undefined;
+        temporal = await solveTemporal(queryStrs.join(" "),
+          async (query, lim) => (await store.search(pp, [query], { limit: lim, _noDecompose: true })) as Array<{ source: string; content: string; createdAt?: string; firstSeenAt?: string }>,
+          qd) ?? undefined;
+      } catch { temporal = undefined; }
+
+      return { ok: true, results, mode: mode ?? "default", reranked: useRerank, ...(temporal ? { temporal } : {}) };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

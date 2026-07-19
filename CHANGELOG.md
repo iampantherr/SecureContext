@@ -24,6 +24,26 @@ For full release notes including the v0.2.0–v0.8.0 history, see the **[Changel
   ordering questions that need date arithmetic over multiple gold sessions — a
   reasoning feature, not a ranking one; recorded as future work, not claimed.
 
+## [0.47.1] — 2026-07-19
+
+### Deterministic temporal answer solver (T5b)
+- `src/temporal_solver.ts`: interval / ordering / "how long ago" questions get a
+  COMPUTED answer skeleton — event clauses (TR-2 decomposition, plus a
+  noun-phrase splitter for "which happened first, X or Y?" comparisons) are
+  retrieved individually, each grounded to a date (content-stated date from the
+  top hit or any session/checkpoint EVENT RECORD in the top-5; bi-temporal
+  first-seen as fallback), and the arithmetic is done in code. LLMs are
+  unreliable at date math; this is a solver, not a prompt.
+- Wired into `/api/v1/search` (`temporal` field, optional `question_date`) and
+  the `zc_search` render: a "## Temporal computation" block above the Timeline.
+  Fails closed — non-temporal or ungroundable questions get no block, never a
+  fabricated date. E2E-verified with real terminal agents on fresh + mature
+  projects (two grounding bugs found and fixed in the loop: rank-2 artifact
+  dates mis-grounding events; noun-phrase orderings never splitting).
+- Bench harness: end-to-end QA mode (`--qa`, `--qa-gen`, `--qa-judge`) with
+  chronological dated context assembly, type-aware retrieval K, and
+  reasoning-model token budgets.
+
 ## [0.47.0] — 2026-07-18
 
 **The TKG round — SecureContext's temporal knowledge-graph story, 100% local.**
