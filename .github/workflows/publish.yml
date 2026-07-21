@@ -31,6 +31,21 @@ jobs:
           if [ "$PKG" != "$TAG" ]; then
             echo "Tag $TAG does not match package.json version $PKG"; exit 1
           fi
+      # Without the NPM_TOKEN secret, publishing is impossible — skip with a
+      # warning instead of failing the whole workflow (the release tag itself
+      # is still valid). Add the secret to enable real publishing.
+      - name: Detect npm token
+        id: npm_token
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::NPM_TOKEN secret not set — skipping npm publish for this tag"
+          fi
       - run: npm publish --provenance --access public
+        if: steps.npm_token.outputs.present == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

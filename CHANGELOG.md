@@ -4,6 +4,85 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.48.0] — 2026-07-19 — Lever 4: event-fact extraction at ingest
+
+The LongMemEval T5b round showed temporal reasoning was the last flat category
+(26.7% e2e, +0 over baseline): transcripts store *talk about* events, not events —
+"we leave tomorrow" has no date a retriever can use. This release mines events at
+ingest.
+
+### Event-fact extraction (`src/event_extractor.ts`)
+- At ingest, session-tier sources (`session:*`, `SESSION_SUMMARY*`, `checkpoint:*`)
+  pass through a background extraction lane: a local chat model extracts atomic
+  events with their time expressions **exactly as stated** ("tomorrow", "last
+  Monday", "from July 10th to July 16th"), and **deterministic code** resolves the
+  expressions to calendar dates anchored on the session date — the model never does
+  date math (the one quantified small-model failure in the literature).
+- Events index as `event:<parent>:<n>` pseudo-entries flowing through every existing
+  retrieval channel: `EVENT: user departs for Portugal | DATE: 2026-05-04 |
+  stated as "tomorrow" (from session:xyz)`. **Ranges are first-class**:
+  `EVENT: physical therapy | FROM: 2026-06-29 | TO: 2026-08-30 | …`.
+- Serialized queue, bounded backlog (sheds under bulk load), fail-closed: extraction
+  problems never surface to ingest. Both stores wired (SQLite `indexContent` + PG
+  `PostgresStore.index` — parity rule).
+- Resolver handles ISO/month-day (past-biased yearless, ~6-month future window for
+  range ends), today/tomorrow/yesterday, N-units-ago / in-N-units (word numbers),
+  last/next week/month, weekends, last/next/bare weekdays (colloquial "next Friday"
+  = Friday of next week), bare ordinals ("the 4th"), time-of-day suffixes.
+- Config: `ZC_EVENT_EXTRACT=0` kill switch; `ZC_EVENT_EXTRACT_MODEL` (default
+  `phi4:14b` — measured bakeoff winner: 100% event recall / 100% date accuracy,
+  2× faster than gpt-oss:20b; bakeoff harness + results in `bench/t3/extract-bakeoff*`);
+  `ZC_EVENT_OLLAMA_URL` to target a GPU host (e.g. `host.docker.internal:11434`
+  from Docker).
+
+### Temporal solver upgrades (`src/temporal_solver.ts`)
+- New **duration** question kind ("How many days did my trip last?") answered
+  directly from a range pseudo-entry — scans past content-dated parent sessions for
+  the range (live-API finding: rank-1 session must not short-circuit the scan).
+- `extractDateRange()` parses FROM/TO entries; event records now include the
+  `event:` prefix for date grounding.
+- Interval questions with pronoun-less clauses ("…and the day the bug reports
+  started") get a between-payload fallback splitter (found by unit probe; the
+  pronoun-anchored splitter returned zero clauses).
+
+### Solver precision gates (T5c miss-analysis round)
+The first lever-4 bench pass showed the failure mode of a confident solver:
+wrong groundings became confidently wrong answers ("164 days", "1170 days ago")
+because the statement leads the context with "trust these numbers". Four gates
+make it high-precision (abstaining falls back to normal generation — strictly
+safer):
+- **Topical overlap**: a hit may ground a clause only if it shares ≥1 meaningful
+  term with it; the content-date privilege goes to the top hit that *passes* the
+  gate.
+- **Proximity date grounding** (`extractDateNear`): multi-date documents (session
+  summaries covering several events) must supply a date within 400 chars of the
+  clause terms — first-date-in-document grounding poisoned ordering via an
+  unrelated event's date (live find).
+- **Content-origin requirement**: no statement unless every event grounded from
+  content-stated dates (index timestamps cluster on backfill dates → the "0 day"
+  wrong-answer family).
+- **Degenerate-result abstention**: 0-day "ago" answers and same-source 0-day
+  intervals abstain.
+
+### Event-entry result cap
+One-line `event:` pseudo-entries win BM25's length normalization and crowded real
+sessions out of top-K (measured: multi-session −13 pts). Both stores now cap
+event entries per result set (`ZC_EVENT_RESULT_CAP`, default 3); freed slots take
+the next-best non-event results.
+
+### Bench harness
+- `--qa` runs now ingest sessions with a `SESSION_DATE:` header (self-dating
+  content) and deterministically backfill event extraction over the corpus before
+  scoring (`BENCH_EXTRACT=0` skips); retrieved event entries render as
+  `KNOWN EVENT` lines, not misdated session blocks.
+- Corpus project-hash is derived (sha256 of the normalized path), not guessed
+  from the newest `session:` row — the guess broke when another project indexed
+  a session source (bench sessions are backdated).
+
+### README
+- New FAQ: hardware tiers × model choice — what runs on what machine and which
+  SecureContext layers activate per tier.
+
 ## [0.46.1] — 2026-07-17 — Temporal-reasoning ranking round (S11) + delivery-tool kit
 
 ### S11 — Interrogative-scaffolding stripper (the TR "ranking-semantics" lever)

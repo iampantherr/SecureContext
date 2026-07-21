@@ -21,3 +21,7 @@ docs/planning/
 # Scratch/diagnostic scripts (underscore prefix = local-only, never published)
 scripts/_*
 bench/data/
+
+# LongMemEval end-to-end QA results stay local (operator decision)
+bench/results/longmemeval_qa*.json
+bench/results/longmemeval_detail.json

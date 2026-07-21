@@ -363,6 +363,24 @@ Yes — parallel sessions atomically claim tasks from a work-stealing queue (zer
 
 Node 20+ and (recommended) Docker for the bundled PostgreSQL + Ollama stack. The one-command installer does everything in about five minutes. A SQLite fallback runs with zero infrastructure.
 
+### Which local models should I run, and how does hardware affect SecureContext?
+
+SecureContext degrades gracefully by hardware tier — every LLM-powered layer fails closed (the feature quietly contributes nothing) rather than breaking ingest or search. What changes with hardware is how much of the intelligence stack is active:
+
+| Tier | Hardware | Models that fit | What you get |
+|---|---|---|---|
+| **Minimum** | Any CPU, ~2 GB RAM free | `nomic-embed-text` (embeddings only) | Hybrid BM25+vector search, working memory, audit chain, skills gating — the core. LLM layers (event extraction, entity extraction, contradiction adjudication) stay dormant. |
+| **Mid** | 8–16 GB GPU (or Apple Silicon 16 GB+) | + `qwen2.5-coder:14b` or `phi4:14b` (one at a time) | + Event-fact extraction at ingest (temporal reasoning), LLM contradiction adjudication, entity extraction, L0/L1 semantic file summaries. |
+| **Full** | 24 GB+ GPU (e.g. RTX 4090/5090) | + `phi4:14b` **and** `gpt-oss:20b` resident together | Everything, concurrently, at interactive latency — plus a strong local generator for QA/benchmarks. This is the configuration our published benchmark deltas were measured on. |
+
+Model-choice guidance (all measured, see `bench/`):
+
+- **Embeddings:** `nomic-embed-text` — required, tiny, runs anywhere.
+- **Event extraction** (`ZC_EVENT_EXTRACT_MODEL`, default `phi4:14b`): our bakeoff scored phi4:14b at 100% event recall / 100% date accuracy, tying gpt-oss:20b at 2× the speed. On smaller GPUs `qwen2.5-coder:14b` is close behind (84.6% recall). **Coder models ≠ better**: qwen2.5-coder:32b scored *worst* (69.2%) despite being the largest — conversational extraction is not a coding task.
+- **Contradiction adjudication** (`ZC_LLM_ADJUDICATE_MODEL`, default `qwen2.5-coder:14b`): the only model in our bakeoff with zero false contradictions; the 32B variant was *worse*.
+- **Dates are never LLM-resolved.** Relative expressions ("tomorrow", "last Friday", "the 4th") are resolved by deterministic code anchored on the session date — the one operation the literature shows small local models fail at. Model choice therefore affects *which events get found*, never *what date they get*.
+- Point any of these at a different Ollama host (e.g. a GPU box on your LAN, or `host.docker.internal` from Docker) with `ZC_EVENT_OLLAMA_URL` / per-layer URL overrides; each layer has a kill-switch env (`ZC_EVENT_EXTRACT=0`, `ZC_ENTITY_EXTRACT=0`, `ZC_LLM_ADJUDICATE=0`).
+
 ---
 
 ## Documentation

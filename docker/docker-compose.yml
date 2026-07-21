@@ -97,6 +97,15 @@ services:
       # S9 — kill switch for the qwen-based entity-extraction layer (it can saturate
       # CPU-only Ollama and starve the nomic embedder; see 2026-07-17 incident).
       ZC_ENTITY_EXTRACT:          ${ZC_ENTITY_EXTRACT:-1}
+      # Lever-4 (v0.48.0) — event-fact extraction at ingest. ON by default;
+      # ZC_EVENT_EXTRACT=0 disables. The extractor needs a CHAT-capable model —
+      # point ZC_EVENT_OLLAMA_URL at a GPU Ollama on the host when you have one
+      # (e.g. http://host.docker.internal:11434); unset, it falls back to the
+      # container's embedding Ollama, which likely lacks the chat model → the
+      # lane fails closed (no events, ingest unaffected).
+      ZC_EVENT_EXTRACT:           ${ZC_EVENT_EXTRACT:-1}
+      ZC_EVENT_EXTRACT_MODEL:     ${ZC_EVENT_EXTRACT_MODEL:-phi4:14b}
+      ZC_EVENT_OLLAMA_URL:        ${ZC_EVENT_OLLAMA_URL:-}
       ZC_ENRICHMENT_INTERVAL_MIN: ${ZC_ENRICHMENT_INTERVAL_MIN:-30}
       ZC_ENRICHMENT_SCAN_DAYS:    ${ZC_ENRICHMENT_SCAN_DAYS:-14}
       # S5 (v0.46.0) — OTLP export of the audit chain as Gen-AI semconv spans.

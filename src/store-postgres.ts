@@ -34,6 +34,7 @@ import pg from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
+import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
 import { classifyFactKind, type EpistemicOpts } from "./memory.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
@@ -76,6 +77,26 @@ const { Pool } = pg;
 
 function ph(projectPath: string): string {
   return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+}
+
+/** Lever-4 diversity guard: `event:` pseudo-entries are one-liners, so BM25's
+ *  length normalization over-ranks them and they crowd real content out of
+ *  top-K (measured on the T5c bench: multi-session dropped 13 pts). Cap them
+ *  per result set; freed slots fill with the next-best non-event candidates.
+ *  ZC_EVENT_RESULT_CAP overrides (default 3). */
+export function capEventEntries<T>(ranked: T[], limit: number, src: (x: T) => string): T[] {
+  const cap = Math.max(0, parseInt(process.env["ZC_EVENT_RESULT_CAP"] || "3", 10));
+  const out: T[] = [];
+  let ev = 0;
+  for (const r of ranked) {
+    if (out.length >= limit) break;
+    if (src(r).startsWith("event:")) {
+      if (ev >= cap) continue;
+      ev++;
+    }
+    out.push(r);
+  }
+  return out;
 }
 
 function todayUtc(): string {
@@ -698,6 +719,12 @@ export class PostgresStore implements Store {
     // THIS is what makes the backlink boost actually fire in the live PG deployment —
     // PostgresStore.index does not route through indexContent's SQLite trigger.
     this._scheduleBacklinkRebuild(projectPath);
+
+    // Lever-4 (v0.48.0): event-fact extraction for session-tier sources (PG
+    // parity — PostgresStore.index does not route through indexContent).
+    scheduleEventExtraction(safeContent, safeSource, async (evSource, evContent) => {
+      await this.index(projectPath, evContent, evSource, sourceType, retentionTier);
+    });
   }
 
   private async _storeEmbedding(projectHash: string, content: string, source: string): Promise<boolean> {
@@ -1175,7 +1202,11 @@ export class PostgresStore implements Store {
 
         scored.sort((a, b) => b.hybridScore - a.hybridScore);
 
-        results = scored.slice(0, limit).map(r => ({
+        // Lever-4: stale same-subject events collapse to the latest BEFORE the
+        // cap (freed slots refill) — but never on solver sub-searches, which
+        // need every occurrence of a repeated event.
+        const sup = opts._noDecompose ? scored : supersedeEventEntries(scored, (r) => ({ source: r.source, content: r.content }));
+        results = capEventEntries(sup, limit, (r) => r.source).map(r => ({
           source:         r.source,
           content:        r.content,
           snippet:        r.content.slice(0, 200),
@@ -1203,7 +1234,8 @@ export class PostgresStore implements Store {
         return { r, rank, boost };
       });
       fb.sort((a, b) => b.rank - a.rank);
-      results = fb.slice(0, limit).map(({ r, rank, boost }) => ({
+      const fbSup = opts._noDecompose ? fb : supersedeEventEntries(fb, (x) => ({ source: x.r.source, content: x.r.content }));
+      results = capEventEntries(fbSup, limit, (x) => x.r.source).map(({ r, rank, boost }) => ({
         source:         r.source,
         content:        r.content,
         snippet:        r.content.slice(0, 200),

@@ -44,6 +44,7 @@ import { parseTemporalQuery, stripInterrogativeScaffolding, isTemporalQuestion, 
 import { runMigrations } from "./migrations.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
 import { rebuildBacklinksAsync } from "./indexing/backlinks.js";
+import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
 
 export type RetentionTier = "external" | "internal" | "summary";
 
@@ -419,6 +420,13 @@ export function indexContent(
   // Tier-1 A: schedule a debounced backlink-graph rebuild (fire-and-forget). A bulk
   // index triggers exactly ONE rebuild 5s after it settles; never blocks this call.
   rebuildBacklinksAsync(projectPath);
+
+  // Lever-4 (v0.48.0): event-fact extraction for session-tier sources —
+  // serialized background lane; pseudo-entries re-enter through this same
+  // function (eligibleForExtraction excludes "event:" so it can't recurse).
+  scheduleEventExtraction(content, source, async (evSource, evContent) => {
+    indexContent(projectPath, evContent, evSource, sourceType, retentionTier);
+  });
 }
 
 /**
@@ -871,7 +879,23 @@ function _searchDb(
   }
 
   scored.sort((a, b) => b._hybrid - a._hybrid);
-  return scored.slice(0, Config.MAX_RESULTS).map(({ _hybrid: _, ...rest }) => rest);
+  // Lever-4: collapse stale same-subject events to the latest (PG parity).
+  const superseded = supersedeEventEntries(scored, (r) => ({ source: r.source, content: r.content }));
+  // Lever-4 diversity guard (PG parity — see capEventEntries in store-postgres):
+  // one-line event: pseudo-entries win BM25 length normalization and crowd real
+  // content out of top-K. Cap them; freed slots take the next non-event results.
+  const evCap = Math.max(0, parseInt(process.env["ZC_EVENT_RESULT_CAP"] || "3", 10));
+  const capped: typeof scored = [];
+  let evSeen = 0;
+  for (const r of superseded) {
+    if (capped.length >= Config.MAX_RESULTS) break;
+    if (r.source.startsWith("event:")) {
+      if (evSeen >= evCap) continue;
+      evSeen++;
+    }
+    capped.push(r);
+  }
+  return capped.map(({ _hybrid: _, ...rest }) => rest);
 }
 
 /**

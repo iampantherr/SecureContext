@@ -280,6 +280,7 @@ async function runLongMemEval(file, limit) {
 
   // Ingest the union of haystack sessions (deduped by session id).
   const seen = new Set();
+  const sessMap = new Map(); // sid → {date, turns} for the lever-4 extraction backfill
   const ingestFailures = [];
   let ingested = 0;
   for (const q of questions) {
@@ -290,7 +291,13 @@ async function runLongMemEval(file, limit) {
       const sid = ids[i];
       if (seen.has(sid)) continue;
       seen.add(sid);
-      const turns = (sess[i] ?? []).map((t) => `${t.role}: ${t.content}`).join("\n").slice(0, 45_000);
+      const sessIso = dates[i] && Number.isFinite(Date.parse(dates[i])) ? new Date(dates[i]).toISOString().slice(0, 10) : null;
+      // Lever-4: a SESSION_DATE header makes the stored content self-dating —
+      // the server-side extraction lane (and the solver's extractDate) anchor
+      // relative expressions on it instead of "now".
+      let turns = (sess[i] ?? []).map((t) => `${t.role}: ${t.content}`).join("\n").slice(0, 45_000);
+      if (sessIso) turns = `SESSION_DATE: ${sessIso}\n${turns}`;
+      sessMap.set(sid, { date: sessIso, turns });
       if (!turns.trim()) continue;
       // S4 — resilient ingest: one transient 500 must not kill a 2,500-session
       // batch (measured: the first full run died on a single "Internal error").
@@ -329,7 +336,15 @@ async function runLongMemEval(file, limit) {
   // S4 — wait for embeddings to LAND, not a fixed 10s (S1 lesson: scoring a
   // vector-less corpus silently produces garbage). Budget scales with corpus size;
   // the background embed lane drains serially at roughly 3-6 sessions/sec.
-  const lmeHash = psql(`SELECT project_hash FROM knowledge_entries WHERE source LIKE 'session:%' ORDER BY created_at DESC LIMIT 1`);
+  // Derive the hash the same way the store does (sha256(projectPath)[:16]).
+  // The old newest-'session:%'-row guess broke the moment ANOTHER project
+  // indexed a session: source with a newer created_at (bench sessions are
+  // backdated) — measured: it resolved to the TAC E2E project and the embed
+  // wait polled a count of 1/4330 forever.
+  // NOTE: the API normalizes forward slashes to Windows backslashes before
+  // hashing (verified: sha256("C:\\Users\\…\\ZZ_LME")[:16] == the corpus hash).
+  const { createHash: chLme } = await import("node:crypto");
+  const lmeHash = chLme("sha256").update(LME_PROJECT.replaceAll("/", "\\")).digest("hex").slice(0, 16);
   if (/^[0-9a-f]{16}$/.test(lmeHash)) {
     const embCount = () => parseInt(psql(`SELECT COUNT(*) FROM embeddings WHERE project_hash='${lmeHash}' AND source LIKE 'session:%'`), 10);
     const deadline = Date.now() + Math.max(120_000, ingested * 1_500);
@@ -343,6 +358,35 @@ async function runLongMemEval(file, limit) {
     if (embedded < Math.ceil(ingested * 0.95)) {
       console.warn(`⚠ only ${embedded}/${ingested} session embeddings landed — retrieval scores will be DEGRADED (BM25-heavy).`);
     }
+  }
+
+  // ── Lever-4 backfill: synchronous event extraction over the corpus ─────────
+  // The server-side ingest lane is fire-and-forget with a bounded backlog (it
+  // sheds under bulk load by design), so the bench extracts DETERMINISTICALLY
+  // here: host-GPU extraction anchored on each session's real date, pseudo-
+  // entries pushed through the same /api/v1/index path. Idempotent — sessions
+  // whose event:…:0 entry already exists are skipped. BENCH_EXTRACT=0 disables.
+  if (has("--qa") && process.env.BENCH_EXTRACT !== "0" && /^[0-9a-f]{16}$/.test(lmeHash)) {
+    process.env.ZC_EVENT_OLLAMA_URL = process.env.ZC_EVENT_OLLAMA_URL || process.env.BENCH_OLLAMA_URL || "http://localhost:11434";
+    const { extractEvents, eventContent } = await import("../dist/event_extractor.js");
+    const existing = new Set(
+      psql(`SELECT DISTINCT source FROM knowledge_entries WHERE project_hash='${lmeHash}' AND source LIKE 'event:session:%'`)
+        .split("\n").map((s) => s.trim()).filter(Boolean));
+    let done = 0, evTotal = 0, exFail = 0;
+    const t0 = Date.now();
+    for (const [sid, s] of sessMap) {
+      done++;
+      if (existing.has(`event:session:${sid}:0`) || !s.turns.trim()) continue;
+      try {
+        const { events } = await extractEvents(s.turns, s.date ?? new Date().toISOString().slice(0, 10), { timeoutMs: 90_000 });
+        for (let i = 0; i < events.length; i++) {
+          await api("POST", "/api/v1/index", { projectPath: LME_PROJECT, content: eventContent(events[i], `session:${sid}`), source: `event:session:${sid}:${i}`, sourceType: "internal" });
+          evTotal++;
+        }
+      } catch { exFail++; }
+      if (done % 20 === 0) process.stdout.write(`\revent extraction: ${done}/${sessMap.size} sessions · ${evTotal} events · ${exFail} fail · ${Math.round((Date.now() - t0) / 1000)}s   `);
+    }
+    console.log(`\nevent extraction done: ${evTotal} events from ${sessMap.size} sessions (${exFail} extraction failures)`);
   }
 
   // Score retrieval proxy per question type. Per-question resilience: a stalled
@@ -438,13 +482,34 @@ async function runLongMemEval(file, limit) {
         //    recall was higher — so SC context now renders the same way
         //  - deterministic temporal solver statement leads the context
         const K = q.question_type === "multi-session" ? 16 : 10;
-        const r = await api("POST", "/api/v1/search", { projectPath: LME_PROJECT, queries: [q.question], limit: K, question_date: q.question_date });
+        // T5e (preference miss analysis): event entries (cap 3) were consuming
+        // session slots out of K — the preference-stating session lives at the
+        // rank tail and got displaced ("I don't have that information" ×9).
+        // Fetch K + cap so ~K real sessions survive alongside the events.
+        const r = await api("POST", "/api/v1/search", { projectPath: LME_PROJECT, queries: [q.question], limit: K + 3, question_date: q.question_date });
         const dated = (r.results ?? []).map((x) => ({
           date: (x.firstSeenAt ?? x.createdAt ?? "").slice(0, 10) || "undated",
           text: (x.content ?? x.snippet ?? "").slice(0, 4000),
+          isEvent: (x.source ?? "").startsWith("event:"),
         })).sort((a, b) => (a.date < b.date ? -1 : 1));
         const solved = r.temporal?.statement ? `COMPUTED TEMPORAL FACTS (deterministic date math — trust these numbers):\n${r.temporal.statement}\n\n` : "";
-        const scCtx = (solved + dated.map((d) => `SESSION (${d.date}):\n${d.text}`).join("\n\n")).slice(0, 44_000);
+        // Lever-4: event pseudo-entries carry their own resolved dates in-content;
+        // labeling them as a "SESSION (<ingest date>)" block would mislead the
+        // generator. They render AFTER the sessions as a dated timeline with an
+        // explicit deference note — the T5c bench showed the generator treating
+        // an (older) event line as current-state truth over a newer session.
+        // KU miss analysis (T5e): event entries are DERIVED from sessions and
+        // add nothing for non-temporal questions — but a stale event line can
+        // contradict a newer session ("4" vs gold "seven") and event-vs-event
+        // supersession can't help when the update never minted an event. So
+        // the timeline enters generation context ONLY for temporal-shaped
+        // questions; everything else sees sessions only (as T5b did).
+        const wantsEvents = q.question_type === "temporal-reasoning" ||
+          /\b(when|how long|how many (?:days?|weeks?|months?|years?)|ago|what (?:day|date|month|year))\b/i.test(q.question);
+        const evLines = wantsEvents ? dated.filter((d) => d.isEvent).map((d) => `- ${d.text}`).join("\n") : "";
+        const sessBlocks = dated.filter((d) => !d.isEvent).map((d) => `SESSION (${d.date}):\n${d.text}`).join("\n\n");
+        const evBlock = evLines ? `\n\nEVENT TIMELINE (extracted; dates already resolved — use for WHEN/how-long questions; for CURRENT values prefer the most recent session above):\n${evLines}` : "";
+        const scCtx = (solved + sessBlocks + evBlock).slice(0, 44_000);
         const scAns = await genAnswer(scCtx || "(no results)", q.question);
         const scOk = await judgeAnswer(q.question, gold, scAns);
         // Condition B — truncated full-context baseline (most recent last, cap ~48k chars)

@@ -1,0 +1,28 @@
+{
+ "phi4:14b": {
+  "recall": 13,
+  "goldN": 13,
+  "dateOk": 13,
+  "halluc": 3,
+  "extracted": 16,
+  "fail": 0,
+  "msSum": 15420,
+  "n": 10,
+  "unresolved": [
+   "every morning"
+  ]
+ },
+ "gpt-oss:20b": {
+  "recall": 13,
+  "goldN": 13,
+  "dateOk": 13,
+  "halluc": 3,
+  "extracted": 16,
+  "fail": 0,
+  "msSum": 32411,
+  "n": 10,
+  "unresolved": [
+   "every morning"
+  ]
+ }
+}
