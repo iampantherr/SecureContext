@@ -283,7 +283,11 @@ async function runLongMemEval(file, limit) {
   const sessMap = new Map(); // sid → {date, turns} for the lever-4 extraction backfill
   const ingestFailures = [];
   let ingested = 0;
-  for (const q of questions) {
+  // BENCH_SKIP_INGEST=1: the corpus is already ingested + extracted (idempotent
+  // from a prior run) — skip straight to scoring. Saves ~30 min per generator
+  // A/B run; only valid when the SAME --limit/--types corpus was ingested before.
+  const SKIP_INGEST = process.env.BENCH_SKIP_INGEST === "1";
+  for (const q of SKIP_INGEST ? [] : questions) {
     const ids   = q.haystack_session_ids ?? [];
     const dates = q.haystack_dates ?? [];
     const sess  = q.haystack_sessions ?? [];
@@ -446,7 +450,35 @@ async function runLongMemEval(file, limit) {
     const GEN   = val("--qa-gen")   ?? "qwen2.5-coder:32b";
     const JUDGE = val("--qa-judge") ?? "phi4:14b";
     const OLL   = process.env.BENCH_OLLAMA_URL ?? "http://localhost:11434";
+    // One-time apples-to-apples mode: gpt-4o-class models route to the OpenAI
+    // API (Zep's LongMemEval methodology used gpt-4o as generator AND judge).
+    // Key from BENCH_OPENAI_KEY (git-ignored env) — never logged or persisted.
+    const OPENAI_KEY = process.env.BENCH_OPENAI_KEY || (() => {
+      try { return (readFileSync(new URL("../docker/.env", import.meta.url), "utf8").match(/^BENCH_OPENAI_KEY=(.+)$/m) ?? [])[1]?.trim(); } catch { return undefined; }
+    })();
     const chat = async (model, prompt, format, numCtx, numPredict) => {
+      if (/^(gpt-4|gpt-5|o\d)/.test(model)) {
+        if (!OPENAI_KEY) throw new Error("BENCH_OPENAI_KEY not set");
+        // Low-tier accounts have small TPM budgets and our ~12k-token contexts
+        // exhaust them fast — back off and retry on 429 instead of failing the
+        // question (measured: 30/32 questions 429'd without this).
+        for (let attempt = 0; ; attempt++) {
+          const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_KEY}` },
+            body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0,
+              max_tokens: numPredict ?? 1024, ...(format ? { response_format: { type: "json_object" } } : {}) }),
+            signal: AbortSignal.timeout(120_000),
+          });
+          if (resp.status === 429 && attempt < 8) {
+            const wait = Math.min(60_000, 15_000 * (attempt + 1));
+            await new Promise((r) => setTimeout(r, wait));
+            continue;
+          }
+          if (!resp.ok) throw new Error(`openai ${model} http ${resp.status}`);
+          return (((await resp.json()).choices?.[0]?.message?.content) ?? "").trim();
+        }
+      }
       const resp = await fetch(`${OLL}/api/chat`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], stream: false,
@@ -456,11 +488,16 @@ async function runLongMemEval(file, limit) {
         signal: AbortSignal.timeout(300_000),
       });
       if (!resp.ok) throw new Error(`ollama ${model} http ${resp.status}`);
-      return ((await resp.json()).message?.content ?? "").trim();
+      // qwen3-style thinking models emit <think>…</think> before the answer.
+      return ((await resp.json()).message?.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     };
+    // BENCH_NUM_CTX: generator context override. Offloaded big models (70B on
+    // 32GB VRAM) OOM at 16k ctx by ~0.5GiB — 12288 still covers the 44-48k-char
+    // contexts (~11-12k tokens); overflow truncates oldest-first (Ollama).
+    const GEN_CTX = parseInt(process.env.BENCH_NUM_CTX || "16384", 10);
     const genAnswer = (context, question) => chat(GEN,
       `You are answering a question about a user based on their past conversation history.\n\nCONTEXT (excerpts from past sessions):\n${context}\n\nQUESTION: ${question}\n\nAnswer concisely using ONLY the context. If the context does not contain the information, answer exactly: "I don't have that information."`,
-      undefined, 16384);
+      undefined, GEN_CTX);
     const judgeAnswer = async (question, gold, hyp) => {
       const out = await chat(JUDGE,
         `Grade a memory system's answer.\nQUESTION: ${question}\nGOLD ANSWER: ${gold}\nMODEL ANSWER: ${hyp}\n\nThe model answer is CORRECT if it conveys the same essential information as the gold answer (paraphrase ok, extra detail ok). If the gold answer indicates the question is unanswerable/abstention, the model is correct only if it declines or says it doesn't know.\nJSON only: {"correct": true|false}`,
@@ -509,7 +546,29 @@ async function runLongMemEval(file, limit) {
         const evLines = wantsEvents ? dated.filter((d) => d.isEvent).map((d) => `- ${d.text}`).join("\n") : "";
         const sessBlocks = dated.filter((d) => !d.isEvent).map((d) => `SESSION (${d.date}):\n${d.text}`).join("\n\n");
         const evBlock = evLines ? `\n\nEVENT TIMELINE (extracted; dates already resolved — use for WHEN/how-long questions; for CURRENT values prefer the most recent session above):\n${evLines}` : "";
-        const scCtx = (solved + sessBlocks + evBlock).slice(0, 44_000);
+        // GENERATOR-TIER AWARENESS (gpt-4o run finding): solver statements +
+        // event timelines lifted local generators (+13 temporal) but MISLED
+        // gpt-4o (temporal 100% from plain dated sessions vs 73.3 with them).
+        // Frontier generators get plain dated sessions; local ones keep the aids.
+        const isFrontier = /^(gpt-4|gpt-5|o\d)/.test(GEN);
+        // HYBRID CONTEXT (gpt-4o run finding): retrieval top-K lost 4.5 pts to
+        // naive recent-truncation — so blend BOTH: retrieval results first
+        // (preserves the single-session-assistant strength: old facts recency
+        // would discard), then most-recent sessions backfilled to the budget.
+        const core = (isFrontier ? "" : solved) + sessBlocks + (isFrontier ? "" : evBlock);
+        let backfill = "";
+        // Measured HARMFUL with gpt-4o (ssa 80→60: dilution) — opt-in only.
+        if (process.env.BENCH_RECENCY_BACKFILL === "1") {
+          const have = new Set(dated.filter((d) => !d.isEvent).map((d) => d.text.slice(0, 160)));
+          const rs = (q.haystack_sessions ?? []).map((s, i) => ({
+            date: q.haystack_dates?.[i] ?? "", text: (s ?? []).map((t) => `${t.role}: ${t.content}`).join("\n") }));
+          for (let i = rs.length - 1; i >= 0; i--) {
+            if (core.length + backfill.length >= 43_000) break;
+            if (have.has(rs[i].text.slice(0, 160))) continue; // already retrieved
+            backfill += `\n\nSESSION (${rs[i].date}):\n${rs[i].text.slice(0, 4000)}`;
+          }
+        }
+        const scCtx = (core + (backfill ? "\n\n--- ADDITIONAL RECENT SESSIONS ---" + backfill : "")).slice(0, 44_000);
         const scAns = await genAnswer(scCtx || "(no results)", q.question);
         const scOk = await judgeAnswer(q.question, gold, scAns);
         // Condition B — truncated full-context baseline (most recent last, cap ~48k chars)

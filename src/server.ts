@@ -1671,9 +1671,14 @@ async function _handleRemoteTool(
         // TR-2 — timeline block for temporal questions + per-result staleness notes.
         const timeline = _fmtTemporalTimeline((body["queries"] as string[] ?? []).join(" "), results);
         // T5b — deterministic temporal computation (interval/ordering/ago) from
-        // the API's solver: the DATE MATH is precomputed; use it as the answer.
+        // the API's solver: the DATE MATH is precomputed as a cross-check aid.
+        // v0.48.1 — ADVISORY, not commanding. The gpt-4o apples-to-apples bench
+        // showed the old "trust these numbers over mental date math" phrasing
+        // OVER-STEERED capable models (temporal 100%→73% WITH the command, 100%
+        // WITHOUT). Present the computation as a verifiable aid; let the model
+        // reconcile it against the dated sources rather than override its reasoning.
         const tsol = sr["temporal"] as { statement?: string } | undefined;
-        const solved = tsol?.statement ? `## Temporal computation (deterministic — trust these numbers over mental date math)\n${tsol.statement}\n\n` : "";
+        const solved = tsol?.statement ? `## Temporal computation (deterministic date-math aid — cross-check against the dated sources below)\n${tsol.statement}\n\n` : "";
         const lines = results.map((r, i) => `${i + 1}. [${r.source}]${_staleNote(r.createdAt)}\n   ${r.snippet}`);
         return { content: [{ type: "text", text: solved + timeline + lines.join("\n\n") }] };
       }

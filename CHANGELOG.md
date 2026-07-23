@@ -4,6 +4,20 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.48.1] — 2026-07-22 — Temporal block: advisory, not commanding
+
+### zc_search temporal computation is now an advisory aid
+- The `## Temporal computation` block header changed from a command —
+  *"deterministic — trust these numbers over mental date math"* — to an aid:
+  *"deterministic date-math aid — cross-check against the dated sources below"*.
+- **Why (measured):** an apples-to-apples LongMemEval run (frontier generator
+  as both answerer and judge, matching Zep's methodology) showed the commanding
+  phrasing OVER-STEERED capable models — temporal-reasoning scored **100% with
+  the block reframed as advisory vs 73% with the old "trust these numbers"
+  command**. The precomputed date math still renders (it genuinely helps
+  weaker local generators); it just no longer orders the model to override its
+  own reasoning. The solver's statements were already descriptive; only the
+  wrapper framing changed. Verified end-to-end via a fresh MCP render probe.
 ## [0.48.0] — 2026-07-19 — Lever 4: event-fact extraction at ingest
 
 The LongMemEval T5b round showed temporal reasoning was the last flat category
