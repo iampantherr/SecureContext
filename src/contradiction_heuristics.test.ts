@@ -11,10 +11,32 @@ import {
   numbersDiffer,
   isSeriesPair,
   diffNumberIsQuantity,
+  isCheckableClaim,
   NUMERIC_CONFLICT_SIM,
 } from "./contradiction_heuristics.js";
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86400_000).toISOString();
+
+describe("isCheckableClaim — operational markers are not claims (v0.49.0)", () => {
+  it("excludes ownership / checkpoint / session-summary keys", () => {
+    expect(isCheckableClaim({ key: "OWNERSHIP_QA_F3F4_2026-07-23", value: "qa OWNS TASK_F3F4" })).toBe(false);
+    expect(isCheckableClaim({ key: "ckpt_v0480_shipped", value: "v0.48.0 SHIPPED: commit fa2efaa" })).toBe(false);
+    expect(isCheckableClaim({ key: "last_session_summary", value: "..." })).toBe(false);
+    expect(isCheckableClaim({ key: "[SESSION_SUMMARY]abc", value: "..." })).toBe(false);
+  });
+  it("keeps ordinary knowledge claims checkable", () => {
+    expect(isCheckableClaim({ key: "cache_ttl", value: "Cache TTL is 15 minutes" })).toBe(true);
+    expect(isCheckableClaim({ key: "service_name", value: "the service is zeroclaw-orchestrator" })).toBe(true);
+  });
+  it("detectConflict returns null when either side is an operational marker", () => {
+    const own1 = { key: "OWNERSHIP_QA_A_2026-07-23", value: "qa OWNS TASK_A = full browser gate", created_at: daysAgo(1) };
+    const own2 = { key: "OWNERSHIP_QA_B_2026-07-22", value: "qa OWNS TASK_B = P1 IAM final", created_at: daysAgo(2) };
+    expect(detectConflict(own1, own2, 0.95)).toBeNull();
+    const ck1 = { key: "ckpt_v0480_shipped", value: "v0.48.0 SHIPPED: commit fa2efaa, tag v0.48.0", created_at: daysAgo(2) };
+    const ck2 = { key: "ckpt_v0481_shipped", value: "v0.48.1 SHIPPED: commit 4795277, tag v0.48.1", created_at: daysAgo(1) };
+    expect(detectConflict(ck1, ck2, 0.9)).toBeNull();
+  });
+});
 
 describe("hasUpdateMarkers", () => {
   it("detects explicit change announcements", () => {

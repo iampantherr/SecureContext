@@ -25,6 +25,26 @@ export interface FactLite {
 }
 
 /**
+ * v0.49.0 — NON-CHECKABLE operational/coordination markers. These keys hold
+ * transient system STATE, not knowledge CLAIMS, so "contradictions" among them are
+ * meaningless: an agent OWNS two tasks, or two sequential release checkpoints both
+ * shipped — neither is a conflict, but they share a boilerplate template and so
+ * flooded the detector. Measured on a live multi-agent project: 132 of 283 open
+ * contradictions (47%) involved one of these keys — the single largest false-positive
+ * source. Excluded from detection at the source (covers both backends).
+ *   OWNERSHIP_*  — dispatcher ownership markers ("qa OWNS TASK_X")
+ *   ckpt_/CKPT_  — release/commit checkpoints ("v0.48.0 SHIPPED: commit …")
+ *   last_session_summary / [SESSION_SUMMARY]* — narrative session logs
+ * Env-extensible (comma-separated key-prefix regex) without a rebuild.
+ */
+const NON_CHECKABLE_KEY = new RegExp(
+  process.env["ZC_CONTRADICTION_SKIP_KEYS"] ??
+    "^(ownership_|ckpt_|last_session_summary$|\\[session_summary\\])",
+  "i",
+);
+export function isCheckableClaim(f: FactLite): boolean { return !NON_CHECKABLE_KEY.test(f.key); }
+
+/**
  * v0.37.0 — CONSERVATIVE auto-resolution: when a flagged pair has a clear supersession,
  * return the key of the fact to RETIRE (the stale side); return null when ambiguous
  * (→ operator triage, exactly as before). Clear supersession requires ALL of:
@@ -146,6 +166,8 @@ export function preferLatestAdjust<F extends FactLite>(
 /** Returns the conflict signal for a (already-similar) pair, or null if there's no conflict.
  *  `sim` (optional): the pair's cosine similarity — enables the numeric_conflict signal. */
 export function detectConflict(a: FactLite, b: FactLite, sim?: number): { reason: string; detail: string } | null {
+  // v0.49.0 — operational/coordination markers are STATE, not claims: never a conflict.
+  if (!isCheckableClaim(a) || !isCheckableClaim(b)) return null;
   const aFalsified = a.resolution_status === "resolved_incorrect";
   const bFalsified = b.resolution_status === "resolved_incorrect";
   const aLive = !a.resolution_status || a.resolution_status === "open";
