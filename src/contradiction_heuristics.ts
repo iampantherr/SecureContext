@@ -42,7 +42,26 @@ const NON_CHECKABLE_KEY = new RegExp(
     "^(ownership_|ckpt_|last_session_summary$|\\[session_summary\\])",
   "i",
 );
-export function isCheckableClaim(f: FactLite): boolean { return !NON_CHECKABLE_KEY.test(f.key); }
+
+/**
+ * v0.49.1 — STRUCTURAL coordination/progress-marker filter. A prefix denylist can
+ * never keep up with the naming: live multi-agent runs write phase/status records
+ * keyed as ALL-CAPS tokens ending in an ISO date, and the suffix keeps changing —
+ * P1_1_ROUTE_AUTH_COMPLETE_2026-07-23, P2_CLOSED_P3_FEDERATION_KICKOFF_2026-07-24,
+ * REST_EDGES_DONE_2026-07-12, DEV_P1_3_REJECTED_1_..._2026-07-24, GOTCHA_..._2026-07-24.
+ * Every "contradiction" among these observed on the live A2A project (10+ over one
+ * session) was a FALSE POSITIVE — they are timestamped STATE, not knowledge claims.
+ * Match the SHAPE, not the words: a key that is entirely UPPERCASE `_`-joined tokens
+ * ending in `_YYYY-MM-DD`. Case-sensitive on purpose — a lowercase date-keyed fact
+ * (e.g. `meeting_notes_2026-07-24`) may be a real claim, so it stays checkable.
+ * Kill-switch: ZC_CONTRADICTION_SKIP_DATED_MARKERS=0 restores pre-v0.49.1 behaviour.
+ */
+const DATE_STAMPED_CAPS_MARKER = /^[A-Z0-9]+(?:_[A-Z0-9]+)*_\d{4}-\d{2}-\d{2}$/;
+const SKIP_DATED_CAPS_MARKERS = process.env["ZC_CONTRADICTION_SKIP_DATED_MARKERS"] !== "0";
+export function isCoordinationMarker(key: string): boolean {
+  return NON_CHECKABLE_KEY.test(key) || (SKIP_DATED_CAPS_MARKERS && DATE_STAMPED_CAPS_MARKER.test(key));
+}
+export function isCheckableClaim(f: FactLite): boolean { return !isCoordinationMarker(f.key); }
 
 /**
  * v0.37.0 — CONSERVATIVE auto-resolution: when a flagged pair has a clear supersession,

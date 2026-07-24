@@ -4,6 +4,27 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.49.1] — 2026-07-24 — Contradiction detector: structural coordination-marker filter
+
+### Stop flagging progress/status records as contradictions
+- The contradiction detector kept firing on **coordination/progress markers** — the
+  timestamped STATE that multi-agent runs write (`P1_1_ROUTE_AUTH_COMPLETE_2026-07-23`,
+  `P2_CLOSED_P3_FEDERATION_KICKOFF_2026-07-24`, `REST_EDGES_DONE_2026-07-12`, …). These
+  are not knowledge claims, so "contradictions" among them are meaningless. A prefix
+  denylist (`ownership_`/`ckpt_`/session-summary) couldn't keep up because the suffix
+  keeps changing (COMPLETE/CLOSED/KICKOFF/DONE/REJECTED…). Observed live: 10+ fires over
+  one multi-agent session, **zero true positives**.
+- **Fix — match the SHAPE, not the words.** New `isCoordinationMarker(key)` in
+  `contradiction_heuristics.ts` excludes keys that are entirely UPPERCASE `_`-joined
+  tokens ending in an ISO date (`/^[A-Z0-9]+(?:_[A-Z0-9]+)*_\d{4}-\d{2}-\d{2}$/`).
+  Case-sensitive on purpose so a lowercase date-keyed fact (`meeting_notes_2026-07-24`)
+  stays checkable. `isCheckableClaim` delegates to it, covering both the SQLite and PG
+  scans identically. Kill-switch: `ZC_CONTRADICTION_SKIP_DATED_MARKERS=0`.
+- **Verified:** 32/32 heuristics unit tests (added the exact live false-positive keys +
+  a guard that ordinary claims stay checkable); a fresh scan over 240 marker-heavy facts
+  (3 namespaces × 80) flagged **0** where the prior detector produced recurring
+  false positives. Genuine knowledge-claim contradictions still fire.
+
 ## [0.48.1] — 2026-07-22 — Temporal block: advisory, not commanding
 
 ### zc_search temporal computation is now an advisory aid

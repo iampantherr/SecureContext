@@ -12,6 +12,7 @@ import {
   isSeriesPair,
   diffNumberIsQuantity,
   isCheckableClaim,
+  isCoordinationMarker,
   NUMERIC_CONFLICT_SIM,
 } from "./contradiction_heuristics.js";
 
@@ -35,6 +36,34 @@ describe("isCheckableClaim — operational markers are not claims (v0.49.0)", ()
     const ck1 = { key: "ckpt_v0480_shipped", value: "v0.48.0 SHIPPED: commit fa2efaa, tag v0.48.0", created_at: daysAgo(2) };
     const ck2 = { key: "ckpt_v0481_shipped", value: "v0.48.1 SHIPPED: commit 4795277, tag v0.48.1", created_at: daysAgo(1) };
     expect(detectConflict(ck1, ck2, 0.9)).toBeNull();
+  });
+});
+
+describe("isCoordinationMarker — structural dated-caps progress markers (v0.49.1)", () => {
+  it("excludes ALL-CAPS token keys ending in an ISO date (the suffix-agnostic shape)", () => {
+    // Real false-positive keys observed live on the A2A project (each fired numeric/semantic_conflict).
+    for (const key of [
+      "P1_1_ROUTE_AUTH_COMPLETE_2026-07-23",
+      "P2_CLOSED_P3_FEDERATION_KICKOFF_2026-07-24",
+      "REST_EDGES_DONE_2026-07-12",
+      "DEV_P1_3_REJECTED_1_DEV_VS_DOCKER_2026-07-24",
+      "GOTCHA_MERGE_WITHOUT_COMMIT_GATE_TRAP_2026-07-24",
+      "WAVE2_REVIEW_STATE_2026-06-23",
+    ]) {
+      expect(isCoordinationMarker(key)).toBe(true);
+      expect(isCheckableClaim({ key, value: "…phase progress record…" })).toBe(false);
+    }
+  });
+  it("does NOT exclude ordinary knowledge claims, incl. lowercase date-keyed facts", () => {
+    for (const key of ["cache_ttl", "service_name", "decision_auth_flow", "meeting_notes_2026-07-24", "config.retry_limit"]) {
+      expect(isCoordinationMarker(key)).toBe(false);
+      expect(isCheckableClaim({ key, value: "a real claim" })).toBe(true);
+    }
+  });
+  it("detectConflict returns null for two dated-caps progress markers (the live over-fire)", () => {
+    const a = { key: "P1_1_ROUTE_AUTH_COMPLETE_2026-07-23", value: "P1.1 route sender auth COMPLETE, gate 40/40", created_at: daysAgo(2) };
+    const b = { key: "P2_CLOSED_P3_FEDERATION_KICKOFF_2026-07-24", value: "P2 SOC production-real CLOSED, P3 federation kickoff", created_at: daysAgo(1) };
+    expect(detectConflict(a, b, 0.9)).toBeNull();
   });
 });
 
