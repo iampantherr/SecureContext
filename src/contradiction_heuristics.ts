@@ -39,7 +39,7 @@ export interface FactLite {
  */
 const NON_CHECKABLE_KEY = new RegExp(
   process.env["ZC_CONTRADICTION_SKIP_KEYS"] ??
-    "^(ownership_|ckpt_|last_session_summary$|\\[session_summary\\])",
+    "^(ownership_|ckpt_|last_session_summary$|\\[session_summary\\]|reject_task_)",
   "i",
 );
 
@@ -58,10 +58,30 @@ const NON_CHECKABLE_KEY = new RegExp(
  */
 const DATE_STAMPED_CAPS_MARKER = /^[A-Z0-9]+(?:_[A-Z0-9]+)*_\d{4}-\d{2}-\d{2}$/;
 const SKIP_DATED_CAPS_MARKERS = process.env["ZC_CONTRADICTION_SKIP_DATED_MARKERS"] !== "0";
-export function isCoordinationMarker(key: string): boolean {
-  return NON_CHECKABLE_KEY.test(key) || (SKIP_DATED_CAPS_MARKERS && DATE_STAMPED_CAPS_MARKER.test(key));
+
+/**
+ * v0.49.2 — SOURCE-AWARE content signature. A key-shape filter can only catch markers
+ * whose NAME betrays them; but the dispatcher/orchestrator also writes operational
+ * records under free-form keys whose VALUE is a fixed boilerplate template — e.g. a
+ * task-rejection ledger entry: `Last attempt at "TASK_X" was REJECTED by orchestrator.
+ * Reason: …`. Two such records (COSMETIC vs G1_APPROVAL_FLOW) collided as a numeric
+ * conflict (sim 0.80) on the live A2A project even though neither is a knowledge claim —
+ * they are process state. Rather than chase every key spelling, recognise the record by
+ * the SOURCE TEMPLATE that produced it: what it IS, not what it is named. Anchored at
+ * value start so it can't match a real claim that merely mentions a rejection in passing.
+ * Kill-switch: ZC_CONTRADICTION_SKIP_OPERATIONAL_VALUES=0 restores pre-v0.49.2 behaviour.
+ */
+const OPERATIONAL_VALUE_SIGNATURE =
+  /^\s*(last attempt at\b.*\bwas (rejected|abandoned|superseded)\b|task[\w-]*\b.*\b(rejected|reassigned) by\b)/i;
+const SKIP_OPERATIONAL_VALUES = process.env["ZC_CONTRADICTION_SKIP_OPERATIONAL_VALUES"] !== "0";
+
+export function isCoordinationMarker(key: string, value?: string): boolean {
+  if (NON_CHECKABLE_KEY.test(key)) return true;
+  if (SKIP_DATED_CAPS_MARKERS && DATE_STAMPED_CAPS_MARKER.test(key)) return true;
+  if (SKIP_OPERATIONAL_VALUES && value !== undefined && OPERATIONAL_VALUE_SIGNATURE.test(value)) return true;
+  return false;
 }
-export function isCheckableClaim(f: FactLite): boolean { return !isCoordinationMarker(f.key); }
+export function isCheckableClaim(f: FactLite): boolean { return !isCoordinationMarker(f.key, f.value); }
 
 /**
  * v0.37.0 — CONSERVATIVE auto-resolution: when a flagged pair has a clear supersession,

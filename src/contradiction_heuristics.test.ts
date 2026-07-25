@@ -67,6 +67,35 @@ describe("isCoordinationMarker — structural dated-caps progress markers (v0.49
   });
 });
 
+describe("isCoordinationMarker — source-aware operational records (v0.49.2)", () => {
+  it("excludes reject_task_ ledger keys by prefix", () => {
+    // The exact live over-fire: two dispatcher task-rejection records collided (numeric_conflict, sim 0.80).
+    const a = {
+      key: "reject_TASK_DEV_P3_COSMETIC_a1b2c3d4",
+      value: 'Last attempt at "TASK_DEV_P3_COSMETIC" was REJECTED by orchestrator. Reason: gate not re-run.',
+      created_at: daysAgo(1),
+    };
+    const b = {
+      key: "reject_TASK_DEV_P3_G1_APPROVAL_FLOW_e5f6a7b8",
+      value: 'Last attempt at "TASK_DEV_P3_G1_APPROVAL_FLOW" was REJECTED by orchestrator. Reason: missing browser proof.',
+      created_at: daysAgo(1),
+    };
+    expect(isCheckableClaim(a)).toBe(false);
+    expect(isCheckableClaim(b)).toBe(false);
+    expect(detectConflict(a, b, 0.8)).toBeNull();
+  });
+  it("excludes operational records by VALUE template even under a free-form key", () => {
+    // Source-aware: the key name gives nothing away, but the value is the dispatcher's boilerplate.
+    expect(isCoordinationMarker("note_42", 'Last attempt at "TASK_X" was REJECTED by orchestrator. Reason: …')).toBe(true);
+    expect(isCoordinationMarker("q3_status", "TASK_DEV_P4 reassigned by dispatcher after timeout")).toBe(true);
+    expect(isCheckableClaim({ key: "anything", value: "Last attempt at deploy was abandoned by the runner." })).toBe(false);
+  });
+  it("does NOT exclude real claims that merely mention a rejection mid-sentence", () => {
+    expect(isCoordinationMarker("policy", "The auth proxy rejected our token because the clock was skewed")).toBe(false);
+    expect(isCheckableClaim({ key: "finding", value: "Users report the form was rejected when the email had a plus sign" })).toBe(true);
+  });
+});
+
 describe("hasUpdateMarkers", () => {
   it("detects explicit change announcements", () => {
     expect(hasUpdateMarkers("entries now expire after 60 minutes")).toBe(true);

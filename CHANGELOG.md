@@ -4,6 +4,24 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.49.2] — 2026-07-25 — Contradiction detector: source-aware operational-record filter
+
+### Stop flagging dispatcher task-rejection ledger entries as contradictions
+- v0.49.1 caught coordination markers by key **shape** (ALL-CAPS ending in an ISO date),
+  but the dispatcher also writes **task-rejection ledger** records whose key is free-form
+  (`reject_TASK_DEV_P3_COSMETIC_<hash>`) and whose value is a fixed template
+  (`Last attempt at "TASK_X" was REJECTED by orchestrator. Reason: …`). Two such records
+  collided as a `numeric_conflict` (sim 0.80) on the live A2A project — the last residual
+  false positive after v0.49.1, and not a knowledge claim but process state.
+- **Fix — recognise the record by its SOURCE, not just its key.** `isCoordinationMarker`
+  now also (a) skips the `reject_task_` key prefix and (b) takes an optional `value` and
+  skips records whose value matches the operational-record template
+  (`^Last attempt at … was rejected/abandoned/superseded`, `TASK… reassigned by …`),
+  anchored at value start so a real claim that merely mentions a rejection stays checkable.
+  `isCheckableClaim` now passes `f.value` through, so both detector backends benefit.
+- Env kill-switch `ZC_CONTRADICTION_SKIP_OPERATIONAL_VALUES=0` restores prior behaviour;
+  `ZC_CONTRADICTION_SKIP_KEYS` still overrides the key-prefix list. +3 tests (35 total).
+
 ## [0.49.1] — 2026-07-24 — Contradiction detector: structural coordination-marker filter
 
 ### Stop flagging progress/status records as contradictions
