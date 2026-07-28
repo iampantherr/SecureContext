@@ -2,7 +2,7 @@
 
 > **SecureContext is the persistent memory, delivery, and security layer for Claude Code.** It gives coding agents project memory that survives every restart, a program/phase layer for delivering long-running projects with orchestrator handoff, a cryptographic audit trail for every tool call, and an HMAC-verified admission gate for Anthropic-style filesystem skills. Runs 100% locally on PostgreSQL + Ollama — no cloud sync, no subscription, MIT-licensed.
 
-[![Version](https://img.shields.io/badge/version-0.50.0-blue)](package.json)
+[![Version](https://img.shields.io/badge/version-0.50.1-blue)](package.json)
 [![Tests](https://img.shields.io/badge/tests-959%20passed-brightgreen)](src)
 [![Security Tests](https://img.shields.io/badge/security%20red%20team-60%2B%20RT%20IDs-brightgreen)](security-tests)
 [![CI](https://github.com/iampantherr/SecureContext/actions/workflows/ci.yml/badge.svg)](https://github.com/iampantherr/SecureContext/actions)

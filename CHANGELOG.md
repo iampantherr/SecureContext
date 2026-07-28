@@ -4,6 +4,28 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.50.1] — 2026-07-28 — Security: PowerShell HMAC-verify bypass closed · LICENSE added
+
+### TODO_v0.28.1 bypass 2 — closed after ~22 versions open
+- The verify-before-execute hook (skill-script HMAC check) was registered under
+  PreToolUse matcher `"Bash"` only, so `PowerShell python <skill>/scripts/x.py`
+  executed tampered scripts without the check ever firing — a documented hole in
+  the flagship security control since v0.28.0.
+- The hook now lives IN THE REPO (`hooks/skill-script-hmac-verify.mjs` — it
+  previously existed only as an installed artifact), gates on a shell-tool set
+  (Bash + PowerShell) instead of a single tool name, and `init.mjs` registers it
+  under both matchers. Installer dedup is now per-(matcher, script), so a second
+  matcher registration is no longer skipped as "already registered".
+- Verified: PowerShell invocation of an unadmitted/tampered skill script →
+  blocked (exit 2, same fail-closed contract); Bash regression → still blocked;
+  benign PowerShell commands → unaffected. The `zc_execute` sandbox path remains
+  tracked in TODO_v0.28.1 (credential-isolated; lower risk class).
+
+### LICENSE
+- Added the MIT `LICENSE` file the README has claimed (and linked) since v0.1 —
+  the badge pointed at a file that did not exist, which reads as
+  "all rights reserved" to any legal review.
+
 ## [0.50.0] — 2026-07-28 — Operator inbox: orchestrator questions the operator can answer from the dashboard
 
 ### The human-in-the-loop channel, both directions

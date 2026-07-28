@@ -1,5 +1,17 @@
 # TODO — v0.28.1 hook-bypass closure
 
+> **STATUS UPDATE (2026-07-28, v0.50.1):**
+> **Bypass 2 (HMAC verify-before-execute) is CLOSED.** The hook now lives in
+> the repo (`hooks/skill-script-hmac-verify.mjs`), gates on a shell-tool SET
+> (Bash + PowerShell) instead of Bash alone, and `init.mjs` registers it under
+> BOTH PreToolUse matchers (with per-(matcher, script) dedup so a second
+> matcher registration isn't skipped). Verified: PowerShell invocation of an
+> unadmitted skill script → blocked exit 2; Bash regression → blocked exit 2;
+> benign PowerShell commands → pass exit 0. The `zc_execute`/`zc_execute_file`
+> path noted below remains open (sandboxed, credential-isolated — lower risk).
+> **Bypass 1 (PreRead block) remains OPEN** — it is token-discipline, not
+> security, and is tracked separately.
+
 Two real bypass paths discovered during v0.28.0 multi-agent E2E. Both
 let an agent route around an existing security/discipline hook by
 invoking a different tool than the hook intercepts.

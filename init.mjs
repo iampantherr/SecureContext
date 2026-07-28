@@ -191,11 +191,20 @@ if (!NO_HOOKS) {
     { event: "PreToolUse",  matcher: "Read",                  script: "preread-dedup.mjs" },
     { event: "PostToolUse", matcher: "Edit|Write|MultiEdit",  script: "postedit-reindex.mjs" },
     { event: "PostToolUse", matcher: "Bash",                  script: "postbash-capture.mjs" },
+    // v0.50.1 — HMAC verify-before-execute for skill scripts, registered on
+    // EVERY shell-capable tool. TODO_v0.28.1 bypass 2: with a Bash-only
+    // matcher, `PowerShell python <skill>/scripts/x.py` executed tampered
+    // scripts without the check ever firing.
+    { event: "PreToolUse",  matcher: "Bash",                  script: "skill-script-hmac-verify.mjs" },
+    { event: "PreToolUse",  matcher: "PowerShell",            script: "skill-script-hmac-verify.mjs" },
   ];
   for (const w of wanted) {
     settings.hooks[w.event] = settings.hooks[w.event] ?? [];
-    const already = JSON.stringify(settings.hooks[w.event]).includes(w.script);
-    if (already) { info(`${w.script} already registered — skipped`); continue; }
+    // Dedup per (matcher, script) pair — not per script alone, or the same
+    // hook could never be registered under a second matcher.
+    const already = settings.hooks[w.event].some(
+      (e) => e?.matcher === w.matcher && JSON.stringify(e).includes(w.script));
+    if (already) { info(`${w.script} (${w.matcher}) already registered — skipped`); continue; }
     settings.hooks[w.event].push({ matcher: w.matcher, hooks: [{ type: "command", command: hookCmd(w.script) }] });
     ok(`Registered ${w.script} (${w.event} → ${w.matcher})`);
   }
