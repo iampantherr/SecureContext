@@ -4,6 +4,33 @@ All notable changes to SecureContext. The format is based on [Keep a Changelog](
 
 For full release notes including the v0.2.0–v0.8.0 history, see the **[Changelog section in README.md](README.md#changelog)**.
 
+## [0.50.0] — 2026-07-28 — Operator inbox: orchestrator questions the operator can answer from the dashboard
+
+### The human-in-the-loop channel, both directions
+- **Problem (live incident, 2026-07-27):** an orchestrator asked the human operator a
+  blocking question over the broadcast channel; the dispatcher's worker-targeted routing
+  matched no worker and silently dropped it. Only the operator happening to tail the
+  dispatcher log prevented an indefinite block. Questions to the HUMAN had no home.
+- **New `operator_inbox_pg`** (migration 43): durable questions addressed to the operator,
+  with a SQL-enforced state machine `pending → answered → delivered` (each transition moves
+  only from its exact predecessor and reports whether a row moved, so callers surface 409s
+  instead of double-applying). PG-only, same documented class as the task queue and
+  `zc_program`.
+- **API** — `POST /api/v1/operator-inbox` (dispatchers file questions), `GET ?status=`,
+  `POST /:id/answer`, `POST /:id/delivered`. Delivery is at-least-once by design: the
+  dispatcher marks `delivered` only after the terminal send succeeds, so a crash between
+  send and mark re-delivers rather than losing the answer.
+- **Dashboard** — new "Operator inbox" panel on the Overview tab: pending questions across
+  ALL projects this instance coordinates (one place to answer, however many fleets run),
+  inline answer form, recent-answers feed. The refresh poll pauses while an answer field
+  has focus OR text — focus alone leaves a wipe window between typing and clicking Send
+  (the same failure class the mutations panel fixed in v0.20.1, caught again live here).
+- **Verified end-to-end against a live fleet** before ship: orchestrator question →
+  inbox → dashboard answer → dispatcher delivery into the orchestrator's terminal →
+  orchestrator quoted the answer back and started the phase the operator chose.
+  +8 unit tests on the state machine (answer-once, deliver-only-after-answer,
+  oldest-first ordering, unknown-id no-ops).
+
 ## [0.49.2] — 2026-07-25 — Contradiction detector: source-aware operational-record filter
 
 ### Stop flagging dispatcher task-rejection ledger entries as contradictions

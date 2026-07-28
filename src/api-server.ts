@@ -484,6 +484,64 @@ export async function createApiServer(storeOverride?: Store) {
 
   // v0.46.2 — favicon: exempt from auth, serve an inline SVG. Previously every
   // browser tab load logged a 401 for /favicon.ico (cosmetic but noisy).
+  // ─── Operator inbox dashboard fragments (v0.50.0) ──────────────────────────
+  // Pending questions with an inline answer form; answers flow: dashboard →
+  // operator_inbox_pg (status=answered) → dispatcher poll → orchestrator
+  // terminal (status=delivered). Multi-project by design: one inbox panel
+  // covers every project this SC instance coordinates.
+  app.get("/dashboard/operator-inbox", async (_request, reply) => {
+    try {
+      const { listInbox } = await import("./operator_inbox.js");
+      const pending = await listInbox("pending", 50);
+      const [answered, delivered] = [await listInbox("answered", 5), await listInbox("delivered", 5)];
+      const recent = [...answered, ...delivered]
+        .sort((a, b) => String(b.answered_at ?? "").localeCompare(String(a.answered_at ?? ""))).slice(0, 5);
+      const projName = (p: string) => escapeHtml(String(p ?? "").split(/[\\/]/).filter(Boolean).pop() ?? p);
+      let html = "";
+      if (pending.length === 0) {
+        html += `<p class="empty">No questions waiting. Orchestrator questions that match no worker land here.</p>`;
+      }
+      for (const q of pending) {
+        html += `<details open class="inbox-q" style="margin-bottom:10px;border:1px solid var(--border,#333);border-radius:6px;padding:8px">
+  <summary><strong>#${Number(q.id)}</strong> · ${projName(String(q.project_path))} · from <code>${escapeHtml(String(q.from_agent))}</code> · ${escapeHtml(new Date(String(q.created_at)).toLocaleString())}</summary>
+  <p style="white-space:pre-wrap;margin:8px 0">${escapeHtml(String(q.question))}</p>
+  <form hx-post="/dashboard/operator-inbox/answer" hx-target="find .inbox-result" hx-swap="innerHTML">
+    <input type="hidden" name="id" value="${Number(q.id)}">
+    <textarea name="answer" rows="3" style="width:100%" placeholder="Type your answer — it will be delivered into the orchestrator's terminal by the dispatcher" required></textarea>
+    <button type="submit" style="margin-top:6px">Send answer to orchestrator</button>
+    <span class="inbox-result"></span>
+  </form>
+</details>`;
+      }
+      if (recent.length > 0) {
+        html += `<p class="sub" style="margin-top:8px">Recent answers:</p><ul style="margin:4px 0">`;
+        for (const r of recent) {
+          html += `<li>#${Number(r.id)} · ${projName(String(r.project_path))} · <strong>${escapeHtml(String(r.status))}</strong>${r.status === "answered" ? " (awaiting dispatcher delivery)" : ""} · ${escapeHtml(String(r.answer ?? "")).slice(0, 120)}</li>`;
+        }
+        html += `</ul>`;
+      }
+      reply.type("text/html").send(html);
+    } catch (e) {
+      reply.type("text/html").send(`<p class="empty">Operator inbox unavailable: ${escapeHtml((e as Error).message)} (PG-only feature — requires the Postgres stack)</p>`);
+    }
+  });
+
+  app.post("/dashboard/operator-inbox/answer", async (request, reply) => {
+    try {
+      const body = request.body as Record<string, unknown>;
+      const id = Number(body.id);
+      const answer = String(body.answer ?? "").trim();
+      if (!Number.isFinite(id) || id <= 0) { reply.type("text/html").send(`<span class="error">❌ bad id</span>`); return; }
+      if (!answer) { reply.type("text/html").send(`<span class="error">❌ answer required</span>`); return; }
+      const { answerInboxEntry } = await import("./operator_inbox.js");
+      const moved = await answerInboxEntry(id, answer, "dashboard-operator");
+      if (!moved) { reply.type("text/html").send(`<span class="error">❌ not found or already answered</span>`); return; }
+      reply.type("text/html").send(`<span class="ok">✓ answered — the dispatcher will deliver it to the orchestrator terminal within ~10s</span>`);
+    } catch (e) {
+      reply.type("text/html").send(`<span class="error">❌ ${escapeHtml((e as Error).message)}</span>`);
+    }
+  });
+
   app.get("/favicon.ico", async (_request, reply) => {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0b0f14"/><path d="M16 4l9 4v7c0 6-3.8 10.4-9 13-5.2-2.6-9-7-9-13V8z" fill="none" stroke="#34d399" stroke-width="2.2"/><circle cx="16" cy="15" r="3.2" fill="#34d399"/></svg>`;
     reply.type("image/svg+xml").header("Cache-Control", "public, max-age=86400").send(svg);
@@ -3914,6 +3972,76 @@ export async function createApiServer(storeOverride?: Store) {
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  // ─── Operator inbox (v0.50.0) ───────────────────────────────────────────────
+  // Durable questions from orchestrators to the HUMAN operator. The dispatcher
+  // POSTs questions it cannot route to any worker; the operator answers from the
+  // dashboard (/dashboard/operator-inbox); the dispatcher polls for answered
+  // entries and delivers them into the orchestrator's terminal, then marks them
+  // delivered. PG-only (same documented class as task queue / zc_program).
+  app.post("/api/v1/operator-inbox", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(b.projectPath);
+      const { createInboxEntry } = await import("./operator_inbox.js");
+      const id = await createInboxEntry({
+        projectPath: pp,
+        question:    String(b.question ?? ""),
+        projectHash: String(b.projectHash ?? ""),
+        broadcastId: b.broadcastId !== undefined && b.broadcastId !== null ? Number(b.broadcastId) : null,
+        fromAgent:   String(b.fromAgent ?? "orchestrator"),
+      });
+      return { ok: true, id };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      if ((e as Error).message === "question required") return reply.status(400).send({ error: (e as Error).message });
+      return reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
+  app.get("/api/v1/operator-inbox", async (request, reply) => {
+    try {
+      const { status, limit } = request.query as Record<string, unknown>;
+      const st = String(status ?? "pending");
+      if (!["pending", "answered", "delivered", "dismissed", "all"].includes(st)) throw new ApiError(400, "bad status filter");
+      const { listInbox } = await import("./operator_inbox.js");
+      const entries = await listInbox(st as import("./operator_inbox.js").InboxStatusFilter, Number(limit ?? 100) || 100);
+      return { ok: true, entries };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
+  app.post("/api/v1/operator-inbox/:id/answer", async (request, reply) => {
+    try {
+      const id = Number((request.params as Record<string, unknown>).id);
+      const b = request.body as Record<string, unknown>;
+      if (!Number.isFinite(id) || id <= 0) throw new ApiError(400, "bad id");
+      const { answerInboxEntry } = await import("./operator_inbox.js");
+      const moved = await answerInboxEntry(id, String(b.answer ?? ""), String(b.answeredBy ?? "operator"));
+      if (!moved) throw new ApiError(409, "entry not found or not pending");
+      return { ok: true, id };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      if ((e as Error).message === "answer required") return reply.status(400).send({ error: (e as Error).message });
+      return reply.status(500).send({ error: (e as Error).message });
+    }
+  });
+
+  app.post("/api/v1/operator-inbox/:id/delivered", async (request, reply) => {
+    try {
+      const id = Number((request.params as Record<string, unknown>).id);
+      if (!Number.isFinite(id) || id <= 0) throw new ApiError(400, "bad id");
+      const { markInboxDelivered } = await import("./operator_inbox.js");
+      const moved = await markInboxDelivered(id);
+      if (!moved) throw new ApiError(409, "entry not found or not answered");
+      return { ok: true, id };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: (e as Error).message });
     }
   });
 

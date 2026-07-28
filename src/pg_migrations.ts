@@ -1116,6 +1116,30 @@ export const PG_MIGRATIONS: PgMigration[] = [
       await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS invalid_from TIMESTAMPTZ`);
     },
   },
+  {
+    id: 43,
+    description: "Operator inbox (v0.50.0): durable questions from orchestrators to the HUMAN operator, answered from the dashboard and delivered back to the agent terminal by the dispatcher. Born from a live incident (2026-07-27 #2840): an orchestrator's question to the operator was silently dropped by the dispatcher's worker-targeted routing, and only log-tailing prevented an indefinite block. PG-only, like the task queue and zc_program (documented enterprise-feature class).",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS operator_inbox_pg (
+          id           BIGSERIAL PRIMARY KEY,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+          project_path TEXT NOT NULL,
+          project_hash TEXT NOT NULL DEFAULT '',
+          broadcast_id BIGINT,
+          from_agent   TEXT NOT NULL DEFAULT 'orchestrator',
+          question     TEXT NOT NULL,
+          status       TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending','answered','delivered','dismissed')),
+          answer       TEXT,
+          answered_at  TIMESTAMPTZ,
+          answered_by  TEXT,
+          delivered_at TIMESTAMPTZ
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS operator_inbox_status_idx ON operator_inbox_pg (status, created_at DESC)`);
+    },
+  },
 
 ];
 

@@ -767,6 +767,31 @@ export function renderDashboardHtml(): string {
 </div>
 </section>
 
+<section class="tab-content" data-tab="overview">
+<!-- v0.50.0 — Operator inbox: questions from orchestrators that matched no
+     worker land HERE instead of being dropped (live incident 2026-07-27
+     #2840). The operator answers from this panel; the dispatcher delivers the
+     answer into the orchestrator's terminal. Multi-project: one inbox for
+     every project this instance coordinates. Poll pauses while the operator
+     is typing an answer (focus guard — same pattern as the mutations panel). -->
+<div class="panel">
+  <h2>Operator inbox <span class="sub">orchestrator questions awaiting YOUR answer — delivered back to the agent terminal</span></h2>
+  <!-- Poll guard (v0.50.0, hardened after a live wipe): pause the refresh not
+       only while an inbox field has FOCUS but also while ANY answer textarea
+       has TEXT — focus alone leaves a wipe window between typing and clicking
+       Send (the innerHTML swap resets the form and the re-rendered button
+       shifts position under the click). Same failure class the mutations
+       panel fixed in v0.20.1; value-guard instead of details[open] because
+       inbox entries render expanded by default. -->
+  <div id="operator-inbox"
+       hx-get="/dashboard/operator-inbox"
+       hx-trigger="load, every 10s[!document.querySelector('#operator-inbox textarea:focus, #operator-inbox input:focus, #operator-inbox button:focus') && ![...document.querySelectorAll('#operator-inbox textarea')].some(t => t.value.trim())]"
+       hx-target="this" hx-swap="innerHTML">
+    Loading operator inbox…
+  </div>
+</div>
+</section>
+
 <section class="tab-content" data-tab="skills">
 <!-- v0.22.6 — Skill-activity health banner. First panel so operators see
      immediately when the closed-loop self-improvement system has gone dark

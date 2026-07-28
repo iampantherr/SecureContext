@@ -25,3 +25,6 @@ bench/data/
 # LongMemEval end-to-end QA results stay local (operator decision)
 bench/results/longmemeval_qa*.json
 bench/results/longmemeval_detail.json
+
+# Session/state databases must never be committed (a mangled-path artifact once was)
+*.db
