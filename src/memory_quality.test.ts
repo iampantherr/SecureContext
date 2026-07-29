@@ -240,3 +240,44 @@ describe("pinned overflow is announced, never silent", () => {
     expect(r.tailNotice).not.toContain("ZC_PINNED_MAX_FACTS");
   });
 });
+
+describe("a pinned kind cannot be retired automatically", () => {
+  // The live failure: four operator constraints on the A2A project were retired
+  // with reason 'superseded' — two of them lost to `last_session_summary`, and
+  // one rule was killed by a different rule — because the contradiction
+  // adjudicator picks a survivor by recency. Retirement leaves the fact findable
+  // by zc_search while removing it from every recall, so it looked present.
+  const AUTOMATIC = ["superseded", "consolidated", "expired"];
+  const EXPLICIT  = ["operator", "forget", "manual"];
+
+  it("classifies the automatic reasons as pinned-protected", async () => {
+    const { isPinnedKind } = await import("./memory_quality.js");
+    for (const kind of ["constraint", "antipattern"]) {
+      expect(isPinnedKind({ key: "k", importance: 3, kind })).toBe(true);
+    }
+    for (const kind of ["fact", "decision", "hypothesis", "prediction"]) {
+      expect(isPinnedKind({ key: "k", importance: 5, kind })).toBe(false);
+    }
+  });
+
+  it("both store implementations guard the same reason set", async () => {
+    const fs = await import("node:fs");
+    const flat = (f: string) =>
+      fs.readFileSync(new URL(f, import.meta.url), "utf8").replace(/\s+/g, " ");
+    for (const file of ["./store-postgres.ts", "./memory.ts"]) {
+      const src = flat(file);
+      expect(src, `${file} must refuse automatic retirement of pinned kinds`)
+        .toContain("AUTOMATIC_REASONS");
+      for (const r of AUTOMATIC) expect(src).toContain(`"${r}"`);
+      // The guard must be conditional on the reason, not blanket — explicit
+      // operator retirement (zc_forget, dashboard) has to keep working.
+      expect(src).toContain("AUTOMATIC_REASONS.has(reason)");
+    }
+    expect(EXPLICIT.every((r) => !AUTOMATIC.includes(r))).toBe(true);
+  });
+
+  it("pinned kinds get a longer value budget than plain facts", async () => {
+    const { Config } = await import("./config.js");
+    expect(Config.PINNED_VALUE_MAX).toBeGreaterThan(500);
+  });
+});

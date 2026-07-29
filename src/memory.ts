@@ -37,6 +37,7 @@ import { createHash, createHmac, scryptSync, randomBytes, timingSafeEqual } from
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Config } from "./config.js";
+import { isPinnedKind } from "./memory_quality.js";
 import { runMigrations } from "./migrations.js";
 import { indexContent } from "./knowledge.js";
 import {
@@ -762,9 +763,19 @@ export function retireFact(
   ensureAgentIdColumn(db);
   ensureEpistemologyColumns(db);
   const row = db.prepare(
-    "SELECT value FROM working_memory WHERE key = ? AND agent_id = ? AND valid_to IS NULL"
-  ).get(safeKey, safeAgent) as { value: string } | undefined;
+    "SELECT value, kind FROM working_memory WHERE key = ? AND agent_id = ? AND valid_to IS NULL"
+  ).get(safeKey, safeAgent) as { value: string; kind: string | null } | undefined;
   if (!row) { db.close(); return false; }
+
+  // v0.51.2 — automatic retirement can never remove a pinned kind. Mirrors the PG
+  // guard in store-postgres.ts; see that comment for the live incident (four
+  // operator constraints auto-retired as 'superseded', two of them losing to
+  // `last_session_summary`, because the adjudicator picks survivors by recency).
+  const AUTOMATIC_REASONS = new Set(["superseded", "consolidated", "expired"]);
+  if (AUTOMATIC_REASONS.has(reason) && isPinnedKind({ key: safeKey, importance: 0, kind: row.kind })) {
+    db.close();
+    return false;
+  }
   db.prepare(
     "UPDATE working_memory SET valid_to = ?, superseded_by = ?, retired_reason = ? WHERE key = ? AND agent_id = ?"
   ).run(new Date().toISOString(), supersededBy ? sanitize(supersededBy, 100) : null, sanitize(reason, 100), safeKey, safeAgent);

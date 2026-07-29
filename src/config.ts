@@ -176,6 +176,9 @@ export const Config = {
   // standing rules and known traps can never be truncated away. 0 disables.
   PIN_CONSTRAINTS:        (env["ZC_PIN_CONSTRAINTS"] ?? "1") !== "0",
   PINNED_MAX_FACTS:       parseInt(env["ZC_PINNED_MAX_FACTS"] ?? "12", 10),
+  // v0.51.2 — pinned kinds may store a longer value than the flat 500-char clamp.
+  // A constraint cut mid-clause loses exactly the part that says what to do.
+  PINNED_VALUE_MAX:       parseInt(env["ZC_PINNED_VALUE_MAX"] ?? "1200", 10),
 
   // ── S1 (v0.44.0) — temporal fact supersession (Zep/Graphiti parity) ───────
   // Measured failure (bench KU): when a fact is updated under a new key and the

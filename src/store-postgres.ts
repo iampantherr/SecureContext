@@ -37,6 +37,7 @@ import { computeRowHash } from "./chain.js";
 import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
 import { classifyFactKind, MEMORY_KINDS, type EpistemicOpts } from "./memory.js";
+import { isPinnedKind } from "./memory_quality.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance } from "./recall_budget.js";
 import { extractCoReferences, extractCoReferencesAsync, classifyRelation, graphMaxNodes } from "./indexing/community.js";
@@ -203,7 +204,7 @@ export class PostgresStore implements Store {
   async remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi: EpistemicOpts = {}): Promise<void> {
     const projectHash = ph(projectPath);
     const safeKey    = sanitize(key,     100);
-    const safeValue  = sanitize(value,   500);
+    const clamped500 = sanitize(value,   500);
     const safeImp    = Math.max(1, Math.min(5, Math.round(importance)));
     const safeAgent  = sanitize(agentId,  64);
     const now        = new Date().toISOString();
@@ -211,7 +212,17 @@ export class PostgresStore implements Store {
     // v0.31.0 epistemology — explicit kind wins, else auto-classify (parity with rememberFact).
     const KINDS: readonly string[] = MEMORY_KINDS;   // single source of truth — see memory.ts
     const RES   = ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"];
-    const safeKind = epi.kind && KINDS.includes(epi.kind) ? epi.kind : classifyFactKind(safeValue);
+    const safeKind = epi.kind && KINDS.includes(epi.kind) ? epi.kind : classifyFactKind(clamped500);
+
+    // v0.51.2 — pinned kinds get a longer value budget than the flat 500 chars.
+    // Reported by an agent reading its own recall: every pinned rule was cut
+    // mid-word at exactly the actionable clause ("HOW TO A…", "assigns QA the
+    // lit…"). A constraint truncated before it says what to DO is decoration.
+    // Non-pinned facts keep the 500-char clamp byte-for-byte, and the kind is
+    // still classified from the 500-char text so classification is unchanged.
+    const safeValue = isPinnedKind({ key: safeKey, importance: safeImp, kind: safeKind })
+      ? sanitize(value, Math.max(500, Config.PINNED_VALUE_MAX))
+      : clamped500;
     const safeConf = (typeof epi.confidence === "number" && isFinite(epi.confidence)) ? Math.max(0, Math.min(1, epi.confidence)) : null;
     const safeRes  = epi.resolution && RES.includes(epi.resolution) ? epi.resolution : null;
     const resolvedAt = (safeRes && safeRes !== "open") ? now : null;
@@ -317,10 +328,36 @@ export class PostgresStore implements Store {
   private async _retireFactByHash(projectHash: string, key: string, agentId: string, supersededBy: string | null, reason: string): Promise<boolean> {
     const safeKey   = sanitize(key,     100);
     const safeAgent = sanitize(agentId,  64);
-    const row = (await this.pool.query<{ value: string }>(
-      "SELECT value FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3 AND valid_to IS NULL",
+    const row = (await this.pool.query<{ value: string; kind: string | null }>(
+      "SELECT value, kind FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3 AND valid_to IS NULL",
       [projectHash, safeKey, safeAgent])).rows[0];
     if (!row) return false;
+
+    // v0.51.2 — AUTOMATIC retirement can never remove a pinned kind.
+    //
+    // Caught by dogfooding on the live A2A project: four standing operator rules
+    // typed as 'constraint' were auto-retired with reason 'superseded'. Two of
+    // them lost to `last_session_summary`, and one rule was killed by a DIFFERENT
+    // rule. The contradiction adjudicator picks the survivor by recency, so a June
+    // constraint always loses to a July note that merely embeds near it.
+    //
+    // That is the same incident this feature exists to prevent, arriving through
+    // another door: the pinned tier stops the BUDGET from hiding a constraint, but
+    // supersession deleted it from recall outright — and silently, since retirement
+    // leaves the fact findable by zc_search, so it looks present while being absent
+    // from every recall. An operator rule may only be retired by an operator.
+    //
+    // Explicit retirement (zc_forget, operator dashboard) passes its own reason and
+    // is unaffected. ZC_PIN_CONSTRAINTS=0 restores the previous behaviour.
+    const AUTOMATIC_REASONS = new Set(["superseded", "consolidated", "expired"]);
+    if (AUTOMATIC_REASONS.has(reason) && isPinnedKind({ key: safeKey, importance: 0, kind: row.kind })) {
+      const { logger } = await import("./logger.js");
+      logger.info("memory", "pinned_retire_refused", {
+        project_hash: projectHash, agent_id: safeAgent, key: safeKey,
+        kind: row.kind, reason, superseded_by: supersededBy,
+      });
+      return false;
+    }
     await this.pool.query(
       "UPDATE working_memory SET valid_to = NOW(), superseded_by = $4, retired_reason = $5 WHERE project_hash = $1 AND key = $2 AND agent_id = $3",
       [projectHash, safeKey, safeAgent, supersededBy ? sanitize(supersededBy, 100) : null, sanitize(reason, 100)]);
