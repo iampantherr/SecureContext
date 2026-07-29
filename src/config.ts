@@ -194,7 +194,14 @@ export const Config = {
   // RECALL_MAX_CHARS, so standing rules never crowd out working context.
   // Measured trigger: 12 pins reached 83% of a 16,000-char budget on a live
   // project. 0 disables pinning's separate budget (pins fall back to sharing).
-  PINNED_MAX_CHARS:       parseInt(env["ZC_PINNED_MAX_CHARS"] ?? "9000", 10),
+  // Must accommodate the COUNT bound, or the two limits fight each other and the
+  // char limit silently becomes the real one. 9000 was picked arbitrarily and was
+  // immediately too small: a deliberately curated 12-pin set measured 13,220
+  // chars, so 3 standing rules went unpinned the moment the split shipped —
+  // the same "a constraint that can be hidden is not a constraint" failure this
+  // feature exists to prevent, arriving through the budget instead of
+  // supersession. Sized so PINNED_MAX_FACTS pins of typical length all fit.
+  PINNED_MAX_CHARS:       parseInt(env["ZC_PINNED_MAX_CHARS"] ?? "15000", 10),
 
   // ── S1 (v0.44.0) — temporal fact supersession (Zep/Graphiti parity) ───────
   // Measured failure (bench KU): when a fact is updated under a new key and the
