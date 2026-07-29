@@ -36,7 +36,7 @@ import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
 import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
-import { classifyFactKind, MEMORY_KINDS, type EpistemicOpts } from "./memory.js";
+import { classifyFactKind, clampBroadcastSummary, MEMORY_KINDS, type EpistemicOpts } from "./memory.js";
 import { isPinnedKind } from "./memory_quality.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance } from "./recall_budget.js";
@@ -2183,7 +2183,7 @@ export class PostgresStore implements Store {
 
     const safeAgent   = sanitize(agentId, 64);
     const safeTask    = sanitize(opts.task    ?? "", 500);
-    const safeSummary = sanitize(opts.summary ?? "", 1000);
+    const safeSummary = clampBroadcastSummary(sanitize(opts.summary ?? "", Config.BROADCAST_SUMMARY_MAX * 2));
     const safeState   = sanitize(opts.state   ?? "", 200);
     const safeReason  = sanitize(opts.reason  ?? "", 500);
     const safeImp     = Math.max(1, Math.min(5, Math.round(opts.importance ?? 3)));

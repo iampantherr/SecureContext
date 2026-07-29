@@ -349,3 +349,36 @@ describe("pinned facts do not consume the working-context budget", () => {
     expect(r.tailNotice).toContain("ZC_PINNED_MAX_CHARS");
   });
 });
+
+describe("broadcast truncation is never silent", () => {
+  // Live failure: an ASSIGN carrying acceptance criteria was clamped to 1000
+  // chars with no marker and arrived cut at "...so this is". The worker lost the
+  // acceptance criteria, the scope, and the RED-gate requirement, and caught it
+  // only because the cut happened to land mid-word.
+  it("passes short summaries through byte-identical", async () => {
+    const { clampBroadcastSummary } = await import("./memory.js");
+    const s = "MERGE: two files committed at abc1234.";
+    expect(clampBroadcastSummary(s)).toBe(s);
+  });
+
+  it("marks the cut and says how much is missing", async () => {
+    const { clampBroadcastSummary } = await import("./memory.js");
+    const long = "x".repeat(9000);
+    const out = clampBroadcastSummary(long, 1000);
+    expect(out.length).toBeLessThanOrEqual(1000);
+    expect(out).toContain("TRUNCATED");
+    expect(out).toMatch(/\d+ more chars/);
+    expect(out).toContain("ask the sender");
+  });
+
+  it("both store paths route through the marker helper", async () => {
+    const fs = await import("node:fs");
+    const flat = (f: string) =>
+      fs.readFileSync(new URL(f, import.meta.url), "utf8").replace(/\s+/g, " ");
+    for (const file of ["./store-postgres.ts", "./memory.ts"]) {
+      expect(flat(file), `${file} must not clamp a summary silently`)
+        .toContain("clampBroadcastSummary");
+      expect(flat(file)).not.toContain('sanitize(opts.summary ?? "", 1000)');
+    }
+  });
+});

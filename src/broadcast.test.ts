@@ -601,16 +601,27 @@ describe("input sanitization — security hardening", () => {
     expect(msg.reason).not.toContain("\r");
   });
 
-  it("truncates agent_id to 64 chars, task/reason to 500, summary to 1000", () => {
+  it("truncates agent_id to 64 chars, task/reason to 500, summary to BROADCAST_SUMMARY_MAX", () => {
     const msg = broadcastFact(SANIT_PATH, "STATUS", "a".repeat(200), {
       task:    "t".repeat(1000),
-      summary: "s".repeat(2000),
+      summary: "s".repeat(20000),
       reason:  "r".repeat(1000),
     });
     expect(msg.agent_id.length).toBeLessThanOrEqual(64);
     expect(msg.task.length).toBeLessThanOrEqual(500);
-    expect(msg.summary.length).toBeLessThanOrEqual(1000);
     expect(msg.reason.length).toBeLessThanOrEqual(500);
+    // v0.51.7: the summary carries TASK BRIEFS between agents. The old flat 1000
+    // silently cut an ASSIGN mid-sentence and cost a worker its acceptance
+    // criteria, so the budget is larger AND any cut is announced in-band.
+    expect(msg.summary.length).toBeLessThanOrEqual(Config.BROADCAST_SUMMARY_MAX);
+    expect(msg.summary).toContain("TRUNCATED");
+  });
+
+  it("leaves a summary within budget completely untouched", () => {
+    const body = "MERGE: bounded db sweep, commit abc1234, files listed below.";
+    const msg = broadcastFact(SANIT_PATH, "STATUS", "dev", { summary: body });
+    expect(msg.summary).toBe(body);
+    expect(msg.summary).not.toContain("TRUNCATED");
   });
 
   it("caps files array at 50 entries, depends_on at 20 entries", () => {

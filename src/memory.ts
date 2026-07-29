@@ -318,6 +318,28 @@ export interface EpistemicOpts {
  * only upgrades from 'fact' on a clear signal; an explicit `kind` always wins; never
  * fabricates confidence. Precedence: prediction > decision > hypothesis > fact.
  */
+/**
+ * v0.51.7 — clamp a broadcast summary, but NEVER silently.
+ *
+ * Found by dogfooding: broadcast summaries were clamped to 1000 chars with no
+ * marker, so an ASSIGN carrying acceptance criteria arrived cut mid-sentence at
+ * "The dashboard polls /api/projects every few seconds, so this is". The worker
+ * lost the acceptance criteria, the scope, and the RED-gate requirement. It
+ * caught the loss only because the cut landed mid-word — a cut at a paragraph
+ * boundary would have looked complete and it would have executed an
+ * under-specified task against invented criteria.
+ *
+ * A truncation the receiver cannot detect is indistinguishable from a message
+ * that was never longer. Two changes: a larger budget, and an explicit marker
+ * so the reader always knows to ask for the rest.
+ */
+export function clampBroadcastSummary(raw: string, max = Config.BROADCAST_SUMMARY_MAX): string {
+  const text = String(raw ?? "");
+  if (text.length <= max) return text;
+  const marker = ` …[TRUNCATED — ${text.length - max} more chars; ask the sender for the full text]`;
+  return text.slice(0, Math.max(0, max - marker.length)) + marker;
+}
+
 export function classifyFactKind(value: string): MemoryKind {
   const v = ` ${value.toLowerCase()} `;
   if (/\b(will|won'?t|going to|gonna|expects?|expected|predicts?|predicted|prediction|by (next|tomorrow|monday|tuesday|wednesday|thursday|friday|q[1-4]|end of)|should (pass|fail|work|break|ship|land|succeed))\b/.test(v)) {
@@ -1287,7 +1309,7 @@ export function broadcastFact(
   const safeAgent   = sanitize(agentId,          64);
   const safeTask    = sanitize(opts.task  ?? "", 500);
   const safeState   = sanitize(opts.state ?? "", 100);
-  const safeSummary = sanitize(opts.summary ?? "", 1000);
+  const safeSummary = clampBroadcastSummary(sanitize(opts.summary ?? "", Config.BROADCAST_SUMMARY_MAX * 2));
   const safeReason  = sanitize(opts.reason  ?? "", 500);
   const safeImp     = Math.max(1, Math.min(5, Math.round(opts.importance ?? 3)));
 

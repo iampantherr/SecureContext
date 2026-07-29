@@ -201,6 +201,10 @@ export const Config = {
   // the same "a constraint that can be hidden is not a constraint" failure this
   // feature exists to prevent, arriving through the budget instead of
   // supersession. Sized so PINNED_MAX_FACTS pins of typical length all fit.
+  // v0.51.7 — broadcast summaries carry TASK BRIEFS between agents. The old
+  // 1000-char clamp silently cut an ASSIGN mid-sentence, costing the worker its
+  // acceptance criteria. Truncation past this is marked explicitly, never silent.
+  BROADCAST_SUMMARY_MAX:  parseInt(env["ZC_BROADCAST_SUMMARY_MAX"] ?? "4000", 10),
   PINNED_MAX_CHARS:       parseInt(env["ZC_PINNED_MAX_CHARS"] ?? "15000", 10),
 
   // ── S1 (v0.44.0) — temporal fact supersession (Zep/Graphiti parity) ───────
