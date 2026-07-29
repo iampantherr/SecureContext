@@ -49,7 +49,18 @@ import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance, type TemporalWindow } from "./recall_budget.js";
 
 /** v0.31.0 epistemology layer — WHAT kind of claim a fact is. */
-export type MemoryKind = "fact" | "decision" | "hypothesis" | "prediction";
+/**
+ * The ONE definition of valid memory kinds. Every validator, schema and CHECK
+ * constraint must derive from this — v0.51.0 shipped 'constraint'/'antipattern'
+ * and a live E2E still failed twice because the enum was duplicated in SEVEN
+ * places (type, SQLite whitelist, PG whitelist, MCP schema, two table CHECKs,
+ * one migration). Each write returned SUCCESS while silently coercing the kind.
+ * Import MEMORY_KINDS; never re-type the list.
+ */
+export const MEMORY_KINDS = ["fact", "decision", "hypothesis", "prediction", "constraint", "antipattern"] as const;
+export type MemoryKind = typeof MEMORY_KINDS[number];
+/** Kinds that pin a fact above the recall budget (see memory_quality.ts). */
+export const PINNED_MEMORY_KINDS: readonly MemoryKind[] = ["constraint", "antipattern"];
 /** Resolution state of a prediction/hypothesis (whether it came true). */
 export type ResolutionStatus = "open" | "resolved_correct" | "resolved_incorrect" | "resolved_partial";
 
@@ -343,7 +354,11 @@ export function rememberFact(
   // text (zero-LLM, conservative). confidence/resolution are set ONLY when the caller
   // explicitly provides them — the auto-classifier never fabricates them, which keeps
   // auto-typed facts OUT of the eviction-protection guard below (that needs explicit intent).
-  const KINDS = ["fact", "decision", "hypothesis", "prediction"] as const;
+  // v0.51.0 — 'constraint' and 'antipattern' are PINNED kinds (see memory_quality.ts):
+  // they always render on recall and are exempt from budget truncation. They must be
+  // stated EXPLICITLY; the auto-classifier never fabricates them, so pinning is always
+  // a deliberate act by the writer.
+  const KINDS = MEMORY_KINDS;
   const RES   = ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"] as const;
   const safeKind: MemoryKind = epi.kind && (KINDS as readonly string[]).includes(epi.kind)
     ? epi.kind : classifyFactKind(safeValue);

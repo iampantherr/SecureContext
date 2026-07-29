@@ -19,12 +19,15 @@
  * silent truncation.
  */
 import { Config } from "./config.js";
+import { partitionPinned } from "./memory_quality.js";
 
 export interface BudgetableFact {
   key: string;
   value: string;
   importance: number;
   agent_id?: string;
+  /** v0.51.0 — 'constraint' / 'antipattern' are pinned above the budget. */
+  kind?: string | null;
   created_at?: string | Date;
   valid_at?: string | Date | null;
   last_retrieved_at?: string | Date | null;
@@ -97,20 +100,31 @@ export function budgetFacts<F extends BudgetableFact>(
     return { rendered: facts, collapsed: [], inWindowCollapsed: 0, tailNotice: "" };
   }
 
+
+  // Pinned tier-0 (v0.51.0): standing constraints and known anti-patterns are
+  // rendered FIRST and are exempt from truncation. A constraint that the budget
+  // can collapse into a tail index is not a constraint — that is precisely how
+  // an operator's "never terminate these agents" rule was lost across a worker
+  // relaunch, after which the replacement destroyed the protected resources.
+  // Bounded by PINNED_MAX_FACTS so a runaway writer cannot eat the budget.
+  const { pinned, rest } = partitionPinned(facts);
+
   // Temporal tier-1: stable partition, in-window first (relative order preserved).
-  let ordered = facts;
+  let ordered = rest;
   const hasWin = !!(opts.win && (opts.win.from || opts.win.to));
   if (hasWin) {
     const inWin: F[] = [];
     const outWin: F[] = [];
-    for (const f of facts) (isInWindow(f, opts.win) ? inWin : outWin).push(f);
+    for (const f of rest) (isInWindow(f, opts.win) ? inWin : outWin).push(f);
     ordered = [...inWin, ...outWin];
   }
 
   const minFacts = Math.max(1, Config.RECALL_MIN_FACTS);
-  const rendered: F[] = [];
+  // Pinned facts render first and always; they consume budget so the total stays
+  // bounded, but they are never eligible for collapse.
+  const rendered: F[] = [...pinned];
   const collapsed: F[] = [];
-  let used = 0;
+  let used = pinned.reduce((n, f) => n + estLen(f), 0);
   for (const f of ordered) {
     const len = estLen(f);
     if (rendered.length < minFacts || used + len <= budget) {
@@ -176,7 +190,21 @@ export function effectiveImportance(f: BudgetableFact, nowMs: number): number {
     lastTouchRaw instanceof Date ? lastTouchRaw.getTime() : Date.parse(String(lastTouchRaw ?? ""));
   if (!Number.isFinite(t)) return f.importance;
   const staleMs = Config.RECALL_STALE_DAYS * 24 * 60 * 60 * 1000;
-  return nowMs - t > staleMs ? f.importance - Config.RECALL_STALE_DEMOTE : f.importance;
+  if (nowMs - t <= staleMs) return f.importance;
+
+  // v0.51.0 — PROGRESSIVE decay with a floor, replacing a single flat -2 step.
+  // Measured on a live 3-agent project: 59% of 1117 facts were importance-5
+  // (soft cap 25). A one-step demotion cannot separate "stale by a week" from
+  // "untouched for three months" — both landed on the same rung, so the axis
+  // still failed to discriminate across the bulk of an inflated namespace.
+  // Now: one point per elapsed stale period, floored so a stale critical fact
+  // still outranks genuine noise. This demotes; it never forgets.
+  // Floor also fixes a latent bug: the old form could drive importance to 0 or
+  // negative for a long-untouched ★1, inverting it below facts it should beat.
+  const periods = Math.floor((nowMs - t) / staleMs);
+  const floor   = Math.max(1, Math.min(5, Config.IMPORTANCE_DECAY_FLOOR));
+  const decayed = f.importance - Config.RECALL_STALE_DEMOTE * periods;
+  return Math.max(Math.min(floor, f.importance), decayed);
 }
 
 /**

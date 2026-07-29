@@ -36,7 +36,7 @@ import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
 import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
-import { classifyFactKind, type EpistemicOpts } from "./memory.js";
+import { classifyFactKind, MEMORY_KINDS, type EpistemicOpts } from "./memory.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance } from "./recall_budget.js";
 import { extractCoReferences, extractCoReferencesAsync, classifyRelation, graphMaxNodes } from "./indexing/community.js";
@@ -209,7 +209,7 @@ export class PostgresStore implements Store {
     const now        = new Date().toISOString();
 
     // v0.31.0 epistemology — explicit kind wins, else auto-classify (parity with rememberFact).
-    const KINDS = ["fact", "decision", "hypothesis", "prediction"];
+    const KINDS: readonly string[] = MEMORY_KINDS;   // single source of truth — see memory.ts
     const RES   = ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"];
     const safeKind = epi.kind && KINDS.includes(epi.kind) ? epi.kind : classifyFactKind(safeValue);
     const safeConf = (typeof epi.confidence === "number" && isFinite(epi.confidence)) ? Math.max(0, Math.min(1, epi.confidence)) : null;
@@ -2517,7 +2517,7 @@ CREATE TABLE IF NOT EXISTS working_memory (
   created_at   TIMESTAMPTZ NOT NULL,
   -- v0.31.0 epistemology layer (+ provenance parity with SQLite migration 16)
   provenance        TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK (provenance IN ('EXTRACTED','INFERRED','AMBIGUOUS','UNKNOWN')),
-  kind              TEXT NOT NULL DEFAULT 'fact' CHECK (kind IN ('fact','decision','hypothesis','prediction')),
+  kind              TEXT NOT NULL DEFAULT 'fact' CHECK (kind IN ('fact','decision','hypothesis','prediction','constraint','antipattern')),
   confidence        REAL,
   resolution_status TEXT CHECK (resolution_status IN ('open','resolved_correct','resolved_incorrect','resolved_partial')),
   resolved_at       TIMESTAMPTZ,

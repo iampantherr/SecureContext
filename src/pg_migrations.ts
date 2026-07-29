@@ -1117,6 +1117,16 @@ export const PG_MIGRATIONS: PgMigration[] = [
     },
   },
   {
+    id: 44,
+    description: "Pinned memory kinds (v0.51.0): widen chk_wm_kind to admit 'constraint' and 'antipattern'. These render first on recall and are exempt from budget truncation (see memory_quality.ts). Caught by a live E2E: the app accepted kind:'constraint', the write returned SUCCESS, and the value was silently coerced by the validation whitelist — while this CHECK would have rejected it outright had it reached the DB. A pinned kind that cannot be stored is not a feature, and a write that reports success while discarding a field is the exact silent-failure class this release is meant to defend against.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE working_memory DROP CONSTRAINT IF EXISTS chk_wm_kind`);
+      await client.query(
+        `ALTER TABLE working_memory ADD CONSTRAINT chk_wm_kind ` +
+        `CHECK (kind IN ('fact','decision','hypothesis','prediction','constraint','antipattern'))`);
+    },
+  },
+  {
     id: 43,
     description: "Operator inbox (v0.50.0): durable questions from orchestrators to the HUMAN operator, answered from the dashboard and delivered back to the agent terminal by the dispatcher. Born from a live incident (2026-07-27 #2840): an orchestrator's question to the operator was silently dropped by the dispatcher's worker-targeted routing, and only log-tailing prevented an indefinite block. PG-only, like the task queue and zc_program (documented enterprise-feature class).",
     up: async (client) => {
@@ -1236,3 +1246,34 @@ export async function _dropPgTelemetryTablesForTesting(): Promise<void> {
   const { _resetProvisionedAgentsForTesting } = await import("./security/chained_table_postgres.js");
   _resetProvisionedAgentsForTesting();
 }
+
+/**
+ * v0.51.0 — migrations that touch a given set of tables, DERIVED from the
+ * migration bodies rather than hand-listed.
+ *
+ * Why this exists: `_dropSkillTablesForTesting` drops the skill tables and then
+ * deletes their schema_migrations_pg rows so `runPgMigrations()` re-applies them
+ * against the fresh schema. That list of ids was maintained BY HAND, and it
+ * drifted twice — silently. Migration 16 (agent_id) was missed and CI failed
+ * from v0.22.0; migrations 20 and 27 (evidence JSONB) were missed after that,
+ * and the same three storage_dual tests failed again with
+ * "column evidence of relation skill_runs_pg does not exist".
+ *
+ * A hand-copied list of things that must stay in sync with code elsewhere is a
+ * bug with a delay fuse. Reading the ids off the migration bodies means adding a
+ * new migration cannot forget to update anything.
+ */
+export function migrationsTouching(tables: readonly string[]): number[] {
+  const ids: number[] = [];
+  for (const m of PG_MIGRATIONS) {
+    const body = String(m.up);
+    // Substring, not a word-boundary regex: table names here are unique enough
+    // that a substring hit is exactly what we want (it also catches index and
+    // constraint names derived from the table, which a migration re-run needs).
+    if (tables.some((t) => body.includes(t))) ids.push(m.id);
+  }
+  return ids;
+}
+
+/** The three tables `_dropSkillTablesForTesting` drops, in one place. */
+export const SKILL_TABLES = ["skills_pg", "skill_runs_pg", "skill_mutations_pg"] as const;

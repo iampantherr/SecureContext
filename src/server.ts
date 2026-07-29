@@ -321,7 +321,7 @@ const TOOLS: Tool[] = [
         value:      { type: "string", description: "The fact to remember (max 500 chars)" },
         importance: { type: "integer", minimum: 1, maximum: 5, description: "1=ephemeral, 3=normal, 5=critical" },
         agent_id:   { type: "string", description: "Agent namespace for parallel use (default: 'default')" },
-        kind:       { type: "string", enum: ["fact", "decision", "hypothesis", "prediction"], description: "Epistemic kind. fact=observed; decision=chosen approach; hypothesis=tentative; prediction=falsifiable future claim. Default 'fact' (auto-classified from text if omitted)." },
+        kind:       { type: "string", enum: ["fact", "decision", "hypothesis", "prediction", "constraint", "antipattern"], description: "Epistemic kind. fact=observed; decision=chosen approach; hypothesis=tentative; prediction=falsifiable future claim. PINNED kinds (always render on recall, never truncated by the budget): constraint=a standing operator rule that must survive an agent relaunch; antipattern=a mistake already made, recorded so it is present BEFORE it recurs. Default 'fact' (auto-classified from text if omitted)." },
         confidence: { type: "number", minimum: 0, maximum: 1, description: "0.0–1.0 subjective probability for predictions/hypotheses. Omit for plain facts." },
         resolution: { type: "string", enum: ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"], description: "Set 'open' when recording a prediction; later re-remember the same key with a resolved_* value to close it." },
         ttl_days:   { type: "number", minimum: 0.01, description: "R1 (v0.42.0) — auto-expire this fact after N days (e.g. 7 for a sprint-scoped note, 0.5 for a same-day reminder). Expired facts leave recall and are retired (revivable for 30 days). Omit for permanent facts." },
@@ -2000,7 +2000,7 @@ async function dispatchToolCall(
       case "zc_remember": {
         const { key, value, importance, agent_id, kind, confidence, resolution } = args as {
           key: string; value: string; importance?: number; agent_id?: string;
-          kind?: "fact" | "decision" | "hypothesis" | "prediction";
+          kind?: "fact" | "decision" | "hypothesis" | "prediction" | "constraint" | "antipattern";
           confidence?: number;
           resolution?: "open" | "resolved_correct" | "resolved_incorrect" | "resolved_partial";
         };

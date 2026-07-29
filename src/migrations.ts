@@ -1008,7 +1008,7 @@ export const MIGRATIONS: Migration[] = [
       const safeAdd = (col: string, ddl: string) => {
         if (!cols.has(col)) { try { db.exec(`ALTER TABLE working_memory ADD COLUMN ${col} ${ddl}`); } catch { /* exists */ } }
       };
-      safeAdd("kind",              `TEXT NOT NULL DEFAULT 'fact' CHECK (kind IN ('fact','decision','hypothesis','prediction'))`);
+      safeAdd("kind",              `TEXT NOT NULL DEFAULT 'fact' CHECK (kind IN ('fact','decision','hypothesis','prediction','constraint','antipattern'))`);
       safeAdd("confidence",        `REAL`);
       safeAdd("resolution_status", `TEXT CHECK (resolution_status IN ('open','resolved_correct','resolved_incorrect','resolved_partial'))`);
       safeAdd("resolved_at",       `TEXT`);

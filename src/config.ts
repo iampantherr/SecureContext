@@ -159,6 +159,24 @@ export const Config = {
   // blocks) beyond this count. "When everything is critical, nothing is."
   IMP5_SOFT_CAP:       parseInt(env["ZC_IMP5_SOFT_CAP"] ?? "25", 10),
 
+  // ── Multi-agent memory quality (v0.51.0) — see src/memory_quality.ts ──────
+  // Measured on a live 3-agent project: 59% of facts were importance-5 (soft cap
+  // 25), private counts were orchestrator 280 / developer 190 / qa 9, and an
+  // operator constraint was lost entirely when a worker was relaunched.
+  //
+  // IMPORTANCE_DECAY_DAYS: a fact not retrieved for this many days loses one
+  // importance point per elapsed period, floored at IMPORTANCE_DECAY_FLOOR.
+  // Ranking-only — the stored importance is never rewritten. 0 disables.
+  IMPORTANCE_DECAY_DAYS:  parseInt(env["ZC_IMPORTANCE_DECAY_DAYS"] ?? "14", 10),
+  IMPORTANCE_DECAY_FLOOR: parseInt(env["ZC_IMPORTANCE_DECAY_FLOOR"] ?? "3", 10),
+  // Recall bonus for facts owned by the REQUESTING role. Shared ('default')
+  // facts are never re-weighted — they are the cross-agent contract. 0 disables.
+  W_ROLE_AFFINITY:        parseFloat(env["ZC_W_ROLE_AFFINITY"] ?? "0.75"),
+  // Pin kind='constraint' / kind='antipattern' above the recall budget so
+  // standing rules and known traps can never be truncated away. 0 disables.
+  PIN_CONSTRAINTS:        (env["ZC_PIN_CONSTRAINTS"] ?? "1") !== "0",
+  PINNED_MAX_FACTS:       parseInt(env["ZC_PINNED_MAX_FACTS"] ?? "12", 10),
+
   // ── S1 (v0.44.0) — temporal fact supersession (Zep/Graphiti parity) ───────
   // Measured failure (bench KU): when a fact is updated under a new key and the
   // old one is never retired, the OLD fact outranked its update 100% of the time
