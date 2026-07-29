@@ -3696,6 +3696,23 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // v0.52.1 — liveness signal consumed by the dispatcher's turn-death detector.
+  app.get("/api/v1/agent-activity", async (request, reply) => {
+    try {
+      const { projectPath } = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      const anyStore = store as unknown as { agentActivity?: (p: string) => Promise<unknown> };
+      if (typeof anyStore.agentActivity !== "function") {
+        // Explicit, not an empty array: "unsupported" must not look like "no agents".
+        return reply.status(501).send({ error: "agent-activity requires the Postgres store" });
+      }
+      return { ok: true, now: new Date().toISOString(), agents: await anyStore.agentActivity(pp) };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
   app.get("/api/v1/status", async (request, reply) => {
     try {
       const { projectPath, agentId = "default" } = request.query as Record<string, unknown>;
@@ -3761,6 +3778,20 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+
+// v0.52.2 - rolling per-operation result-count history for the empty-result
+// anomaly detector. In-process and bounded: an operation that suddenly returns
+// nothing where it always returned something is the tripwire for "it silently
+// did nothing" (a broken regex, a stub inheriting a benign default, a filter
+// that excluded everything). Resets on restart, which is fine - the signal only
+// needs recent history to be useful.
+const _resultHistory = new Map<string, number[]>();
+function _recordResultCount(op: string, n: number): number[] {
+  const prev = _resultHistory.get(op) ?? [];
+  const next = [...prev, n].slice(-20);
+  _resultHistory.set(op, next);
+  return prev;                       // history BEFORE this call, for comparison
+}
   app.post("/api/v1/search", async (request, reply) => {
     try {
       const { projectPath, queries, limit, agentId, depth, mode, rerank, hopDepth, as_of } = request.body as Record<string, unknown>;
@@ -3826,7 +3857,14 @@ export async function createApiServer(storeOverride?: Store) {
           qd) ?? undefined;
       } catch { temporal = undefined; }
 
-      return { ok: true, results, mode: mode ?? "default", reranked: useRerank, ...(temporal ? { temporal } : {}) };
+      // v0.52.2 - empty-result anomaly. A search returning nothing where this
+      // project's searches always return something means the retrieval path
+      // silently did nothing, not that the corpus is empty. Advisory only.
+      const { emptyResultAnomaly } = await import("./effect_verify.js");
+      const _hist = _recordResultCount(`search:${pp}`, results.length);
+      const _anom = emptyResultAnomaly("zc_search", results.length, _hist);
+      return { ok: true, results, mode: mode ?? "default", reranked: useRerank,
+               ...(temporal ? { temporal } : {}), ...(_anom.anomalous ? { warning: _anom.notice } : {}) };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

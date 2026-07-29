@@ -368,6 +368,51 @@ export class PostgresStore implements Store {
     return verification;
   }
 
+  /**
+   * v0.52.1 — per-agent liveness signal for the dispatcher's turn-death detector.
+   *
+   * A live agent that receives input ALWAYS does something observable: it calls a
+   * zc_* tool or it broadcasts. An agent whose turn died on a transient API error
+   * (529 Overloaded, rate limit, network blip) does neither, while its process
+   * stays alive and idle — indistinguishable from "thinking" unless you can see
+   * that it has produced nothing since the moment it was last spoken to.
+   *
+   * Measured cost of not having this: a 529 parked three agents for 2.5 hours.
+   * Nothing detected it; the dispatcher's idle heuristic mislabelled it as a
+   * stuck worker and escalated a false alarm to the wrong agent.
+   */
+  async agentActivity(projectPath: string): Promise<Array<{
+    agent_id: string; last_tool_call: string | null; last_broadcast: string | null; last_any: string | null;
+  }>> {
+    const projectHash = ph(projectPath);
+    const res = await this.pool.query<{
+      agent_id: string; last_tool_call: string | null; last_broadcast: string | null;
+    }>(`
+      WITH t AS (
+        SELECT agent_id, MAX(ts) AS last_tool_call
+          FROM tool_calls_pg WHERE project_hash = $1 GROUP BY agent_id
+      ), b AS (
+        SELECT agent_id, MAX(created_at::timestamptz) AS last_broadcast
+          FROM broadcasts WHERE project_hash = $1 GROUP BY agent_id
+      )
+      SELECT COALESCE(t.agent_id, b.agent_id) AS agent_id,
+             t.last_tool_call::text,
+             b.last_broadcast::text
+        FROM t FULL OUTER JOIN b ON t.agent_id = b.agent_id
+       WHERE COALESCE(t.agent_id, b.agent_id) IS NOT NULL
+    `, [projectHash]);
+    return res.rows.map((r) => {
+      const times = [r.last_tool_call, r.last_broadcast]
+        .filter(Boolean).map((x) => Date.parse(String(x))).filter(Number.isFinite);
+      return {
+        agent_id: r.agent_id,
+        last_tool_call: r.last_tool_call,
+        last_broadcast: r.last_broadcast,
+        last_any: times.length ? new Date(Math.max(...times)).toISOString() : null,
+      };
+    });
+  }
+
   // ── v0.37.0 Temporal fact retirement ───────────────────────────────────────
   async retireFact(projectPath: string, key: string, agentId: string, supersededBy: string | null, reason: string): Promise<boolean> {
     return this._retireFactByHash(ph(projectPath), key, agentId, supersededBy, reason);

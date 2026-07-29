@@ -1576,11 +1576,23 @@ async function _handleRemoteTool(
           } catch { /* window detection is best-effort */ }
         }
         const fBudget    = bFacts(facts, { win: bWin });
+
+        // v0.52.2 - memory health, surfaced ONLY when something is wrong.
+        // Written in v0.51.0 with tests and never wired to a caller: a green
+        // suite reporting on code nothing calls. It earns its place by being
+        // silent in the healthy case and one line otherwise, so it can never
+        // become recall bloat.
+        let healthLine = "";
+        try {
+          const { computeMemoryHealth } = await import("./memory_quality.js");
+          const h = computeMemoryHealth(facts as Array<{ key: string; importance: number; agent_id?: string; kind?: string }>);
+          if (h.warnings.length) healthLine = `\n⚠ memory health: ${h.warnings.join(" · ")}`;
+        } catch { /* health is advisory; never break recall */ }
         const shownFacts = fBudget.rendered;
         const headCount  = fBudget.collapsed.length > 0
           ? `${facts.length}/${max} facts · top ${shownFacts.length} rendered`
           : `${facts.length}/${max} facts`;
-        const lines     = [`## Working Memory (${headCount})`];
+        const lines     = [`## Working Memory (${headCount})${healthLine}`];
         // v0.31.0 — plain facts render byte-identical; typed/resolved claims get an inline badge.
         const epiBadge = (f: { kind?: string; confidence?: number | null; resolution_status?: string | null }): string => {
           if ((!f.kind || f.kind === "fact") && !f.resolution_status) return "";
@@ -1595,7 +1607,7 @@ async function _handleRemoteTool(
         };
         if (recallFocus) {
           // M1 — facts arrive RELEVANCE-ordered; regrouping by ★ would undo the ranking.
-          lines[0] = `## Working Memory (${headCount} · ranked by task relevance)`;
+          lines[0] = `## Working Memory (${headCount} · ranked by task relevance)${healthLine}`;
           for (const f of shownFacts) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
         } else {
           for (const f of shownFacts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
