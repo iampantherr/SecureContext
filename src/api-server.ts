@@ -3711,6 +3711,32 @@ export async function createApiServer(storeOverride?: Store) {
   });
 
   // v0.52.1 — liveness signal consumed by the dispatcher's turn-death detector.
+  // v0.53.0 - claim verification. A MERGE broadcast is a CLAIM; nothing checked
+  // any of it. Measured: the acceptance gate reported PASS 42/42 on five
+  // submissions across two slices, three of which a literal close-out then
+  // failed. Every one of those passes rested on assertions no gate had checked.
+  app.post("/api/v1/verify-claim", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(b["projectPath"]);
+      const { verifyClaim } = await import("./claim_verify.js");
+      const verdict = verifyClaim(pp, {
+        summary:      typeof b["summary"] === "string" ? b["summary"] : undefined,
+        commit:       typeof b["commit"] === "string" ? b["commit"] : undefined,
+        evidenceFile: typeof b["evidenceFile"] === "string" ? b["evidenceFile"] : undefined,
+        files:        Array.isArray(b["files"]) ? (b["files"] as unknown[]).map(String).slice(0, 100) : undefined,
+      });
+      // 'ok' (the request succeeded) and the verdict's own ok (nothing refuted)
+      // are different facts, and spreading conflated them — a caller reading ok
+      // would have learned nothing about the claim. Named apart deliberately.
+      const { ok: claimOk, ...rest } = verdict;
+      return { ok: true, claimOk, ...rest };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
   app.get("/api/v1/agent-activity", async (request, reply) => {
     try {
       const { projectPath } = request.query as Record<string, unknown>;

@@ -425,6 +425,24 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "zc_verify_claim",
+    description:
+      "Check a delivery claim against the repository instead of against the claimant's confidence. " +
+      "Separates assertions into VERIFIED (commit exists, file really committed, evidence artefact present), " +
+      "REFUTED (checked and false), and UNVERIFIABLE (a test count, a latency, 'no regressions' - reported as " +
+      "UNCHECKED, never as a pass). Call this before accepting a MERGE: the acceptance gate reported 42/42 on " +
+      "five submissions, three of which a literal close-out then failed, because nothing checked the claims.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        summary:      { type: "string", description: "The claim text (e.g. the MERGE summary)." },
+        commit:       { type: "string", description: "Claimed commit sha; existence is checked." },
+        files:        { type: "array", items: { type: "string" }, description: "Claimed files; each is checked as COMMITTED, not merely present." },
+        evidenceFile: { type: "string", description: "Named evidence artefact; checked as committed." },
+      },
+    },
+  },
+  {
     name: "zc_status",
     description:
       "Show SecureContext health: DB size, KB entry counts, working memory fill, " +
@@ -1755,6 +1773,42 @@ ${sr["warning"]}` : "";
         if (results.length === 0) return { content: [{ type: "text", text: "No global results found." }] };
         const lines = results.map((r, i) => `${i + 1}. [${r.projectLabel}] ${r.source}\n   ${r.snippet}`);
         return { content: [{ type: "text", text: lines.join("\n\n") }] };
+      }
+
+      case "zc_verify_claim": {
+        // Runs LOCALLY, not via the API. Found on the first live call: the
+        // containerized API answered "not a git work tree" for every path,
+        // because the host repo does not exist inside the container — so every
+        // repo-backed check degraded to UNVERIFIABLE and the tool was useless
+        // where it matters. The MCP server runs on the host in the agent's own
+        // process and can see the repository; verification belongs here.
+        //
+        // Note the fail-safe held: the mismatch produced "unchecked", never a
+        // false pass. That is the property the module was designed around.
+        const { verifyClaim } = await import("./claim_verify.js");
+        const cv = verifyClaim(PROJECT_PATH, {
+          summary:      typeof body["summary"] === "string" ? body["summary"] : undefined,
+          commit:       typeof body["commit"] === "string" ? body["commit"] : undefined,
+          evidenceFile: typeof body["evidenceFile"] === "string" ? body["evidenceFile"] : undefined,
+          files:        Array.isArray(body["files"]) ? (body["files"] as unknown[]).map(String).slice(0, 100) : undefined,
+        }) as unknown as Record<string, unknown>;
+        const lines = [
+          `## Claim verification`,
+          `verified=${cv["verified"]}  refuted=${cv["refuted"]}  unverifiable=${cv["unverifiable"]}`,
+          ``,
+        ];
+        for (const c of (cv["checks"] as Array<{ assertion: string; status: string; detail: string }> ?? [])) {
+          lines.push(`[${c.status.toUpperCase()}] ${c.assertion}`);
+          if (c.status !== "verified") lines.push(`    ${c.detail}`);
+        }
+        if (cv["refuted"] && Number(cv["refuted"]) > 0) {
+          lines.push(``, `DO NOT present this as delivered: the repository refutes part of the claim.`);
+        } else if (cv["unverifiable"] && Number(cv["unverifiable"]) > 0) {
+          // The distinction that matters: nothing refuted is not the same as verified.
+          lines.push(``, `Nothing was refuted, but ${cv["unverifiable"]} assertion(s) are UNCHECKED — not passed. ` +
+                         `Commit the program's own output if they need to count as evidence.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
       case "zc_status": {
