@@ -223,7 +223,8 @@ describe("pinned overflow is announced, never silent", () => {
     // Budget small enough that the overflowed constraints cannot fit as normal facts.
     const r = budgetFacts(facts, { maxChars: 200 });
     expect(r.collapsed.length).toBeGreaterThan(0);
-    expect(r.tailNotice).toContain("exceeded ZC_PINNED_MAX_FACTS");
+    expect(r.tailNotice).toContain("exceeded the pinned budget");
+    expect(r.tailNotice).toContain("ZC_PINNED_MAX_FACTS");
   });
 
   it("stays quiet when nothing pinned overflowed", async () => {
@@ -309,5 +310,42 @@ describe("per-task markers expire by default", () => {
     // TASK_something — expiring one of those is the failure this whole branch exists to stop.
     expect(src).toContain("safeImp <= 4");
     expect(src).toContain("!isPinnedKind({ key: safeKey, importance: safeImp, kind: safeKind })");
+  });
+});
+
+describe("pinned facts do not consume the working-context budget", () => {
+  // Measured trigger: once the A2A team started writing real constraints, 12
+  // pinned facts reached 13,220 of a 16,000-char budget (83%), leaving room for
+  // about seven working facts. Charging standing rules against working context
+  // forces a false choice between knowing the rules and knowing what is happening.
+  it("renders working facts even when pins are large", async () => {
+    const { budgetFacts } = await import("./recall_budget.js");
+    const pins = Array.from({ length: 8 }, (_, i) => ({
+      key: `C_${i}`, value: "c".repeat(1000), importance: 3,
+      kind: i % 2 ? "constraint" : "antipattern", created_at: new Date().toISOString(),
+    }));
+    const work = Array.from({ length: 20 }, (_, i) => ({
+      key: `W_${i}`, value: "w".repeat(300), importance: 5,
+      kind: "fact", created_at: new Date().toISOString(),
+    }));
+    const r = budgetFacts([...pins, ...work], { maxChars: 4000 });
+    const renderedWork = r.rendered.filter((f) => f.kind === "fact").length;
+    const renderedPins = r.rendered.filter((f) => f.kind !== "fact").length;
+    expect(renderedPins).toBeGreaterThan(0);
+    // The whole point: ~8000 chars of pins must NOT starve a 4000-char working budget.
+    expect(renderedWork, "pins starved the working-context budget").toBeGreaterThan(5);
+  });
+
+  it("still bounds pins by their own char budget and announces drops", async () => {
+    const { budgetFacts } = await import("./recall_budget.js");
+    const { Config } = await import("./config.js");
+    const huge = Math.ceil(Config.PINNED_MAX_CHARS / 800) + 6;
+    const pins = Array.from({ length: huge }, (_, i) => ({
+      key: `C_${i}`, value: "c".repeat(800), importance: 3, kind: "constraint",
+      created_at: new Date().toISOString(),
+    }));
+    const r = budgetFacts(pins, { maxChars: 2000 });
+    expect(r.collapsed.length).toBeGreaterThan(0);
+    expect(r.tailNotice).toContain("ZC_PINNED_MAX_CHARS");
   });
 });

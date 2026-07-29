@@ -120,11 +120,33 @@ export function budgetFacts<F extends BudgetableFact>(
   }
 
   const minFacts = Math.max(1, Config.RECALL_MIN_FACTS);
-  // Pinned facts render first and always; they consume budget so the total stays
-  // bounded, but they are never eligible for collapse.
-  const rendered: F[] = [...pinned];
+
+  // v0.51.5 — pinned facts have their OWN char budget and do NOT consume the
+  // working-context budget.
+  //
+  // Measured on the live A2A project: once the team started writing real
+  // constraints, 12 pinned facts reached 13,220 of the 16,000-char budget — 83%
+  // — leaving room for about seven working facts. Charging standing rules
+  // against working context sets up a false choice between "know the rules" and
+  // "know what is happening", and the agent loses either way. They are different
+  // kinds of content and they get different budgets.
+  //
+  // Pins remain doubly bounded (PINNED_MAX_FACTS and PINNED_MAX_CHARS) so this
+  // cannot become an unbounded channel, and anything dropped is announced.
+  const pinBudget = Math.max(0, Config.PINNED_MAX_CHARS);
+  const rendered: F[] = [];
   const collapsed: F[] = [];
-  let used = pinned.reduce((n, f) => n + estLen(f), 0);
+  let pinUsed = 0;
+  for (const f of pinned) {
+    const len = estLen(f);
+    if (pinUsed + len <= pinBudget || rendered.length === 0) {
+      rendered.push(f);
+      pinUsed += len;
+    } else {
+      collapsed.push(f);   // announced via the pinned-overflow notice below
+    }
+  }
+  let used = 0;
   for (const f of ordered) {
     const len = estLen(f);
     if (rendered.length < minFacts || used + len <= budget) {
@@ -144,8 +166,9 @@ export function budgetFacts<F extends BudgetableFact>(
   ).length;
   const overflowLine =
     pinnedOverflow > 0
-      ? `⚠ ${pinnedOverflow} constraint/antipattern fact(s) exceeded ZC_PINNED_MAX_FACTS=` +
-        `${Config.PINNED_MAX_FACTS} and were NOT pinned. Raise that limit or prune — ` +
+      ? `⚠ ${pinnedOverflow} constraint/antipattern fact(s) exceeded the pinned budget ` +
+        `(ZC_PINNED_MAX_FACTS=${Config.PINNED_MAX_FACTS}, ZC_PINNED_MAX_CHARS=` +
+        `${Config.PINNED_MAX_CHARS}) and were NOT pinned. Raise a limit or prune — ` +
         `a standing rule you cannot see is a standing rule you will break.`
       : "";
 

@@ -190,6 +190,11 @@ export const Config = {
   // one. 0 disables. See the comment in store-postgres.remember() for the
   // measurement that motivated it (97 markers, 52,982 chars, 29 with no expiry).
   TASK_MARKER_TTL_DAYS:   parseInt(env["ZC_TASK_MARKER_TTL_DAYS"] ?? "14", 10),
+  // v0.51.5 — pinned facts get their OWN char budget, separate from
+  // RECALL_MAX_CHARS, so standing rules never crowd out working context.
+  // Measured trigger: 12 pins reached 83% of a 16,000-char budget on a live
+  // project. 0 disables pinning's separate budget (pins fall back to sharing).
+  PINNED_MAX_CHARS:       parseInt(env["ZC_PINNED_MAX_CHARS"] ?? "9000", 10),
 
   // ── S1 (v0.44.0) — temporal fact supersession (Zep/Graphiti parity) ───────
   // Measured failure (bench KU): when a fact is updated under a new key and the
