@@ -2288,10 +2288,14 @@ export class PostgresStore implements Store {
     }
 
     const safeAgent   = sanitize(agentId, 64);
-    const safeTask    = sanitize(opts.task    ?? "", 500);
+    // v0.53.1 - task and reason announce their truncation. A REJECT 'reason'
+    // explaining why work failed, cut silently at 500 chars, is the same
+    // silent-clamp class as the 1000-char summary that cost a worker its
+    // acceptance criteria. Summary already announced; these two did not.
+    const safeTask    = clampWithMarker(sanitize(opts.task ?? "", 100_000), 500, "task id");
     const safeSummary = clampBroadcastSummary(sanitize(opts.summary ?? "", Config.BROADCAST_SUMMARY_MAX * 2));
     const safeState   = sanitize(opts.state   ?? "", 200);
-    const safeReason  = sanitize(opts.reason  ?? "", 500);
+    const safeReason  = clampWithMarker(sanitize(opts.reason ?? "", 100_000), 500, "reason");
     const safeImp     = Math.max(1, Math.min(5, Math.round(opts.importance ?? 3)));
     const files       = JSON.stringify((opts.files      ?? []).slice(0, 20).map(f => String(f).slice(0, 300)));
     const dependsOn   = JSON.stringify((opts.depends_on ?? []).slice(0, 10).map(d => String(d).slice(0, 100)));
@@ -2386,13 +2390,31 @@ export class PostgresStore implements Store {
           task_dependencies, required_skills, estimated_tokens
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
                   $15,$16,$17,$18,$19,$20,$21)
-        RETURNING id
+        RETURNING id, type, agent_id, task, summary, reason
       `, [projectHash, type, safeAgent, safeTask, safeSummary, files, safeState,
           dependsOn, safeReason, safeImp, now, tokenId, prevHash, rowHash,
           safeAccept, safeComplexity, safeFileExcl, safeFileRO,
           safeTaskDeps, safeReqSkills, safeEstTokens]);
 
       await client.query("COMMIT");
+
+      // v0.53.1 - readback verification on the broadcast path. The clamp fixes
+      // above stop the SILENCE; this catches what a clamp cannot predict - a DB
+      // CHECK or trigger quietly changing a value, which is exactly how
+      // kind:'constraint' became 'fact' and cost three live rounds to find.
+      if (Config.EFFECT_VERIFY) {
+        const stored = insertRes.rows[0] as unknown as Record<string, unknown>;
+        const v = verifyWrite(
+          { type, agent_id: safeAgent, task: safeTask, summary: safeSummary, reason: safeReason },
+          stored,
+          { type: "exact", agent_id: "exact", task: "lossy-marked", summary: "lossy-marked", reason: "lossy-marked" },
+          { operation: "zc_broadcast" }
+        );
+        if (!v.ok) {
+          const { logger: lg } = await import("./logger.js");
+          lg.warn("effect_verify", "broadcast_discrepancy", { notice: v.notice.slice(0, 400) });
+        }
+      }
 
       const id = insertRes.rows[0]!.id;
       return {

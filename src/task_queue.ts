@@ -28,6 +28,7 @@
  */
 
 import type { PoolClient } from "pg";
+import { clampWithMarker } from "./memory.js";
 import { withClient, withTransaction } from "./pg_pool.js";
 import { logger } from "./logger.js";
 
@@ -206,7 +207,12 @@ export async function failTask(
           failure_reason  = $3,
           retries         = retries + 1
       WHERE task_id = $1 AND claimed_by = $2 AND state = 'claimed'
-    `, [taskId, workerId, reason.slice(0, 1000)]);
+    // v0.53.1 - announce the clamp. A task FAILURE reason is the one field whose
+    // truncation costs the most: it is what the next attempt reads to understand
+    // what went wrong, and silently losing its tail sends the retry in blind.
+    // Same class as the 1000-char broadcast summary that cost a worker its
+    // acceptance criteria.
+    `, [taskId, workerId, clampWithMarker(reason, 1000, "failure reason")]);
     return (r.rowCount ?? 0) > 0;
   });
 }
