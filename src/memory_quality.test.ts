@@ -281,3 +281,33 @@ describe("a pinned kind cannot be retired automatically", () => {
     expect(Config.PINNED_VALUE_MAX).toBeGreaterThan(500);
   });
 });
+
+describe("per-task markers expire by default", () => {
+  // The orchestrator, asked what was actually crowding out its recall, named the
+  // per-task markers rather than the pinned rules I suspected: 97 live
+  // OWNERSHIP_*/ACCEPTANCE_* facts holding 52,982 chars — over 3x the whole
+  // recall budget — 29 of them with no expiry. The "set ttl_days" convention was
+  // documented but unenforced, so it decayed into a suggestion.
+  const PER_TASK = /^(OWNERSHIP|ACCEPTANCE|ACCEPT|TASK|CKPT|CLAIM)[_-]/i;
+
+  it("recognises the convention-named keys and nothing else", () => {
+    for (const k of ["OWNERSHIP_DEV_TASK_X", "ACCEPTANCE_GATE_9", "ckpt_fix1", "TASK-42", "CLAIM_A"])
+      expect(PER_TASK.test(k), k).toBe(true);
+    for (const k of ["STANDING_RULE_MERGE", "FEEDBACK_QA_FIRST", "AUDIT_FINDINGS_2026", "last_session_summary"])
+      expect(PER_TASK.test(k), k).toBe(false);
+  });
+
+  it("is configurable and disableable", async () => {
+    const { Config } = await import("./config.js");
+    expect(Config.TASK_MARKER_TTL_DAYS).toBeGreaterThanOrEqual(0);
+  });
+
+  it("never auto-expires a pinned kind or a high-importance fact", async () => {
+    const src = (await import("node:fs"))
+      .readFileSync(new URL("./store-postgres.ts", import.meta.url), "utf8").replace(/\s+/g, " ");
+    // A durable decision or standing rule must be immune even if someone names it
+    // TASK_something — expiring one of those is the failure this whole branch exists to stop.
+    expect(src).toContain("safeImp <= 4");
+    expect(src).toContain("!isPinnedKind({ key: safeKey, importance: safeImp, kind: safeKind })");
+  });
+});

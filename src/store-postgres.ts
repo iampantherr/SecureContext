@@ -228,7 +228,25 @@ export class PostgresStore implements Store {
     const resolvedAt = (safeRes && safeRes !== "open") ? now : null;
 
     // R1 — optional TTL: validate ISO, must be in the future; invalid values dropped.
+    // v0.51.3 — per-task markers get a DEFAULT TTL when the writer omits one.
+    //
+    // Measured on the live A2A project: 97 live OWNERSHIP_*/ACCEPTANCE_* markers
+    // consumed 52,982 chars — more than 3x the entire recall budget — and 29 of
+    // them carried no expiry at all. The convention "per-task notes must set
+    // ttl_days" was documented but unenforced, so it decayed to a suggestion.
+    // The orchestrator, asked what was actually crowding out its recall, named
+    // these markers rather than the pinned rules I suspected.
+    //
+    // Only convention-named, non-pinned, importance<=4 facts are affected, so a
+    // durable decision or constraint can never be silently expired.
+    // ZC_TASK_MARKER_TTL_DAYS=0 disables (previous behaviour, byte-identical).
+    const looksPerTask = /^(OWNERSHIP|ACCEPTANCE|ACCEPT|TASK|CKPT|CLAIM)[_-]/i.test(safeKey);
+    const autoTtlDays  = Config.TASK_MARKER_TTL_DAYS;
+    const wantsAutoTtl =
+      !epi.expiresAt && autoTtlDays > 0 && looksPerTask && safeImp <= 4 &&
+      !isPinnedKind({ key: safeKey, importance: safeImp, kind: safeKind });
     const safeExpires: string | null = (() => {
+      if (wantsAutoTtl) return new Date(Date.now() + autoTtlDays * 864e5).toISOString();
       if (!epi.expiresAt) return null;
       const t = Date.parse(String(epi.expiresAt));
       return Number.isFinite(t) && t > Date.now() ? new Date(t).toISOString() : null;

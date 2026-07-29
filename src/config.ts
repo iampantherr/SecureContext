@@ -179,6 +179,10 @@ export const Config = {
   // v0.51.2 — pinned kinds may store a longer value than the flat 500-char clamp.
   // A constraint cut mid-clause loses exactly the part that says what to do.
   PINNED_VALUE_MAX:       parseInt(env["ZC_PINNED_VALUE_MAX"] ?? "1200", 10),
+  // v0.51.3 — default TTL for convention-named per-task markers written without
+  // one. 0 disables. See the comment in store-postgres.remember() for the
+  // measurement that motivated it (97 markers, 52,982 chars, 29 with no expiry).
+  TASK_MARKER_TTL_DAYS:   parseInt(env["ZC_TASK_MARKER_TTL_DAYS"] ?? "14", 10),
 
   // ── S1 (v0.44.0) — temporal fact supersession (Zep/Graphiti parity) ───────
   // Measured failure (bench KU): when a fact is updated under a new key and the
