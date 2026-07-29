@@ -74,6 +74,28 @@ const PRICING_TABLE: PricingTable = {
   version: "2026-07-18.1",
   models: {
     // ── Anthropic Claude family ──
+    // Claude 5 family. PROVISIONAL RATES — carried over from the Opus/Sonnet 4.x
+    // tiers so a Claude 5 session does not silently report $0.00. An UNLISTED
+    // model returns known:false and cost 0, which is the same silent-failure
+    // shape as the [1m]-suffix bug fixed in v0.46.2: the dashboard shows a
+    // confident zero instead of admitting it cannot price the session.
+    // ACTION: confirm these against the published price list and update
+    // `updated` when you do — until then, treat Claude 5 cost figures as
+    // indicative, not authoritative.
+    "claude-opus-5": {
+      input_per_mtok:  15.0,
+      output_per_mtok: 75.0,
+      cached_input_per_mtok: 1.5,
+      updated: "2026-07-29-provisional",
+      batch_supported: true,
+    },
+    "claude-sonnet-5": {
+      input_per_mtok:  3.0,
+      output_per_mtok: 15.0,
+      cached_input_per_mtok: 0.30,
+      updated: "2026-07-29-provisional",
+      batch_supported: true,
+    },
     "claude-opus-4-8": {
       input_per_mtok:  15.0,
       output_per_mtok: 75.0,

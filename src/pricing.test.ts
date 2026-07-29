@@ -39,6 +39,30 @@ afterEach(() => {
 describe("pricing", () => {
   // ── Unit: known models ──────────────────────────────────────────────────
 
+  // Claude 5 family — the orchestrator default is claude-opus-5[1m], so an
+  // unlisted id here would make every orchestrator session report a confident
+  // $0.00 (known:false), the same silent-failure shape as the [1m]-suffix bug
+  // fixed in v0.46.2. These assert the model is PRICED, not that the rates are
+  // authoritative (they are provisional — see the table comment).
+  it("prices claude-opus-5 as a known model (not a silent $0)", () => {
+    const c = computeCost("claude-opus-5", 1_000_000, 1_000_000);
+    expect(c.known).toBe(true);
+    expect(c.cost_usd).toBeGreaterThan(0);
+  });
+
+  it("prices the launcher-decorated claude-opus-5[1m] via suffix normalization", () => {
+    const plain    = computeCost("claude-opus-5", 500_000, 500_000);
+    const decorated = computeCost("claude-opus-5[1m]", 500_000, 500_000);
+    expect(decorated.known).toBe(true);
+    expect(decorated.cost_usd).toBeCloseTo(plain.cost_usd, 5);
+  });
+
+  it("prices claude-sonnet-5 as a known model", () => {
+    const c = computeCost("claude-sonnet-5", 1_000_000, 1_000_000);
+    expect(c.known).toBe(true);
+    expect(c.cost_usd).toBeGreaterThan(0);
+  });
+
   it("computes cost for claude-opus-4-7 (15/75 per Mtok)", () => {
     const c = computeCost("claude-opus-4-7", 1_000_000, 1_000_000);
     expect(c.known).toBe(true);
