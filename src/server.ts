@@ -318,7 +318,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         key:        { type: "string", description: "Short identifier (max 100 chars)" },
-        value:      { type: "string", description: "The fact to remember (max 500 chars)" },
+        value:      { type: "string", description: "The fact to remember. Max 500 chars for ordinary facts; kind:'constraint' and kind:'antipattern' may use up to 1200, so a standing rule can carry its 'how to apply' clause instead of being cut mid-sentence." },
         importance: { type: "integer", minimum: 1, maximum: 5, description: "1=ephemeral, 3=normal, 5=critical" },
         agent_id:   { type: "string", description: "Agent namespace for parallel use (default: 'default')" },
         kind:       { type: "string", enum: ["fact", "decision", "hypothesis", "prediction", "constraint", "antipattern"], description: "Epistemic kind. fact=observed; decision=chosen approach; hypothesis=tentative; prediction=falsifiable future claim. PINNED kinds (always render on recall, never truncated by the budget): constraint=a standing operator rule that must survive an agent relaunch; antipattern=a mistake already made, recorded so it is present BEFORE it recurs. Default 'fact' (auto-classified from text if omitted)." },
