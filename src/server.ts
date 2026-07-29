@@ -1667,9 +1667,14 @@ async function _handleRemoteTool(
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
-      case "zc_summarize_session":
-        await apiCall("POST", "/api/v1/summarize", { projectPath: PROJECT_PATH, summary: body["summary"] });
-        return { content: [{ type: "text", text: `Session summary archived.` }] };
+      case "zc_summarize_session": {
+        // v0.52.5 - surface the loss at the MCP layer too; a bare "archived"
+        // while 557 chars vanished is the same drop-the-warning bug found in
+        // zc_remember and zc_search.
+        const sumRes = await apiCall("POST", "/api/v1/summarize", { projectPath: PROJECT_PATH, summary: body["summary"] });
+        const w = typeof sumRes["warning"] === "string" && sumRes["warning"] ? `\n${sumRes["warning"]}` : "";
+        return { content: [{ type: "text", text: `Session summary archived.${w}` }] };
+      }
 
       case "zc_index":
         await apiCall("POST", "/api/v1/index", {

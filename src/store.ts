@@ -153,7 +153,7 @@ export interface Store {
   // agent's current task; without it, ordering is unchanged (backward-compatible).
   // M3 (v0.41.0): from/to = temporal-window bonus; asOf = point-in-time reconstruction.
   recall(projectPath: string, agentId: string, opts?: { focus?: string; from?: Date; to?: Date; asOf?: Date }): Promise<MemoryFact[]>;
-  archiveSummary(projectPath: string, summary: string): Promise<void>;
+  archiveSummary(projectPath: string, summary: string): Promise<{ submitted: number; stored: number; dropped: number } | void>;
   getMemoryStats(projectPath: string, agentId: string): Promise<MemoryStats>;
   getWorkingMemoryLimits(projectPath: string, forceRecompute?: boolean): Promise<MemoryLimits>;
   // R8c (v0.43.0): live ★5 count in a namespace — importance-inflation soft-quota nudge.

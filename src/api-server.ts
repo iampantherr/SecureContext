@@ -3688,8 +3688,15 @@ export async function createApiServer(storeOverride?: Store) {
       const { projectPath, summary } = request.body as Record<string, unknown>;
       const pp = validateProjectPath(projectPath);
       if (typeof summary !== "string") throw new ApiError(400, "summary must be a string");
-      await store.archiveSummary(pp, summary);
-      return { ok: true };
+      const _arch = await store.archiveSummary(pp, summary);
+      // v0.52.5 - report the loss rather than a bare ok:true. This is what the
+      // next session reads to resume; silent loss here costs continuity.
+      return _arch && _arch.dropped > 0
+        ? { ok: true, ..._arch,
+            warning: `[!] zc_summarize_session: ${_arch.dropped} of ${_arch.submitted} chars did not fit ` +
+                     `(stored ${_arch.stored}, marker included). The next session will read the truncated ` +
+                     `version - shorten the summary or raise ZC_BROADCAST_SUMMARY_MAX.` }
+        : { ok: true, ...(_arch ?? {}) };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

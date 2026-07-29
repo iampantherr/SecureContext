@@ -700,8 +700,13 @@ export class PostgresStore implements Store {
     return rows;
   }
 
-  async archiveSummary(projectPath: string, summary: string): Promise<void> {
-    const safe = sanitize(summary, 2000);
+  async archiveSummary(projectPath: string, summary: string): Promise<{ submitted: number; stored: number; dropped: number }> {
+    // v0.52.5 - ONE clamp, not two. A live agent measured the gap: 2456 chars
+    // submitted, 400 kept, a marker naming 1499 lost - and 557 chars that died
+    // in this upstream sanitize() before the marker logic ever saw them, so the
+    // marker under-reported the loss. A truncation notice that is itself wrong
+    // is worse than none: it tells the reader the damage is bounded when it is not.
+    const safe = clampWithMarker(sanitize(summary, 100_000), Config.BROADCAST_SUMMARY_MAX, "session summary");
     const now  = new Date().toISOString();
     const source = `[SESSION_SUMMARY] ${now.slice(0, 10)}`;
     await this.index(projectPath, safe, source, "internal", "summary");
@@ -711,6 +716,7 @@ export class PostgresStore implements Store {
     // clamp here loses continuity precisely where it matters most.
     await this.remember(projectPath, "last_session_summary", safe, 5, "default",
                         { valueMax: Config.BROADCAST_SUMMARY_MAX });
+    return { submitted: summary.length, stored: safe.length, dropped: Math.max(0, summary.length - safe.length) };
   }
 
   async getMemoryStats(projectPath: string, agentId: string): Promise<MemoryStats> {
