@@ -333,6 +333,13 @@ export interface EpistemicOpts {
  * that was never longer. Two changes: a larger budget, and an explicit marker
  * so the reader always knows to ask for the rest.
  */
+export function clampWithMarker(raw: string, max: number, what = "text"): string {
+  const text = String(raw ?? "");
+  if (text.length <= max) return text;
+  const marker = ` ...[TRUNCATED - ${text.length - max} more chars of ${what} were discarded at write time and are NOT recoverable]`;
+  return text.slice(0, Math.max(0, max - marker.length)) + marker;
+}
+
 export function clampBroadcastSummary(raw: string, max = Config.BROADCAST_SUMMARY_MAX): string {
   const text = String(raw ?? "");
   if (text.length <= max) return text;

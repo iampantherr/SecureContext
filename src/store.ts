@@ -146,7 +146,8 @@ export interface FetchStats {
 
 export interface Store {
   // ── Working Memory ──────────────────────────────────────────────────────────
-  remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi?: EpistemicOpts): Promise<void>;
+  /** Returns an effect-verification result when a write did not round-trip as requested (v0.52.0). */
+  remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi?: EpistemicOpts): Promise<import("./effect_verify.js").VerifyResult | void>;
   forget(projectPath: string, key: string, agentId: string): Promise<boolean>;
   // M1 (v0.41.0): optional focus re-ranks live facts by blended relevance to the
   // agent's current task; without it, ordering is unchanged (backward-compatible).

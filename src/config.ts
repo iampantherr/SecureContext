@@ -204,6 +204,18 @@ export const Config = {
   // v0.51.7 — broadcast summaries carry TASK BRIEFS between agents. The old
   // 1000-char clamp silently cut an ASSIGN mid-sentence, costing the worker its
   // acceptance criteria. Truncation past this is marked explicitly, never silent.
+  // v0.52.0 — effect verification. Every mutation reads back what it persisted
+  // and diffs it against what was requested; divergence is reported, never
+  // silent. ZC_EFFECT_VERIFY=0 disables (previous behaviour, byte-identical).
+  EFFECT_VERIFY:          (env["ZC_EFFECT_VERIFY"] ?? "1") !== "0",
+  // Hard-fail a write whose 'exact' fields did not round-trip, instead of
+  // returning ok:true with a discrepancy notice. Off by default: reporting is
+  // enough to end the silence, and failing writes mid-session is disruptive.
+  EFFECT_VERIFY_STRICT:   (env["ZC_EFFECT_VERIFY_STRICT"] ?? "0") === "1",
+  // Empty-result anomaly detector: how much history before it may fire, and how
+  // often an operation may legitimately return empty before we stop flagging it.
+  EMPTY_ANOMALY_MIN_SAMPLES: parseInt(env["ZC_EMPTY_ANOMALY_MIN_SAMPLES"] ?? "8", 10),
+  EMPTY_ANOMALY_MAX_RATE:    parseFloat(env["ZC_EMPTY_ANOMALY_MAX_RATE"] ?? "0.2"),
   BROADCAST_SUMMARY_MAX:  parseInt(env["ZC_BROADCAST_SUMMARY_MAX"] ?? "4000", 10),
   PINNED_MAX_CHARS:       parseInt(env["ZC_PINNED_MAX_CHARS"] ?? "15000", 10),
 

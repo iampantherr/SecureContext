@@ -3378,7 +3378,7 @@ export async function createApiServer(storeOverride?: Store) {
         const hdr = request.headers["x-zc-user"];
         if (typeof hdr === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(hdr)) epi.createdBy = hdr;
       }
-      await store.remember(pp, key, value, Number(importance), String(agentId), epi);
+      const _verify = await store.remember(pp, key, value, Number(importance), String(agentId), epi);
       // v0.31.0 — re-arm the contradiction scan for this project. A new fact can form
       // a contradiction with an existing one, so the next recall must re-scan. Without
       // this the guard is once-per-PROCESS and mid-run contradictions go undetected
@@ -3392,7 +3392,13 @@ export async function createApiServer(storeOverride?: Store) {
       if (Number(importance) === 5) {
         try { imp5Count = await store.countImportance5(pp, String(agentId)); } catch { /* best-effort */ }
       }
-      return { ok: true, count: stats.count, max: stats.max, imp5Count };
+      // v0.52.0 — effect verification travels back to the CALLER. A discrepancy
+      // that only reaches a log is still silent from the agent's point of view,
+      // and the agent is the one that can act on it.
+      const _v = _verify && !_verify.ok ? { verified: false, discrepancies: _verify.discrepancies, warning: _verify.notice }
+               : _verify && _verify.discrepancies.length ? { verified: true, warning: _verify.notice }
+               : { verified: true };
+      return { ok: true, count: stats.count, max: stats.max, imp5Count, ..._v };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

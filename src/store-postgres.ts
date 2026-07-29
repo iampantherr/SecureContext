@@ -36,8 +36,9 @@ import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
 import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
-import { classifyFactKind, clampBroadcastSummary, MEMORY_KINDS, type EpistemicOpts } from "./memory.js";
+import { classifyFactKind, clampBroadcastSummary, clampWithMarker, MEMORY_KINDS, type EpistemicOpts } from "./memory.js";
 import { isPinnedKind } from "./memory_quality.js";
+import { verifyWrite, type VerifyResult } from "./effect_verify.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance } from "./recall_budget.js";
 import { extractCoReferences, extractCoReferencesAsync, classifyRelation, graphMaxNodes } from "./indexing/community.js";
@@ -201,10 +202,14 @@ export class PostgresStore implements Store {
 
   // ── Working Memory ────────────────────────────────────────────────────────
 
-  async remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi: EpistemicOpts = {}): Promise<void> {
+  async remember(projectPath: string, key: string, value: string, importance: number, agentId: string, epi: EpistemicOpts = {}): Promise<VerifyResult | void> {
     const projectHash = ph(projectPath);
     const safeKey    = sanitize(key,     100);
-    const clamped500 = sanitize(value,   500);
+    // v0.52.0 — a clamp that the caller cannot detect is a silent failure, which
+    // effect verification now flags on every write. Announce it instead: the
+    // detector immediately caught this one on its first live run (900 chars in,
+    // 500 stored, {ok:true} out, 400 chars gone with no trace).
+    const clamped500 = clampWithMarker(sanitize(value, 100_000), 500, "fact value");
     const safeImp    = Math.max(1, Math.min(5, Math.round(importance)));
     const safeAgent  = sanitize(agentId,  64);
     const now        = new Date().toISOString();
@@ -252,7 +257,7 @@ export class PostgresStore implements Store {
       return Number.isFinite(t) && t > Date.now() ? new Date(t).toISOString() : null;
     })();
 
-    await this.pool.query(`
+    const _ins = await this.pool.query(`
       INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin, expires_at, created_by)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT(project_hash, key, agent_id) DO UPDATE SET
@@ -269,8 +274,29 @@ export class PostgresStore implements Store {
         valid_to          = NULL,
         superseded_by     = NULL,
         retired_reason    = NULL
+      RETURNING key, value, importance, kind, agent_id
     `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires, epi.createdBy ? sanitize(epi.createdBy, 64) : null]);
     // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
+
+    // v0.52.0 — EFFECT VERIFICATION. Compare what the database actually stored
+    // against what the caller asked for. This is the detector that would have
+    // caught the kind:'constraint' -> 'fact' coercion on the day it shipped,
+    // instead of three live E2E rounds later. `kind` is 'exact' precisely
+    // because silently changing it is the bug; `value` is 'lossy-marked' so a
+    // clamp must announce itself.
+    let verification: VerifyResult | undefined;
+    if (Config.EFFECT_VERIFY) {
+      const stored = _ins.rows?.[0] ?? {};
+      verification = verifyWrite(
+        { key: safeKey, value, importance: safeImp, kind: safeKind, agent_id: safeAgent },
+        stored as Record<string, unknown>,
+        { key: "exact", kind: "exact", importance: "exact", agent_id: "exact", value: "lossy-marked" },
+        { operation: "zc_remember" }
+      );
+      if (!verification.ok && Config.EFFECT_VERIFY_STRICT) {
+        throw new Error(`effect verification failed — ${verification.notice}`);
+      }
+    }
 
     // v0.36.0 — memory facts are now co-reference sources, so a memory WRITE must refresh
     // the backlink graph too (previously only indexing did — memory edges would go stale).
@@ -336,6 +362,10 @@ export class PostgresStore implements Store {
         await this.index(projectPath, row.value, `memory:${safeAgent}:${row.key}`);
       }
     }
+
+    // Surfaced to the caller so the AGENT sees it — a discrepancy that only
+    // reaches a log is still a silent failure from the agent's point of view.
+    return verification;
   }
 
   // ── v0.37.0 Temporal fact retirement ───────────────────────────────────────
