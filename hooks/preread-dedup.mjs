@@ -165,6 +165,32 @@ try {
     process.exit(0);
   }
 
+  // ─── STAGE 1.5 — TASK-BRIEF EXEMPTION ───────────────────────────────────
+  //
+  // A task brief must be readable IN FULL, always. Found live: an orchestrator
+  // moved full task briefs into TASK_*.md files precisely because broadcast
+  // summaries were being clamped, and then this hook redirected the worker to a
+  // ~5-line summary of its own acceptance criteria. Two features fighting: the
+  // workaround for one truncation defeated by another truncation.
+  //
+  // A summary of a brief is not a brief. Acceptance criteria, scope, and RED-gate
+  // requirements are exactly the detail a summary drops, and a worker that acts
+  // on the summary builds against invented criteria.
+  // Match on the BASENAME, split on either separator. An earlier version put the
+  // separator inside the regex as [\/], which in a JS regex literal is a forward
+  // slash only — so it never matched a Windows path like C:\...\TASK_FOO.md and
+  // the exemption was dead in practice. My own verification used forward slashes
+  // and passed, which is exactly how the bug survived. Basename comparison has no
+  // separator logic to get wrong.
+  const briefBase = String(path).split(/[\\/]/).pop() ?? "";
+  const briefLike = /^(TASK|BRIEF|SPEC|ACCEPTANCE|PENDING_WORK|HANDOFF)/i.test(briefBase)
+                 && /\.md$/i.test(briefBase);
+  if (briefLike) {
+    await emitPretoolEvent("pass_brief_exempt", "task brief must be read in full");
+    process.stdout.write(JSON.stringify({ continue: true }));
+    process.exit(0);
+  }
+
   // ─── STAGE 2 — SUMMARY REDIRECT ─────────────────────────────────────────
   if (summaryRedirectEnabled) {
     let summary = null;

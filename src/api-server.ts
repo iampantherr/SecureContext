@@ -605,8 +605,15 @@ export async function createApiServer(storeOverride?: Store) {
       const filePath = typeof b["filePath"] === "string" ? b["filePath"].slice(0, 1024) : null;
       const outcome  = String(b["outcome"] ?? "error").slice(0, 32);
       const detail   = typeof b["detail"] === "string" ? b["detail"].slice(0, 2048) : null;
+      // v0.52.6 — 'pass_brief_exempt' added. Its absence made the hook's new
+      // task-brief exemption UNOBSERVABLE: the hook posts fire-and-forget, this
+      // endpoint 400s an unknown outcome, and the error was swallowed. So I could
+      // not tell whether my own detector had fired, because the observability
+      // path silently dropped the value — the same silent-rejection class, one
+      // layer further out. Any new hook outcome must be added here or it vanishes.
       const allowed = ["redirect", "block_unindexed", "block_dedup",
-                       "bypass_force_read", "bypass_partial_read", "pass_through", "error"];
+                       "bypass_force_read", "bypass_partial_read", "pass_through",
+                       "pass_brief_exempt", "error"];
       if (!allowed.includes(outcome)) {
         return reply.status(400).send({ error: `outcome must be one of ${allowed.join(", ")}` });
       }
