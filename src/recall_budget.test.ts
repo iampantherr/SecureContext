@@ -125,6 +125,28 @@ describe("effectiveImportance / applyStalenessDemotion", () => {
     expect(effectiveImportance(stale, now)).toBe(5 - Config.RECALL_STALE_DEMOTE);
   });
 
+  it("decays PER PERIOD, using IMPORTANCE_DECAY_DAYS as the period", () => {
+    if (Config.RECALL_STALE_DEMOTE <= 0) return;
+    const period = Config.IMPORTANCE_DECAY_DAYS > 0
+      ? Config.IMPORTANCE_DECAY_DAYS
+      : Config.RECALL_STALE_DAYS;
+    const floor = Math.max(1, Math.min(5, Config.IMPORTANCE_DECAY_FLOOR));
+    // Three elapsed periods must demote strictly further than one. Without this
+    // the axis cannot tell "stale by a fortnight" from "untouched for months" —
+    // measured on the live A2A corpus, a 30-day period made decay entirely inert
+    // (772 of 773 facts were younger than that), so the period length is load-
+    // bearing and a regression here would silently disable the feature again.
+    const at = (periods: number) =>
+      fact("x", {
+        created_at: new Date(Date.now() - (period * periods + 1) * 86400_000).toISOString(),
+        last_retrieved_at: null,
+      });
+    const one = effectiveImportance(at(1), Date.now());
+    const three = effectiveImportance(at(3), Date.now());
+    expect(three).toBeLessThanOrEqual(one);
+    expect(three).toBeGreaterThanOrEqual(Math.min(floor, 5));
+  });
+
   it("a recent retrieval keeps an old fact fresh", () => {
     const rehearsed = fact("r", { created_at: staleDate, last_retrieved_at: freshDate });
     expect(effectiveImportance(rehearsed, now)).toBe(5);

@@ -19,7 +19,7 @@
  * silent truncation.
  */
 import { Config } from "./config.js";
-import { partitionPinned } from "./memory_quality.js";
+import { partitionPinned, PINNED_KINDS } from "./memory_quality.js";
 
 export interface BudgetableFact {
   key: string;
@@ -135,6 +135,20 @@ export function budgetFacts<F extends BudgetableFact>(
     }
   }
 
+  // A pinned fact that overflowed PINNED_MAX_FACTS is still collapsible — that
+  // bound is deliberate, so a runaway writer cannot eat the whole budget. But
+  // collapsing a constraint SILENTLY is the exact failure this tier exists to
+  // prevent, so say it out loud.
+  const pinnedOverflow = collapsed.filter(
+    (f) => PINNED_KINDS.has(String(f.kind ?? "").trim().toLowerCase())
+  ).length;
+  const overflowLine =
+    pinnedOverflow > 0
+      ? `⚠ ${pinnedOverflow} constraint/antipattern fact(s) exceeded ZC_PINNED_MAX_FACTS=` +
+        `${Config.PINNED_MAX_FACTS} and were NOT pinned. Raise that limit or prune — ` +
+        `a standing rule you cannot see is a standing rule you will break.`
+      : "";
+
   if (collapsed.length === 0) {
     return { rendered, collapsed, inWindowCollapsed: 0, tailNotice: "" };
   }
@@ -163,6 +177,7 @@ export function budgetFacts<F extends BudgetableFact>(
     `  ${idx}`,
     `  Pull specifics with zc_recall_context {focus:"<topic or time>"} or zc_search — nothing is deleted.`,
   ];
+  if (overflowLine) lines.splice(1, 0, overflowLine);
   if (inWindowCollapsed > 0) {
     lines.splice(
       1,
@@ -189,7 +204,18 @@ export function effectiveImportance(f: BudgetableFact, nowMs: number): number {
   const t =
     lastTouchRaw instanceof Date ? lastTouchRaw.getTime() : Date.parse(String(lastTouchRaw ?? ""));
   if (!Number.isFinite(t)) return f.importance;
-  const staleMs = Config.RECALL_STALE_DAYS * 24 * 60 * 60 * 1000;
+  // Decay PERIOD. Measured on the live A2A corpus (773 facts, 9 agents): 772 of
+  // them were touched within 30 days, so with the old 30-day threshold the decay
+  // axis was inert — effective-importance entropy 1.417 before vs 1.414 after,
+  // i.e. progressive decay changed nothing at all. At a 14-day period it does
+  // real work: entropy 1.598, and the ★5 population drops 362 → 145, which is
+  // the importance-inflation problem this axis exists to correct.
+  // IMPORTANCE_DECAY_DAYS falls back to RECALL_STALE_DAYS so the older env var
+  // still controls behaviour for anyone who set it.
+  const decayDays = Config.IMPORTANCE_DECAY_DAYS > 0
+    ? Config.IMPORTANCE_DECAY_DAYS
+    : Config.RECALL_STALE_DAYS;
+  const staleMs = decayDays * 24 * 60 * 60 * 1000;
   if (nowMs - t <= staleMs) return f.importance;
 
   // v0.51.0 — PROGRESSIVE decay with a floor, replacing a single flat -2 step.

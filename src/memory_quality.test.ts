@@ -207,3 +207,36 @@ describe("kind enum drift — seven copies is how a write silently loses a field
     expect(src).not.toMatch(/const KINDS = \["fact", "decision", "hypothesis", "prediction"\]/);
   });
 });
+
+describe("pinned overflow is announced, never silent", () => {
+  it("says so when constraints exceed PINNED_MAX_FACTS", async () => {
+    const { budgetFacts } = await import("./recall_budget.js");
+    const { Config } = await import("./config.js");
+    const over = Config.PINNED_MAX_FACTS + 5;
+    const facts = Array.from({ length: over }, (_, i) => ({
+      key: `C_${i}`,
+      value: "x".repeat(400),
+      importance: 3,
+      kind: "constraint",
+      created_at: new Date().toISOString(),
+    }));
+    // Budget small enough that the overflowed constraints cannot fit as normal facts.
+    const r = budgetFacts(facts, { maxChars: 200 });
+    expect(r.collapsed.length).toBeGreaterThan(0);
+    expect(r.tailNotice).toContain("exceeded ZC_PINNED_MAX_FACTS");
+  });
+
+  it("stays quiet when nothing pinned overflowed", async () => {
+    const { budgetFacts } = await import("./recall_budget.js");
+    const facts = Array.from({ length: 40 }, (_, i) => ({
+      key: `N_${i}`,
+      value: "y".repeat(400),
+      importance: 5,
+      kind: "fact",
+      created_at: new Date().toISOString(),
+    }));
+    const r = budgetFacts(facts, { maxChars: 1000 });
+    expect(r.collapsed.length).toBeGreaterThan(0);
+    expect(r.tailNotice).not.toContain("ZC_PINNED_MAX_FACTS");
+  });
+});
