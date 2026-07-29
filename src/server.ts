@@ -1496,7 +1496,25 @@ async function _handleRemoteTool(
               `When everything is critical, nothing is — reserve ★5 for facts whose loss breaks future sessions; ` +
               `use ★3-4 for work-log entries, or add ttl_days for per-task notes.`
             : "";
-          return { content: [{ type: "text", text: `Remembered under agent_id='${body["agent_id"] ?? AGENT_ID}'. Working memory: ${result["count"]}/${result["max"]} facts${imp5Note}` }] };
+          // v0.52.3 — surface effect verification TO THE AGENT.
+          //
+          // Caught by a live terminal agent, not by tests: the API returned
+          // {verified, discrepancies, warning} and this MCP layer dropped every
+          // one of them, formatting its own bare success string. So the whole
+          // detector worked at the layer I tested with curl and was invisible at
+          // the layer agents actually use — precisely the silent failure it was
+          // built to catch, reproduced one level up.
+          //
+          // A discrepancy that does not reach the caller is not a detection.
+          const verifyNote = result["verified"] === false
+            ? `\n\n[!] WRITE DID NOT STORE WHAT YOU ASKED FOR — treat this write as FAILED:\n` +
+              (Array.isArray(result["discrepancies"])
+                ? (result["discrepancies"] as Array<{ detail?: string }>).map((d) => `  - ${d.detail ?? ""}`).join("\n")
+                : String(result["warning"] ?? ""))
+            : typeof result["warning"] === "string" && result["warning"]
+              ? `\n${result["warning"]}`
+              : "";
+          return { content: [{ type: "text", text: `Remembered under agent_id='${body["agent_id"] ?? AGENT_ID}'. Working memory: ${result["count"]}/${result["max"]} facts${imp5Note}${verifyNote}` }] };
         }
 
       case "zc_memory_contradictions":
@@ -1679,7 +1697,16 @@ async function _handleRemoteTool(
           return { content: [{ type: "text", text: _fmtGlobalAnswer(g) }] };
         }
         const results = sr["results"] as Array<{ source: string; snippet: string; createdAt?: string }> ?? [];
-        if (results.length === 0) return { content: [{ type: "text", text: "No results found." }] };
+        // v0.52.4 - surface the empty-result anomaly TO THE AGENT. Same bug as
+        // zc_remember: the API returned a warning and this layer dropped it,
+        // printing a bare "No results found." A detector whose output never
+        // reaches the caller has not detected anything.
+        if (results.length === 0) {
+          const w = typeof sr["warning"] === "string" && sr["warning"] ? `
+
+${sr["warning"]}` : "";
+          return { content: [{ type: "text", text: `No results found.${w}` }] };
+        }
         // TR-2 — timeline block for temporal questions + per-result staleness notes.
         const timeline = _fmtTemporalTimeline((body["queries"] as string[] ?? []).join(" "), results);
         // T5b — deterministic temporal computation (interval/ordering/ago) from

@@ -209,7 +209,7 @@ export class PostgresStore implements Store {
     // effect verification now flags on every write. Announce it instead: the
     // detector immediately caught this one on its first live run (900 chars in,
     // 500 stored, {ok:true} out, 400 chars gone with no trace).
-    const clamped500 = clampWithMarker(sanitize(value, 100_000), 500, "fact value");
+    const clamped500 = clampWithMarker(sanitize(value, 100_000), Math.max(500, epi.valueMax ?? 0), "fact value");
     const safeImp    = Math.max(1, Math.min(5, Math.round(importance)));
     const safeAgent  = sanitize(agentId,  64);
     const now        = new Date().toISOString();
@@ -705,7 +705,12 @@ export class PostgresStore implements Store {
     const now  = new Date().toISOString();
     const source = `[SESSION_SUMMARY] ${now.slice(0, 10)}`;
     await this.index(projectPath, safe, source, "internal", "summary");
-    await this.remember(projectPath, "last_session_summary", safe, 5, "default");
+    // v0.52.4 - a live agent found this one: zc_summarize_session silently lost
+    // 1500 chars of session summary and reported "Session summary archived."
+    // The session summary is what the NEXT session reads to resume, so a silent
+    // clamp here loses continuity precisely where it matters most.
+    await this.remember(projectPath, "last_session_summary", safe, 5, "default",
+                        { valueMax: Config.BROADCAST_SUMMARY_MAX });
   }
 
   async getMemoryStats(projectPath: string, agentId: string): Promise<MemoryStats> {
@@ -1331,6 +1336,26 @@ export class PostgresStore implements Store {
         });
 
         scored.sort((a, b) => b.hybridScore - a.hybridScore);
+
+        // v0.52.3 - RELEVANCE FLOOR. Caught by a live terminal agent: searching
+        // 'zzzqqxx_no_such_token_anywhere_12345' returned TEN results. BM25
+        // correctly matched nothing, then the vector channel filled the pool with
+        // its ten nearest neighbours regardless of distance - so a query with no
+        // answer produced ten plausible-looking answers, and an agent acting on
+        // them would be acting on noise.
+        //
+        // Nearest-neighbour is always defined; RELEVANT is not. Drop candidates
+        // whose vector score clears no meaningful bar, but only when BM25 also
+        // found nothing (a real keyword hit is evidence on its own).
+        // ZC_SEARCH_MIN_COSINE=0 restores the previous behaviour exactly.
+        const _floor = Config.SEARCH_MIN_COSINE;
+        if (_floor > 0) {
+          const _kept = scored.filter((r) => (r.rank ?? 0) > 0 || (r.vectorScore ?? 0) >= _floor);
+          if (_kept.length !== scored.length) {
+            scored.length = 0;
+            scored.push(..._kept);
+          }
+        }
 
         // Lever-4: stale same-subject events collapse to the latest BEFORE the
         // cap (freed slots refill) — but never on solver sub-searches, which

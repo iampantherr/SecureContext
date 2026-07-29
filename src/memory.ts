@@ -298,6 +298,13 @@ export type Provenance = "EXTRACTED" | "INFERRED" | "AMBIGUOUS" | "UNKNOWN";
 
 /** v0.31.0 — optional epistemic metadata accepted by zc_remember / rememberFact. */
 export interface EpistemicOpts {
+  /**
+   * v0.52.4 - explicit value budget for records that legitimately need more than
+   * the 500-char default. The session summary is the clearest case: it is what
+   * the NEXT session reads to resume, and it was losing 1500 chars silently
+   * between archiveSummary's 2000-char clamp and remember's 500-char one.
+   */
+  valueMax?: number;
   kind?:       MemoryKind;
   confidence?: number | null;
   resolution?: ResolutionStatus | null;

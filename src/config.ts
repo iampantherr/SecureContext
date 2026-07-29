@@ -207,6 +207,10 @@ export const Config = {
   // v0.52.0 — effect verification. Every mutation reads back what it persisted
   // and diffs it against what was requested; divergence is reported, never
   // silent. ZC_EFFECT_VERIFY=0 disables (previous behaviour, byte-identical).
+  // v0.52.3 - minimum cosine for a VECTOR-only search hit. Nearest-neighbour is
+  // always defined; relevant is not. Without a floor, a nonsense query returns
+  // the ten nearest documents and looks like a real answer. 0 disables.
+  SEARCH_MIN_COSINE:      parseFloat(env["ZC_SEARCH_MIN_COSINE"] ?? "0.28"),
   EFFECT_VERIFY:          (env["ZC_EFFECT_VERIFY"] ?? "1") !== "0",
   // Hard-fail a write whose 'exact' fields did not round-trip, instead of
   // returning ok:true with a discrepancy notice. Off by default: reporting is
@@ -214,7 +218,9 @@ export const Config = {
   EFFECT_VERIFY_STRICT:   (env["ZC_EFFECT_VERIFY_STRICT"] ?? "0") === "1",
   // Empty-result anomaly detector: how much history before it may fire, and how
   // often an operation may legitimately return empty before we stop flagging it.
-  EMPTY_ANOMALY_MIN_SAMPLES: parseInt(env["ZC_EMPTY_ANOMALY_MIN_SAMPLES"] ?? "8", 10),
+  // Lowered from 8 after a live agent test: with 8 required samples the detector
+  // could not fire within a normal session, so it was effectively dead config.
+  EMPTY_ANOMALY_MIN_SAMPLES: parseInt(env["ZC_EMPTY_ANOMALY_MIN_SAMPLES"] ?? "4", 10),
   EMPTY_ANOMALY_MAX_RATE:    parseFloat(env["ZC_EMPTY_ANOMALY_MAX_RATE"] ?? "0.2"),
   BROADCAST_SUMMARY_MAX:  parseInt(env["ZC_BROADCAST_SUMMARY_MAX"] ?? "4000", 10),
   PINNED_MAX_CHARS:       parseInt(env["ZC_PINNED_MAX_CHARS"] ?? "15000", 10),
