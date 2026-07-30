@@ -98,6 +98,34 @@ const sessionCwd = input.cwd ?? process.cwd();
 const projectPath0 = resolveProjectRoot(rawPath, sessionCwd);
 const path = normalizeForLookup(rawPath, projectPath0);
 
+/**
+ * Feed `reason` back to the model as the Read result, and let the turn CONTINUE.
+ *
+ * The previous shape was `{continue: false, decision: "block", reason}`. In the
+ * hook protocol `continue: false` means "stop processing entirely", so every
+ * redirected Read ENDED THE AGENT'S TURN. Measured with the real CLI:
+ *
+ *   "permission_denials":[{"tool_name":"Read",...}]
+ *   "terminal_reason":"hook_stopped"
+ *   "result":""
+ *
+ * The summary and impact were delivered and then the agent was stopped before it
+ * could use them -- a token saving that cost a whole turn, and the reason a
+ * human operator kept seeing sessions halt mid-task.
+ *
+ * permissionDecision "deny" + permissionDecisionReason returns the text as the
+ * tool result. The agent reads the summary, sees the impact, and keeps working.
+ */
+function denyWithReason(reason) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    },
+  };
+}
+
 // ─── Bypass checks ──────────────────────────────────────────────────────────
 const forceFullRead = toolArgs.force_full_read === true || toolArgs.force === true;
 const partialRead   = toolArgs.offset !== undefined || toolArgs.limit !== undefined;
@@ -244,11 +272,7 @@ try {
       `If you genuinely need to re-Read (e.g. the file was externally modified), ` +
       `add "force_full_read": true to the Read arguments or set ZC_READ_DEDUP_ENABLED=0.`;
     await emitPretoolEvent("block_dedup", "duplicate read in same session");
-    process.stdout.write(JSON.stringify({
-      continue: false,
-      decision: "block",
-      reason: hint,
-    }));
+    process.stdout.write(JSON.stringify(denyWithReason(hint)));
     process.exit(0);
   }
 
@@ -351,11 +375,7 @@ try {
       // v0.22.9 — also fire the generic pretool-event telemetry
       await emitPretoolEvent("redirect", `summary served, l0=${summary.l0?.length ?? 0}b l1=${summary.l1?.length ?? 0}b`);
 
-      process.stdout.write(JSON.stringify({
-        continue: false,
-        decision: "block",
-        reason: replacement,
-      }));
+      process.stdout.write(JSON.stringify(denyWithReason(replacement)));
       process.exit(0);
     }
 
@@ -386,11 +406,7 @@ try {
         `summaries to be created on-demand, the index builds as you work. Set\n` +
         `ZC_SUMMARY_REDIRECT=0 to disable globally.`;
       await emitPretoolEvent("block_unindexed", "no L0/L1 summary in source_meta");
-      process.stdout.write(JSON.stringify({
-        continue: false,
-        decision: "block",
-        reason: hint,
-      }));
+      process.stdout.write(JSON.stringify(denyWithReason(hint)));
       process.exit(0);
     }
   }
