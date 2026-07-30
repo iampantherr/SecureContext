@@ -311,16 +311,31 @@ export function resolveCallGraph(files: FileCalls[]): CallGraph {
       const all = declIndex.get(callee);
       if (!all) { external++; continue; }
 
-      // An explicit import names one file, which settles both same-name
-      // collisions and the common-method denylist: `import { close }` really
-      // is that close, unlike a stray db.close().
-      const pinned = binding?.from ? all.filter(t => t.path === binding.from) : [];
-      const targets = pinned.length === 1 ? pinned : all;
+      // Two things settle a same-name collision, in the order a reader would:
+      //  - an explicit import names the file (`import { close }` is that close,
+      //    unlike a stray db.close());
+      //  - otherwise a declaration in this very file wins, because that is what
+      //    lexical scope does. Without this, two files each declaring a private
+      //    `ph` helper made all 36 of their local calls ambiguous — the tool
+      //    blaming the code for its own name-only resolution.
+      const pinned   = binding?.from ? all.filter(t => t.path === binding.from) : [];
+      const sameFile = all.filter(t => t.path === f.path);
 
-      const relation: CallRelation =
-        pinned.length === 1                                    ? "calls"
-        : targets.length > 1 || AMBIGUOUS_NAMES.has(callee)    ? "calls_ambiguous"
-        :                                                        "calls";
+      // A property call has an unknown receiver, so a common name stays untrusted
+      // even when this file happens to declare one: `db.close()` is not our close.
+      const localTrustworthy =
+        sameFile.length === 1 && !(site.viaProperty && AMBIGUOUS_NAMES.has(callee));
+
+      let targets: CallDecl[];
+      let relation: CallRelation;
+      if (pinned.length === 1) {
+        targets = pinned;   relation = "calls";
+      } else if (localTrustworthy) {
+        targets = sameFile; relation = "calls";
+      } else {
+        targets = all;
+        relation = all.length > 1 || AMBIGUOUS_NAMES.has(callee) ? "calls_ambiguous" : "calls";
+      }
       if (relation === "calls") resolved++; else ambiguous++;
 
       const from = nodeId(f.path, site.from);

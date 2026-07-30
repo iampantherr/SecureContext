@@ -22,7 +22,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Config } from "./config.js";
 import type { BroadcastType } from "./memory.js";
 import { projectHash as scopedProjectHash } from "./store.js";
@@ -74,11 +74,6 @@ function uuidV4(): string {
     hex.slice(12, 16), hex.slice(16, 20),
     hex.slice(20, 32),
   ].join("-");
-}
-
-/** Compute the project hash (16-char SHA256 prefix) */
-function projectHash(projectPath: string): string {
-  return scopedProjectHash(projectPath);
 }
 
 /**
@@ -138,7 +133,7 @@ export function issueToken(
   const signingKey = getOrCreateSigningKey(db);
   const nowSec     = Math.floor(Date.now() / 1000);
   const tid        = uuidV4();
-  const ph         = projectHash(projectPath);
+  const ph         = scopedProjectHash(projectPath);
 
   const payload: TokenPayload = {
     tid,
@@ -197,7 +192,7 @@ export function verifyToken(
     if (typeof payload.iat !== "number" || typeof payload.exp !== "number") return null;
 
     // Project binding: reject tokens for a different project (Chapter 11 — scoped capability)
-    const expectedPh = projectHash(projectPath);
+    const expectedPh = scopedProjectHash(projectPath);
     if (payload.ph !== expectedPh) return null;
 
     // Expiry check

@@ -136,6 +136,24 @@ describe("resolveCallGraph", () => {
     expect(impactOf(g, nodeId("store.ts", "close"))).toMatchObject({ callers: 1, sites: 1 });
   });
 
+  it("prefers a declaration in the calling file, as lexical scope does", async () => {
+    // Two files each with a private `ph` helper: 36 real call sites were
+    // ambiguous because name-only lookup found both.
+    const g = resolveCallGraph(await build({
+      "a.ts": `function ph(p: string) { return p; }\nfunction useA() { ph("x"); }`,
+      "b.ts": `function ph(p: string) { return p; }\nfunction useB() { ph("y"); }`,
+    }));
+    expect(impactOf(g, nodeId("a.ts", "ph"))).toMatchObject({ callers: 1, files: ["a.ts"] });
+    expect(impactOf(g, nodeId("b.ts", "ph"))).toMatchObject({ callers: 1, files: ["b.ts"] });
+  });
+
+  it("still distrusts a property call on a common name declared locally", async () => {
+    const g = resolveCallGraph(await build({
+      "a.ts": `function close() {}\nfunction main(db: any) { db.close(); }`,
+    }));
+    expect(impactOf(g, nodeId("a.ts", "close")).callers).toBe(0);
+  });
+
   it("drops calls to symbols this repo does not declare", async () => {
     const g = resolveCallGraph(await build({ "app.ts": `function main() { JSON.parse("{}"); }` }));
     expect(g.edges).toHaveLength(0);
@@ -179,17 +197,32 @@ describe("oracle: SecureContext's own src/", () => {
     expect(byName("verifyWrite")).toBe(2);
 
     // The symbol that reported a fabricated zero twice — once for the import
-    // alias, once because it is declared in two files. 31 distinct callers was
-    // established by hand. This assertion is the guard for both regressions.
+    // alias, once because it was declared in two files. This is the guard for
+    // both regressions.
+    //
+    // The hand count was 31. It is 32 because removing the same-named
+    // passthrough wrapper in access-control.ts (found BY this graph) promoted
+    // issueToken and verifyToken from callers-of-the-wrapper to callers of the
+    // canonical helper: -1 wrapper, +2 real callers. The graph tracked an edit
+    // to its own repo correctly, which is the behaviour being shipped.
     const ph = impactOf(g, nodeId("store.ts", "projectHash"));
-    expect(ph.callers).toBe(31);
+    expect(ph.callers).toBe(32);
     expect(ph.files.length).toBe(18);
     expect(ph.sites).toBeGreaterThan(ph.callers);   // several callers call it twice
 
-    // The probe's noise symbols must land in the ambiguous bucket, not fan-in.
-    for (const noisy of ["close", "run", "add"]) {
-      expect(byName(noisy)).toBe(0);
-    }
+    // The probe's noise symbols (70 'callers' of close) must not become fan-in.
+    // close and run have no bare local calls anywhere, so they stay at zero.
+    expect(byName("close")).toBe(0);
+    expect(byName("run")).toBe(0);
+
+    // `add` is the honest exception, and asserting 0 here would be wrong:
+    // memory.ts:270 and retrieval_advanced.ts:132 each declare a local
+    // `const add = ...` helper that is called bare in the same file. Those are
+    // real edges. Every Set.add()/Map.add() alongside them is a property call
+    // with an unknown receiver and is still excluded.
+    expect(byName("add")).toBe(3);
+    expect(impactOf(g, nodeId("memory.ts", "add")))
+      .toMatchObject({ callers: 1, sites: 14, files: ["memory.ts"] });
 
     // Coverage must be honest and visible, never silently zero.
     expect(g.stats.dynamicSites).toBeGreaterThan(0);
