@@ -183,15 +183,3 @@ export const ANTHROPIC_SKILL_STANDARD = [
   COMPOSITION_RULES,
 ].join("\n");
 
-/**
- * Short-form summary — used in places where the full text is too verbose
- * but a reminder is still useful (e.g., dashboard tooltips, lint output).
- */
-export const STANDARD_TLDR = [
-  "Four invariants: (1) procedural-not-factual, (2) clear trigger,",
-  "(3) ≥3 occurrences, (4) progressive disclosure (L1/L2/L3).",
-  "Scripts: no eval/exec/shell=True/pickle; argparse + stdout; idempotent;",
-  "read project config from .<name>-config.json, never hardcode.",
-  "Scope: project-local by default; promote to global when proven in ≥2 projects.",
-  "Composition: prefer small composable skills; chain via Bash.",
-].join(" ");

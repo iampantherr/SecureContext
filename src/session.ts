@@ -62,29 +62,6 @@ function openDb(projectPath: string): DatabaseSync {
   return db;
 }
 
-export function getOrCreateSession(projectPath: string): number {
-  const db   = openDb(projectPath);
-  const hash = scopedProjectHash(projectPath);
-  const now  = new Date().toISOString();
-
-  type Row = { id: number };
-  const existing = db.prepare(
-    "SELECT id FROM sessions WHERE project_hash = ? AND last_active > ? ORDER BY last_active DESC LIMIT 1"
-  ).get(hash, new Date(Date.now() - 86_400_000).toISOString()) as Row | undefined;
-
-  if (existing) {
-    db.prepare("UPDATE sessions SET last_active = ? WHERE id = ?").run(now, existing.id);
-    db.close();
-    return existing.id;
-  }
-
-  const result = db.prepare(
-    "INSERT INTO sessions(project_hash, created_at, last_active) VALUES (?, ?, ?)"
-  ).run(hash, now, now) as { lastInsertRowid: number | bigint };
-
-  db.close();
-  return Number(result.lastInsertRowid);
-}
 
 
 export function getRecentEvents(projectPath: string, limit = 50): SessionEvent[] {
