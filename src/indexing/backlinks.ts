@@ -104,17 +104,24 @@ export function rebuildBacklinks(db: DatabaseSync): BacklinkRebuildResult {
   try {
     // v0.37.0 — LLM-extracted entity edges (match_kind='entity') are a separate, budgeted
     // layer maintained by the entity extractor; the co-reference rebuild must not wipe them.
-    db.exec("DELETE FROM kb_edges WHERE match_kind <> 'entity'");
+    // v0.55.0 — same for match_kind='call' (the function call graph, owned by call_edges.ts).
+    // Without this predicate the call layer is emptied on the next indexContent and every
+    // impact answer silently becomes "nothing depends on this".
+    db.exec("DELETE FROM kb_edges WHERE match_kind NOT IN ('entity', 'call')");
     db.exec("DELETE FROM kb_backlinks");
     const ins = db.prepare(
       `INSERT OR REPLACE INTO kb_edges(from_source, to_source, relation_type, match_kind, weight, computed_at)
        VALUES (?, ?, ?, ?, ?, ?)`
     );
     for (const e of typed) ins.run(e.from, e.to, e.relation, e.matchKind, e.weight, now);
+    // Call edges are excluded from the aggregate on purpose: kb_backlinks feeds
+    // blBoost() in search ranking, and `func:...` nodes are not knowledge sources.
+    // Including them would silently change search results as a side effect of
+    // shipping the call graph.
     db.prepare(
       `INSERT INTO kb_backlinks(source, in_degree, weighted_in, computed_at)
        SELECT to_source, COUNT(DISTINCT from_source), SUM(weight), ?
-       FROM kb_edges GROUP BY to_source`
+       FROM kb_edges WHERE match_kind <> 'call' GROUP BY to_source`
     ).run(now);
     db.exec("COMMIT");
   } catch (e) {
@@ -209,7 +216,11 @@ export async function rebuildBacklinksPgAsync(projectPath: string, edges: TypedE
     const { withTransaction } = await import("../pg_pool.js");
     const projectHash = scopedProjectHash(projectPath);
     await withTransaction(async (c) => {
-      await c.query(`DELETE FROM kb_edges_pg     WHERE project_hash = $1`, [projectHash]);
+      // v0.55.0 — must exclude the call layer here too, or the PG mirror undoes
+      // what call_edges.ts just wrote. NOTE: unlike SQLite above, this delete does
+      // NOT spare match_kind='entity' — a pre-existing SQLite/PG divergence, left
+      // as-is because fixing it needs the entity extractor's own PG write path.
+      await c.query(`DELETE FROM kb_edges_pg     WHERE project_hash = $1 AND match_kind <> 'call'`, [projectHash]);
       await c.query(`DELETE FROM kb_backlinks_pg WHERE project_hash = $1`, [projectHash]);
 
       const CHUNK = 100;
@@ -234,7 +245,7 @@ export async function rebuildBacklinksPgAsync(projectPath: string, edges: TypedE
       await c.query(
         `INSERT INTO kb_backlinks_pg(project_hash, source, in_degree, weighted_in)
          SELECT $1, to_source, COUNT(DISTINCT from_source), SUM(weight)
-         FROM kb_edges_pg WHERE project_hash = $1 GROUP BY to_source
+         FROM kb_edges_pg WHERE project_hash = $1 AND match_kind <> 'call' GROUP BY to_source
          ON CONFLICT (project_hash, source) DO UPDATE SET
            in_degree = EXCLUDED.in_degree, weighted_in = EXCLUDED.weighted_in, computed_at = NOW()`,
         [projectHash],
