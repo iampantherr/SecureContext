@@ -10,8 +10,8 @@ const isBrief = (p) => {
 
 const W = String.raw;   // keep Windows paths literal
 const cases = [
-  [W`C:\Users\Amit\AI_projects\A2A_communication\TASK_DEV_P1NEW.md`, true,  "windows backslash brief"],
-  ["C:/Users/Amit/AI_projects/A2A_communication/TASK_DEV_P1NEW.md",  true,  "posix-style brief"],
+  [W`C:\repos\example-project\TASK_DEV_P1NEW.md`, true,  "windows backslash brief"],
+  ["C:/repos/example-project/TASK_DEV_P1NEW.md",  true,  "posix-style brief"],
   [W`C:\x\PENDING_WORK.md`,                                          true,  "pending work"],
   [W`C:\x\HANDOFF.md`,                                               true,  "handoff"],
   ["TASK_E2E_PROBE.md",                                              true,  "bare filename"],
