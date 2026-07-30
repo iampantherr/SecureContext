@@ -176,10 +176,10 @@ A per-file rebuild is O(file), not O(repo) — cheap enough to run on every writ
 | stage | deliverable | verifiable by |
 |---|---|---|
 | **1 ✅ DONE** | `extractFileCalls` + `resolveCallGraph` + `impactOf` in `indexing/call_graph.ts` | 14 tests + oracle green; `clampWithMarker`=4, `verifyWrite`=2, `projectHash`=31/18 files, `close`/`run`/`add` all ambiguous. Full suite 1,046 pass. See §4c for what it corrected. |
-| **2** | persist to `kb_edges` with `relation_type='calls'`; per-file incremental refresh | query `kb_edges` directly; re-run after an edit and confirm the delta |
-| **3** | `zc_impact(symbol)` MCP tool + API endpoint | live agent asks for a known-high-fan-in symbol |
-| **4** | PreRead hook impact block | **E2E terminal test** — an agent Reads a file and reports whether impact appeared and was accurate |
-| **5** | commit-time advisory | staged-diff dry run |
+| **2 ✅ DONE** | `indexing/call_edges.ts` — `match_kind='call'` in the existing `kb_edges`, PG mirrored | Full rebuild (429ms/107 files), NOT per-file: resolution is repo-wide, so refreshing only the changed file leaves stale edges pointing at it from elsewhere. Survives `rebuildBacklinks` (guard test fails without the carve-out). |
+| **3 ✅ DONE** | `zc_impact({file\|symbol})`, `GET /api/v1/graph/impact`, `callImpactFor` on BOTH stores | Live against the running server: `withClient` 126 callers / 42 files / 197 sites, identical on SQLite and Postgres. |
+| **4 ✅ DONE** | impact appended to both PreRead block paths, `crossFileOnly`, kill switch `ZC_IMPACT_ON_READ=0` | Real `claude -p` session on a throwaway repo: agent received the block and independently verified the count against source. Exposed two defects — wrong-project lookup from the session cwd, and `continue:false` ending the turn. |
+| **5 ✅ DONE** | `scripts/impact-advisory.mjs` — staged diff → changed lines → enclosing functions → callers | Staged an edit to a function with 3 hand-counted callers; advisory reported exactly 3 in 2 files. Exit code 0 in every path including a fatal git error. |
 
 Ground truth for stage 1 is unusually good here: this session established real numbers by hand (`projectHash` 42 sites, `clampWithMarker` 6, the MCP `warning` drop in 3). **If the extractor disagrees with those, the extractor is wrong** — that is a real oracle, not a fixture.
 
@@ -199,3 +199,35 @@ Ground truth for stage 1 is unusually good here: this session established real n
 2. **Cross-repo edges:** should `A2A_dispatcher` calling an SC MCP tool be an edge? Valuable but needs a shared node namespace. Recommend deferring to a later stage.
 3. **Fan-in threshold** for the ⚠ HIGH marker — the probe gives a real distribution now: a handful of genuine hubs at 20-122 (`withClient` 122, `ph` 35, `escapeHtml` 28, `sanitize` 26) and a long tail below 10. **Proposed: ⚠ at ≥ 10**, which flags roughly a dozen symbols repo-wide rather than hundreds.
 4. **Should the PreRead block be opt-out?** `ZC_IMPACT_ON_READ=0` for parity with the other kill switches. Recommend yes.
+
+
+---
+
+## 11. Closed out — what the five stages actually cost, and what they caught
+
+All five stages are implemented, verified, and pushed.
+
+**Measured result on this repo:** 4,645 call edges over 273 files, 2.6s for a full
+rebuild, 649 unresolved call sites reported rather than hidden, plus 14 cross-repo
+edges into 8 routes from A2A_dispatcher.
+
+**The defects this feature found while being built** — each one a confident wrong
+answer that a green test suite would have shipped:
+
+| found | what it was |
+|---|---|
+| `typescript` a devDependency | production install has no parser → every symbol reports "no callers", silently |
+| import aliases unhandled | `projectHash as scopedProjectHash` → 47 call sites resolved to 0 |
+| two `projectHash` declarations | the same 47 then buried as ambiguous — a second zero on one symbol |
+| `dynamicSites: 0` hardcoded | the coverage field, whose only job is honesty, was lying |
+| `rebuildBacklinks` DELETE | would have emptied the whole layer on the next index, with no error |
+| four `projectHash` copies | led to the real one: the canonical hash normalised nothing, and TWO projects had two databases each |
+| drift guard matched `createHash(` only | matched none of the 28 aliased copies it existed to prevent |
+| hook used the session cwd | cross-project reads looked up the wrong database and said "NOT indexed" |
+| hook returned `continue:false` | every redirected Read ended the agent's turn |
+| URL regex needed a leading quote | missed `fetch(\`${BASE}/api/v1/x\`)` — 3 edges where 9 call sites existed |
+
+**The pattern worth keeping.** Fixtures confirmed what I already believed and
+falsified nothing. Every defect above came from running against real source with
+hand-established counts, or from a live terminal agent. Two were found only by
+deliberately breaking a passing test to check it could fail.

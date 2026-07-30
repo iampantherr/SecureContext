@@ -33,6 +33,13 @@ export interface CallDecl {
   symbol: string;
   path:   string;
   line:   number;
+  /**
+   * Last line of the declaration. Lets a changed line be attributed to the
+   * function that contains it, which is what the commit-time advisory needs —
+   * without it, a diff can only be reported per FILE, and "you touched
+   * api-server.ts" is not an impact answer.
+   */
+  endLine: number;
 }
 
 /** One invocation, before resolution. `from` is the enclosing symbol. */
@@ -206,7 +213,11 @@ export async function extractFileCalls(content: string, path: string): Promise<F
     const visit = (node: any): void => {
       const name = declaredName(node);
       if (name) {
-        decls.push({ symbol: name, path, line: lineOf(node) });
+        decls.push({
+          symbol: name, path,
+          line:    lineOf(node),
+          endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1,
+        });
         enclosing.push(name);
       }
 
