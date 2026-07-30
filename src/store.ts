@@ -11,7 +11,9 @@
  * SELECTION:
  *   Controlled by the ZC_STORE environment variable:
  *     ZC_STORE=sqlite   (or unset) → SqliteStore
- *     ZC_STORE=postgres            → PostgresStore (requires ZC_PG_URL)
+ *     ZC_STORE=postgres            → PostgresStore, configured by ZC_POSTGRES_URL
+ *                                    or the ZC_POSTGRES_* parts (see
+ *                                    resolvePgConnectionString below)
  *
  * DESIGN PRINCIPLES:
  *   - All methods are async (Promise-returning).
@@ -21,7 +23,7 @@
  *     key-not-found, etc.) — those return null/false/empty array.
  *   - Security enforcement (RBAC, hash chain, rate limits) lives in the Store
  *     implementation, not in the caller.
- *   - projectPath is always the raw filesystem path (e.g. "C:/Users/Amit/AI_projects/RevClear").
+ *   - projectPath is always the raw filesystem path (e.g. "C:/repos/my-service").
  *     Implementations derive projectHash = SHA256(projectPath).slice(0,16) internally.
  *     Callers never need to know about hashing.
  */

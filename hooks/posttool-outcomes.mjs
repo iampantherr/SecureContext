@@ -55,8 +55,7 @@ async function resolveSessionId(projectPath) {
         const candidates = [];
         if (process.env.ZC_REPO_DIR) candidates.push(join(process.env.ZC_REPO_DIR, "node_modules/pg/lib/index.js"));
         candidates.push(join(homedir(), "AI_projects/SecureContext/node_modules/pg/lib/index.js"));
-        candidates.push("C:/Users/Amit/AI_projects/SecureContext/node_modules/pg/lib/index.js");
-        for (const p of candidates) {
+          for (const p of candidates) {
           if (!existsSync(p)) continue;
           try { pg = await import("file:///" + p.replace(/\\/g, "/")); break; } catch { /* try next */ }
         }

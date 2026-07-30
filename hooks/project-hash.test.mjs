@@ -7,6 +7,7 @@
 // a drift guard that silently skips is worse than no drift guard, because it
 // reports green while guarding nothing.
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { projectHash as hookHash, normalizeProjectPath as hookNorm } from "./_project-hash.mjs";
@@ -24,18 +25,18 @@ const { projectHash: srcHash, normalizeProjectPath: srcNorm } = await import(pat
 
 const W = String.raw;
 const vectors = [
-  W`C:\Users\Amit\AI_projects\SecureContext`,
-  "C:/Users/Amit/AI_projects/SecureContext",
+  W`C:\repos\my-service`,
+  "C:/repos/my-service",
   // A trailing backslash would escape the closing backtick, so these are built
   // by concatenation rather than written literally.
-  W`C:\Users\Amit\AI_projects\SecureContext` + "\\",
-  "C:/Users/Amit/AI_projects/SecureContext/",
-  W`C:\Users/Amit\AI_projects/Mixed`,
+  W`C:\repos\my-service` + "\\",
+  "C:/repos/my-service/",
+  W`C:\repos/mixed-seps`,
   "C:" + "\\",
-  "/home/user/project",
-  "/home/user/project/",
+  "/home/dev/project",
+  "/home/dev/project/",
   "/",
-  W`/home/user/weird\name`,          // backslash is a legal POSIX filename char
+  W`/home/dev/weird\name`,          // backslash is a legal POSIX filename char
   "relative/path",
   "",
 ];
@@ -55,12 +56,17 @@ for (const v of vectors) {
 
 // The convergence that motivated all of this: two spellings, one database.
 {
-  const a = hookHash(W`C:\Users\Amit\AI_projects\Test_Agent_Coordination`);
-  const b = hookHash("C:/Users/Amit/AI_projects/Test_Agent_Coordination");
-  const ok = a === b && a === "aafb4b029db36884";
+  const canonical = W`C:\repos\other-service`;
+  const a = hookHash(canonical);
+  const b = hookHash("C:/repos/other-service");
+  // Asserted as a property rather than a machine-specific constant: both
+  // spellings agree AND land on a plain sha256 of the canonical form, which is
+  // what keeps databases already on disk reachable.
+  const expected = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+  const ok = a === b && a === expected;
   ok ? pass++ : fail++;
-  console.log(`${ok ? "PASS" : "FAIL"}  both spellings resolve to the pre-existing database`);
-  if (!ok) console.log(`        backslash=${a} forward=${b} want=aafb4b029db36884`);
+  console.log(`${ok ? "PASS" : "FAIL"}  both spellings resolve to the canonical database`);
+  if (!ok) console.log(`        backslash=${a} forward=${b} want=${expected}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -2,15 +2,14 @@
  * Tests for the canonical project hash (v0.55.0).
  *
  * Context: before normalisation, the same project reached through a different
- * path spelling got a different database. Measured on a real machine:
- *   RevClear                 6160 KB (backslash)  +  380 KB (forward slash)
- *   Test_Agent_Coordination  1336 KB (backslash)  +  352 KB (forward slash)
- * Memory written through one spelling was invisible through the other.
+ * path spelling got a different database. Observed on a real machine: two
+ * projects each had TWO databases — a 6.1 MB one under the backslash spelling
+ * and a 380 KB one under the forward-slash spelling. Memory written through one
+ * was invisible through the other, with no error at any layer.
  *
  * The FIRST test is the one that matters. Normalisation must not move the hash
  * of the path form already on disk, or every existing database is orphaned and
- * every agent loses its memory at once. Those constants are real hashes read
- * off a live machine, not values copied from the implementation.
+ * every agent loses its memory at once.
  */
 
 import { describe, it, expect } from "vitest";
@@ -20,18 +19,14 @@ import { projectHash, normalizeProjectPath } from "./store.js";
 const sha16 = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
 
 describe("projectHash — backward compatibility", () => {
-  it("does NOT change the hash of the canonical Windows form (existing DBs must survive)", () => {
-    // Observed on disk before this change.
-    expect(projectHash("C:\\Users\\Amit\\AI_projects\\RevClear")).toBe("86283ac464e3f79c");
-    expect(projectHash("C:\\Users\\Amit\\AI_projects\\Test_Agent_Coordination")).toBe("aafb4b029db36884");
-  });
-
-  it("agrees with a plain sha256 for any already-canonical path", () => {
+  it("does NOT change the hash of an already-canonical path (existing DBs must survive)", () => {
+    // The regression that would strand every database on disk: if normalisation
+    // altered the canonical Windows or POSIX form, every project hash would move.
     for (const p of [
-      "C:\\Users\\Amit\\AI_projects\\SecureContext",
-      "C:\\repos\\thing",
-      "/home/user/project",
-      "/var/www",
+      "C:\\repos\\my-service",
+      "C:\\Users\\dev\\projects\\api-gateway",
+      "/home/dev/projects/api-gateway",
+      "/var/www/app",
     ]) {
       expect(projectHash(p)).toBe(sha16(p));
     }
@@ -39,24 +34,23 @@ describe("projectHash — backward compatibility", () => {
 });
 
 describe("projectHash — spellings that must converge", () => {
-  const canonical = "C:\\Users\\Amit\\AI_projects\\Test_Agent_Coordination";
+  const canonical = "C:\\repos\\my-service";
 
   it("maps the forward-slash spelling onto the canonical hash", () => {
-    // This is the exact split found on disk: 223bc78cd8cf20e0 was a SECOND
-    // database for this project. It must now resolve to the canonical one.
-    expect(sha16("C:/Users/Amit/AI_projects/Test_Agent_Coordination")).toBe("223bc78cd8cf20e0");
-    expect(projectHash("C:/Users/Amit/AI_projects/Test_Agent_Coordination")).toBe("aafb4b029db36884");
+    // This is the exact split found on disk: the forward-slash spelling had its
+    // own separate database. It must now resolve to the canonical one.
+    expect(sha16("C:/repos/my-service")).not.toBe(sha16(canonical));   // genuinely different strings
+    expect(projectHash("C:/repos/my-service")).toBe(projectHash(canonical));
   });
 
   it("ignores a trailing separator, either kind", () => {
     expect(projectHash(canonical + "\\")).toBe(projectHash(canonical));
     expect(projectHash(canonical + "/")).toBe(projectHash(canonical));
-    expect(projectHash("/home/user/project/")).toBe(projectHash("/home/user/project"));
+    expect(projectHash("/home/dev/app/")).toBe(projectHash("/home/dev/app"));
   });
 
   it("treats mixed separators as one project", () => {
-    expect(projectHash("C:\\Users/Amit\\AI_projects/Test_Agent_Coordination"))
-      .toBe(projectHash(canonical));
+    expect(projectHash("C:\\repos/my-service")).toBe(projectHash(canonical));
   });
 });
 
@@ -64,12 +58,11 @@ describe("normalizeProjectPath — limits, stated rather than assumed", () => {
   it("does NOT fold case, because that would strand every existing database", () => {
     // A real remaining gap on case-insensitive Windows. Asserted so the
     // limitation is visible and deliberate, not discovered later as a surprise.
-    expect(projectHash("c:\\users\\amit\\ai_projects\\revclear"))
-      .not.toBe(projectHash("C:\\Users\\Amit\\AI_projects\\RevClear"));
+    expect(projectHash("c:\\repos\\my-service")).not.toBe(projectHash("C:\\repos\\my-service"));
   });
 
   it("leaves POSIX paths alone — a backslash there is a legal filename character", () => {
-    expect(normalizeProjectPath("/home/user/weird\\name")).toBe("/home/user/weird\\name");
+    expect(normalizeProjectPath("/home/dev/weird\\name")).toBe("/home/dev/weird\\name");
   });
 
   it("keeps a bare drive or filesystem root meaningful", () => {
