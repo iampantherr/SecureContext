@@ -16,15 +16,15 @@ import { createInterface } from "node:readline";
 import { mkdirSync, appendFileSync, statSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { projectHash as sharedProjectHash } from "./_project-hash.mjs";
 
 const ZC_DIR = join(homedir(), ".claude", "zc-ctx", "sessions");
 const EVENT_LOG_MAX_BYTES = 512 * 1024; // 512 KB — rotate when exceeded
 const EVENT_LOG_KEEP_BYTES = 384 * 1024; // keep newest 384 KB after rotation
 
 function getSessionLogPath(projectPath) {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = sharedProjectHash(projectPath);
   return join(ZC_DIR, `${hash}.events.jsonl`);
 }
 
@@ -82,7 +82,7 @@ function redactSensitiveParams(toolInput) {
 
 /** Get the SQLite DB path for a project (mirrors logic in memory.ts) */
 function getProjectDbPath(projectPath) {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = sharedProjectHash(projectPath);
   return join(ZC_DIR, `${hash}.db`);
 }
 

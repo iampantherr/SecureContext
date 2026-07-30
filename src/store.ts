@@ -263,9 +263,44 @@ export interface Store {
 // Utility helpers used by both implementations
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Derive the 16-hex-char project discriminator from the raw path. */
+/**
+ * Canonical form of a project path, so that spellings of the SAME directory
+ * produce the SAME hash.
+ *
+ * This is not hypothetical tidying. Measured on the author's machine before the
+ * fix: RevClear had TWO databases (6160 KB under the backslash form, 380 KB
+ * under the forward-slash form) and Test_Agent_Coordination had two more
+ * (1336 KB / 352 KB). Whatever an agent wrote through one spelling was
+ * invisible to every component using the other — a silent partition of memory,
+ * with no error at any layer.
+ *
+ * Deliberately conservative about WHAT is normalised:
+ *   - separators and a trailing separator, which caused the observed split;
+ *   - NOT case. Lower-casing would change the hash of every project that
+ *     already exists and strand every database on disk. Windows is
+ *     case-insensitive, so that is a real remaining gap — but a migration, not
+ *     a one-line change, and it has not bitten anything yet.
+ */
+export function normalizeProjectPath(projectPath: string): string {
+  let s = String(projectPath ?? "");
+  const isWindows = /^[a-zA-Z]:/.test(s);
+  if (isWindows) s = s.replace(/\//g, "\\");
+  // A trailing separator does not make it a different project. Keep the root
+  // separator itself ("C:\" / "/") so the path stays meaningful.
+  const stripped = s.replace(/[\\/]+$/, "");
+  return stripped === "" || /^[a-zA-Z]:$/.test(stripped) ? s.slice(0, stripped.length + 1) : stripped;
+}
+
+/**
+ * Derive the 16-hex-char project discriminator.
+ *
+ * THE single definition. Everything that needs a project hash — stores, hooks,
+ * scripts, the MCP tool handlers — must route through here rather than
+ * re-deriving sha256(...).slice(0,16) inline, because a second copy is free to
+ * disagree about the input and nothing will report it.
+ */
 export function projectHash(projectPath: string): string {
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return createHash("sha256").update(normalizeProjectPath(projectPath)).digest("hex").slice(0, 16);
 }
 
 /** Current UTC date string in YYYY-MM-DD format (for rate limit buckets). */

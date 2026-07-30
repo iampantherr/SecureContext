@@ -31,17 +31,12 @@
 import { createInterface } from "node:readline";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
-import { existsSync, realpathSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-
-function normalizeProjectPath(projectPath) {
-  try { return realpathSync(projectPath); }
-  catch { return projectPath; }
-}
+import { projectHash as sharedProjectHash } from "./_project-hash.mjs";
 
 function projectDbPath(projectPath) {
-  const hash = createHash("sha256").update(normalizeProjectPath(projectPath)).digest("hex").slice(0, 16);
+  const hash = sharedProjectHash(projectPath);
   return join(homedir(), ".claude", "zc-ctx", "sessions", hash + ".db");
 }
 
@@ -79,7 +74,7 @@ async function resolveSessionId(projectPath) {
             idleTimeoutMillis: 3_000,
           });
           try {
-            const projectHashStr = createHash("sha256").update(normalizeProjectPath(projectPath)).digest("hex").slice(0, 16);
+            const projectHashStr = sharedProjectHash(projectPath);
             const r = await pool.query(
               "SELECT session_id FROM tool_calls_pg WHERE project_hash = $1 ORDER BY id DESC LIMIT 1",
               [projectHashStr],

@@ -48,23 +48,17 @@
 import { createInterface } from "node:readline";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, join, basename, sep } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { projectHash as sharedProjectHash } from "./_project-hash.mjs";
 
 const MAX_LINE_BYTES      = 64 * 1024;      // 64 KB per JSONL line cap
 const MAX_LINES_PER_RUN   = 10_000;         // defensive cap on file growth
 const ZC_DIR              = join(homedir(), ".claude", "zc-ctx", "sessions");
 
-function normalizeProjectPath(projectPath) {
-  // v0.17.0 — normalize to OS-native form (realpath handles slash direction +
-  // case + symlinks) so the hash matches what MCP server + agents compute.
-  try { return realpathSync(projectPath); }
-  catch { return projectPath; }
-}
-
 function projectHash(projectPath) {
-  return createHash("sha256").update(normalizeProjectPath(projectPath)).digest("hex").slice(0, 16);
+  return sharedProjectHash(projectPath);
 }
 
 function projectDbPath(projectPath) {

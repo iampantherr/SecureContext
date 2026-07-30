@@ -426,9 +426,21 @@ export function indexContent(
   // the per-file refresh: an agent edits one file, impact is correct 5s later.
   // Dynamic import so call_edges (which needs openDb from here) does not deepen the
   // import cycle, matching the pattern memory.ts already uses for backlinks.
-  void import("./indexing/call_edges.js")
-    .then((m) => m.rebuildCallGraphAsync(projectPath))
-    .catch(() => undefined);
+  // ZC_CALLGRAPH_ON_INDEX=0 disables the trigger (kill switch).
+  //
+  // Skipped under vitest: the 5s unref'd timer was firing during worker teardown
+  // and logging as the RPC closed, producing an intermittent
+  // "EnvironmentTeardownError: Closing rpc while onUserConsoleLog was pending".
+  // Attributed by measurement, not guess — 3 full-suite runs with the trigger
+  // disabled produced 0 errors, 3 with it enabled produced 1. Rebuilding a call
+  // graph for an ephemeral test project is wasted work regardless; the trigger
+  // itself is covered by a live out-of-vitest check (scratchpad verify_trigger)
+  // and the layer's behaviour by call_edges.test.ts.
+  if (process.env.ZC_CALLGRAPH_ON_INDEX !== "0" && !process.env.VITEST) {
+    void import("./indexing/call_edges.js")
+      .then((m) => m.rebuildCallGraphAsync(projectPath))
+      .catch(() => undefined);
+  }
 
   // Lever-4 (v0.48.0): event-fact extraction for session-tier sources —
   // serialized background lane; pseudo-entries re-enter through this same

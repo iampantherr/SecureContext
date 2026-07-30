@@ -2220,7 +2220,7 @@ async function dispatchToolCall(
         const { join: rcJoin }       = await import("node:path");
         const { createHash: rcCh }   = await import("node:crypto");
         rcMkd(Config.DB_DIR, { recursive: true });
-        const rcDbFile = rcJoin(Config.DB_DIR, `${rcCh("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const rcDbFile = rcJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const rcDb     = new RcDs(rcDbFile);
         rcDb.exec("PRAGMA journal_mode = WAL");
         rcDb.exec("PRAGMA busy_timeout = 5000");
@@ -2446,9 +2446,8 @@ async function dispatchToolCall(
         const { DatabaseSync } = await import("node:sqlite");
         const { mkdirSync: mkd } = await import("node:fs");
         const { join: pjoin }    = await import("node:path");
-        const { createHash: ch } = await import("node:crypto");
         mkd(Config.DB_DIR, { recursive: true });
-        const dbFile   = pjoin(Config.DB_DIR, `${ch("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const dbFile   = pjoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const statusDb = new DatabaseSync(dbFile);
         const schemaV  = getCurrentSchemaVersion(statusDb);
         statusDb.close();
@@ -2469,9 +2468,8 @@ async function dispatchToolCall(
         const { DatabaseSync: DS2 } = await import("node:sqlite");
         const { mkdirSync: mkd2 } = await import("node:fs");
         const { join: pjoin2 } = await import("node:path");
-        const { createHash: ch2 } = await import("node:crypto");
         mkd2(Config.DB_DIR, { recursive: true });
-        const dbFile2  = pjoin2(Config.DB_DIR, `${ch2("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const dbFile2  = pjoin2(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const rbacDb   = new DS2(dbFile2);
         rbacDb.exec("PRAGMA journal_mode = WAL");
         rbacDb.exec("PRAGMA busy_timeout = 5000");
@@ -2991,9 +2989,8 @@ async function dispatchToolCall(
         const { DatabaseSync: DSC } = await import("node:sqlite");
         const { mkdirSync: mkdC } = await import("node:fs");
         const { join: pjoinC } = await import("node:path");
-        const { createHash: chC } = await import("node:crypto");
         mkdC(Config.DB_DIR, { recursive: true });
-        const dbFileC = pjoinC(Config.DB_DIR, `${chC("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const dbFileC = pjoinC(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const cdb = new DSC(dbFileC);
         cdb.exec("PRAGMA journal_mode = WAL");
         const result = detectCommunities(cdb);
@@ -3039,9 +3036,8 @@ async function dispatchToolCall(
         const { DatabaseSync: DSC2 } = await import("node:sqlite");
         const { mkdirSync: mkdC2 } = await import("node:fs");
         const { join: pjoinC2 } = await import("node:path");
-        const { createHash: chC2 } = await import("node:crypto");
         mkdC2(Config.DB_DIR, { recursive: true });
-        const dbFileC2 = pjoinC2(Config.DB_DIR, `${chC2("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const dbFileC2 = pjoinC2(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const cdb2 = new DSC2(dbFileC2);
         const info = getCommunityForSource(cdb2, source);
         cdb2.close();
@@ -3103,9 +3099,8 @@ async function dispatchToolCall(
         const { DatabaseSync: DSB } = await import("node:sqlite");
         const { mkdirSync: mkdB } = await import("node:fs");
         const { join: pjoinB } = await import("node:path");
-        const { createHash: chB } = await import("node:crypto");
         mkdB(Config.DB_DIR, { recursive: true });
-        const dbFileB = pjoinB(Config.DB_DIR, `${chB("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const dbFileB = pjoinB(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const bdb = new DSB(dbFileB);
         let bl: { in_degree: number; weighted_in: number } | undefined;
         let inbound: Array<{ from_source: string; relation_type: string; weight: number }> = [];
@@ -3154,9 +3149,8 @@ async function dispatchToolCall(
         const { DatabaseSync: SLDb } = await import("node:sqlite");
         const { mkdirSync: slMkd } = await import("node:fs");
         const { join: slJoin } = await import("node:path");
-        const { createHash: slHash } = await import("node:crypto");
         slMkd(Config.DB_DIR, { recursive: true });
-        const slDbFile = slJoin(Config.DB_DIR, `${slHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const slDbFile = slJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const slDb = new SLDb(slDbFile);
         slDb.exec("PRAGMA journal_mode = WAL");
         const { listActiveSkills, getRecentSkillRuns } = await import("./skills/storage.js");
@@ -3180,13 +3174,12 @@ async function dispatchToolCall(
         const { DatabaseSync: SsDb } = await import("node:sqlite");
         const { mkdirSync: ssMkd } = await import("node:fs");
         const { join: ssJoin } = await import("node:path");
-        const { createHash: ssHash } = await import("node:crypto");
         ssMkd(Config.DB_DIR, { recursive: true });
-        const ssDbFile = ssJoin(Config.DB_DIR, `${ssHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const ssDbFile = ssJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const ssDb = new SsDb(ssDbFile);
         ssDb.exec("PRAGMA journal_mode = WAL");
         const { resolveSkill } = await import("./skills/storage.js");
-        const projectScope = `project:${ssHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         try {
           let skill = await resolveSkill(ssDb, name, projectScope);
           ssDb.close();
@@ -3282,14 +3275,13 @@ async function dispatchToolCall(
         const { DatabaseSync: ScDb } = await import("node:sqlite");
         const { mkdirSync: scMkd } = await import("node:fs");
         const { join: scJoin } = await import("node:path");
-        const { createHash: scHash } = await import("node:crypto");
         scMkd(Config.DB_DIR, { recursive: true });
-        const scDbFile = scJoin(Config.DB_DIR, `${scHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const scDbFile = scJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const scDb = new ScDb(scDbFile);
         scDb.exec("PRAGMA journal_mode = WAL");
         const { resolveSkill, getRecentSkillRuns } = await import("./skills/storage.js");
         const { aggregateScore, checkAcceptance } = await import("./skills/scoring.js");
-        const projectScope = `project:${scHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(scDb, name, projectScope);
         if (!skill) { scDb.close(); return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true }; }
         const runs = getRecentSkillRuns(scDb, skill.skill_id, window ?? 20);
@@ -3312,14 +3304,13 @@ async function dispatchToolCall(
         const { DatabaseSync: SrrDb } = await import("node:sqlite");
         const { mkdirSync: srrMkd } = await import("node:fs");
         const { join: srrJoin } = await import("node:path");
-        const { createHash: srrHash } = await import("node:crypto");
         srrMkd(Config.DB_DIR, { recursive: true });
-        const srrDbFile = srrJoin(Config.DB_DIR, `${srrHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const srrDbFile = srrJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const srrDb = new SrrDb(srrDbFile);
         srrDb.exec("PRAGMA journal_mode = WAL");
         const { resolveSkill } = await import("./skills/storage.js");
         const { replaySkill, LocalDeterministicExecutor } = await import("./skills/replay.js");
-        const projectScope = `project:${srrHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(srrDb, name, projectScope);
         srrDb.close();
         if (!skill) return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true };
@@ -3347,14 +3338,13 @@ async function dispatchToolCall(
         const { DatabaseSync: SpmDb } = await import("node:sqlite");
         const { mkdirSync: spmMkd } = await import("node:fs");
         const { join: spmJoin } = await import("node:path");
-        const { createHash: spmHash } = await import("node:crypto");
         spmMkd(Config.DB_DIR, { recursive: true });
-        const spmDbFile = spmJoin(Config.DB_DIR, `${spmHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const spmDbFile = spmJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const spmDb = new SpmDb(spmDbFile);
         spmDb.exec("PRAGMA journal_mode = WAL");
         const { resolveSkill } = await import("./skills/storage.js");
         const { runMutationCycle } = await import("./skills/orchestrator.js");
-        const projectScope = `project:${spmHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(spmDb, name, projectScope);
         if (!skill) { spmDb.close(); return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true }; }
         const result = await runMutationCycle(spmDb, skill);
@@ -3377,14 +3367,13 @@ async function dispatchToolCall(
         const { DatabaseSync: SeDb } = await import("node:sqlite");
         const { mkdirSync: seMkd } = await import("node:fs");
         const { join: seJoin } = await import("node:path");
-        const { createHash: seHash } = await import("node:crypto");
         seMkd(Config.DB_DIR, { recursive: true });
-        const seDbFile = seJoin(Config.DB_DIR, `${seHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const seDbFile = seJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const seDb = new SeDb(seDbFile);
         seDb.exec("PRAGMA journal_mode = WAL");
         const { resolveSkill } = await import("./skills/storage.js");
         const { exportToAgentSkillsIo } = await import("./skills/format/agentskills_io.js");
-        const projectScope = `project:${seHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(seDb, name, projectScope);
         seDb.close();
         if (!skill) return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true };
@@ -3396,14 +3385,13 @@ async function dispatchToolCall(
         const { DatabaseSync: SiDb } = await import("node:sqlite");
         const { mkdirSync: siMkd } = await import("node:fs");
         const { join: siJoin } = await import("node:path");
-        const { createHash: siHash } = await import("node:crypto");
         siMkd(Config.DB_DIR, { recursive: true });
-        const siDbFile = siJoin(Config.DB_DIR, `${siHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const siDbFile = siJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const siDb = new SiDb(siDbFile);
         siDb.exec("PRAGMA journal_mode = WAL");
         const { upsertSkill } = await import("./skills/storage.js");
         const { importFromAgentSkillsIo } = await import("./skills/format/agentskills_io.js");
-        const projectScope = `project:${siHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}` as `project:${string}`;
+        const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         try {
           const defaultScope = (scope ?? projectScope) as `project:${string}` | "global";
           const skill = await importFromAgentSkillsIo(markdown, defaultScope);
@@ -3421,9 +3409,8 @@ async function dispatchToolCall(
         const { DatabaseSync: SppDb } = await import("node:sqlite");
         const { mkdirSync: sppMkd } = await import("node:fs");
         const { join: sppJoin } = await import("node:path");
-        const { createHash: sppHash } = await import("node:crypto");
         sppMkd(Config.DB_DIR, { recursive: true });
-        const sppDbFile = sppJoin(Config.DB_DIR, `${sppHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const sppDbFile = sppJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const sppDb = new SppDb(sppDbFile);
         sppDb.exec("PRAGMA journal_mode = WAL");
         const { listPending } = await import("./skills/promotion_queue.js");
@@ -3449,9 +3436,8 @@ async function dispatchToolCall(
         const { DatabaseSync: SapDb } = await import("node:sqlite");
         const { mkdirSync: sapMkd } = await import("node:fs");
         const { join: sapJoin } = await import("node:path");
-        const { createHash: sapHash } = await import("node:crypto");
         sapMkd(Config.DB_DIR, { recursive: true });
-        const sapDbFile = sapJoin(Config.DB_DIR, `${sapHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const sapDbFile = sapJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const sapDb = new SapDb(sapDbFile);
         sapDb.exec("PRAGMA journal_mode = WAL");
         try {
@@ -3503,9 +3489,8 @@ async function dispatchToolCall(
         const { DatabaseSync: SrpDb } = await import("node:sqlite");
         const { mkdirSync: srpMkd } = await import("node:fs");
         const { join: srpJoin } = await import("node:path");
-        const { createHash: srpHash } = await import("node:crypto");
         srpMkd(Config.DB_DIR, { recursive: true });
-        const srpDbFile = srpJoin(Config.DB_DIR, `${srpHash("sha256").update(PROJECT_PATH).digest("hex").slice(0,16)}.db`);
+        const srpDbFile = srpJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const srpDb = new SrpDb(srpDbFile);
         srpDb.exec("PRAGMA journal_mode = WAL");
         const { rejectPromotion } = await import("./skills/promotion_queue.js");
@@ -3581,7 +3566,7 @@ async function dispatchToolCall(
         const { join: rsoJoin } = await import("node:path");
         const { createHash: rsoHash, randomUUID: rsoUUID } = await import("node:crypto");
         rsoMkd(Config.DB_DIR, { recursive: true });
-        const rsoProjectHash = rsoHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const rsoProjectHash = scopedProjectHash(PROJECT_PATH);
         const rsoDbFile = rsoJoin(Config.DB_DIR, `${rsoProjectHash}.db`);
         const rsoDb = new RsoDb(rsoDbFile);
         rsoDb.exec("PRAGMA journal_mode = WAL");
@@ -3736,9 +3721,8 @@ async function dispatchToolCall(
         const { DatabaseSync: MrDb } = await import("node:sqlite");
         const { mkdirSync: mrMkd } = await import("node:fs");
         const { join: mrJoin } = await import("node:path");
-        const { createHash: mrHash } = await import("node:crypto");
         mrMkd(Config.DB_DIR, { recursive: true });
-        const projectHash = mrHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHash = scopedProjectHash(PROJECT_PATH);
         const mrDbFile = mrJoin(Config.DB_DIR, `${projectHash}.db`);
         const mrDb = new MrDb(mrDbFile);
         mrDb.exec("PRAGMA journal_mode = WAL");
@@ -3839,7 +3823,7 @@ async function dispatchToolCall(
         const { join: srvJoin } = await import("node:path");
         const { createHash: srvHash, randomUUID: srvUUID } = await import("node:crypto");
         srvMkd(Config.DB_DIR, { recursive: true });
-        const projectHash = srvHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHash = scopedProjectHash(PROJECT_PATH);
         const srvDb = new SrvDb(srvJoin(Config.DB_DIR, `${projectHash}.db`));
         srvDb.exec("PRAGMA journal_mode = WAL");
         try {
@@ -4020,9 +4004,8 @@ async function dispatchToolCall(
         const { DatabaseSync: MpDb } = await import("node:sqlite");
         const { mkdirSync: mpMkd } = await import("node:fs");
         const { join: mpJoin } = await import("node:path");
-        const { createHash: mpHash } = await import("node:crypto");
         mpMkd(Config.DB_DIR, { recursive: true });
-        const projectHash = mpHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHash = scopedProjectHash(PROJECT_PATH);
         const mpDb = new MpDb(mpJoin(Config.DB_DIR, `${projectHash}.db`));
         mpDb.exec("PRAGMA journal_mode = WAL");
         try {
@@ -4076,9 +4059,8 @@ async function dispatchToolCall(
         const { DatabaseSync: MaDb } = await import("node:sqlite");
         const { mkdirSync: maMkd } = await import("node:fs");
         const { join: maJoin } = await import("node:path");
-        const { createHash: maHash } = await import("node:crypto");
         maMkd(Config.DB_DIR, { recursive: true });
-        const projectHash = maHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHash = scopedProjectHash(PROJECT_PATH);
         const maDb = new MaDb(maJoin(Config.DB_DIR, `${projectHash}.db`));
         maDb.exec("PRAGMA journal_mode = WAL");
         try {
@@ -4242,9 +4224,8 @@ async function dispatchToolCall(
         const { DatabaseSync: MrjDb } = await import("node:sqlite");
         const { mkdirSync: mrjMkd } = await import("node:fs");
         const { join: mrjJoin } = await import("node:path");
-        const { createHash: mrjHash } = await import("node:crypto");
         mrjMkd(Config.DB_DIR, { recursive: true });
-        const projectHash = mrjHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHash = scopedProjectHash(PROJECT_PATH);
         const mrjDb = new MrjDb(mrjJoin(Config.DB_DIR, `${projectHash}.db`));
         mrjDb.exec("PRAGMA journal_mode = WAL");
         try {

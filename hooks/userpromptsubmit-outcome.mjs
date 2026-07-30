@@ -27,11 +27,11 @@ import { createInterface } from "node:readline";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { projectHash as sharedProjectHash } from "./_project-hash.mjs";
 
 function projectDbPath(projectPath) {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = sharedProjectHash(projectPath);
   return join(homedir(), ".claude", "zc-ctx", "sessions", hash + ".db");
 }
 
