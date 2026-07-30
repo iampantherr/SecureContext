@@ -29,6 +29,19 @@ function getBackend(): "sqlite" | "postgres" | "dual" {
   const raw = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
   if (raw === "postgres" || raw === "dual") return raw;
   return "sqlite";
+
+  // v0.55.0 NOTE — a *storage* decision keyed off a *telemetry* variable is a
+  // real design smell: on a machine with ZC_STORE=postgres but no
+  // ZC_TELEMETRY_BACKEND, skill lookups fall back to SQLite and report
+  // "Skill not found" for skills that zc_skills_by_role (which queries PG
+  // directly and consults no switch at all) lists happily.
+  //
+  // Deliberately NOT changed here. Making this also honour ZC_STORE was tried and
+  // broke 5 orchestrator tests that build fixtures in a local SQLite DB — the
+  // switch is load-bearing for them. The correct fix is to set
+  // ZC_TELEMETRY_BACKEND alongside ZC_STORE in the environment, which is what the
+  // operator config now does; unifying the two variables is a wider change that
+  // needs its own pass.
 }
 
 /** Compute the project_hash used by skill_runs_pg / skill_mutations_pg. */

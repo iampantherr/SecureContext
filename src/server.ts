@@ -3305,12 +3305,18 @@ async function dispatchToolCall(
         const scDbFile = scJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const scDb = new ScDb(scDbFile);
         scDb.exec("PRAGMA journal_mode = WAL");
-        const { resolveSkill, getRecentSkillRuns } = await import("./skills/storage.js");
+        // v0.55.0: dual-backend resolver, same as the other skill tools. This site
+        // destructures two names, so the first sweep (which matched the single-name
+        // import form) missed it — leaving zc_skill_score reporting "not found" for a
+        // skill zc_skill_export resolved in the same breath. Caught by an E2E agent
+        // calling all three and noticing they disagreed.
+        const { resolveSkill, getRecentSkillRuns } = await import("./skills/storage_dual.js");
         const { aggregateScore, checkAcceptance } = await import("./skills/scoring.js");
         const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(scDb, name, projectScope);
         if (!skill) { scDb.close(); return { content: [{ type: "text", text: `Skill '${name}' not found.` }], isError: true }; }
-        const runs = getRecentSkillRuns(scDb, skill.skill_id, window ?? 20);
+        // storage_dual's version is async (it may hit PG); the SQLite-only one was not.
+        const runs = await getRecentSkillRuns(scDb, skill.skill_id, window ?? 20);
         const agg = aggregateScore(runs);
         const accept = checkAcceptance(agg, skill.frontmatter.acceptance_criteria);
         scDb.close();
