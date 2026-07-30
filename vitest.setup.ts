@@ -29,6 +29,22 @@ const TEST_DB_NAME = process.env.ZC_TEST_POSTGRES_DB ?? "securecontext_test";
 // This must happen before pg_pool.ts captures process.env.
 process.env.ZC_POSTGRES_DB = TEST_DB_NAME;
 
+/**
+ * v0.55.0 — pin the telemetry backend so the suite does not inherit ambient
+ * developer configuration.
+ *
+ * Found the hard way: setting ZC_TELEMETRY_BACKEND=postgres in the operator's
+ * environment (correct for the machine — the MCP server already had it) turned
+ * 39 green tests red, because outcomes/telemetry tests build fixtures in a local
+ * SQLite DB while that variable silently redirects the writes to Postgres. The
+ * tests were never wrong; they were reading a switch nobody told them about.
+ *
+ * sqlite is what the suite has always effectively run under, since the variable
+ * was previously unset. A test that specifically exercises the Postgres path
+ * still sets process.env itself at runtime and wins over this default.
+ */
+process.env.ZC_TELEMETRY_BACKEND = process.env.ZC_TEST_TELEMETRY_BACKEND ?? "sqlite";
+
 // S10 hardening (v0.46.0) — ISOLATE THE MACHINE SECRET. Six security test
 // files delete + regenerate the machine secret around their runs; before this
 // isolation they operated on the REAL ~/.claude/zc-ctx/.machine_secret, so

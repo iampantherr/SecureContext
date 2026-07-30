@@ -3120,6 +3120,17 @@ async function dispatchToolCall(
           "session history). Set ZC_API_URL, or use zc_summarize_session for a local summary." }] };
       }
 
+      case "zc_program": {
+        // Same shape, found the same way: an E2E agent with no ZC_API_URL called it
+        // and got "Unknown tool". Program memory is PG-backed, so there is nothing
+        // local to fall back to — but an agent deserves the reason, not a dead end.
+        // A sweep confirmed zc_program was the ONLY remaining REMOTE_TOOLS entry
+        // without a local branch.
+        return { content: [{ type: "text", text:
+          "zc_program needs the SecureContext API server (program memory is Postgres-backed). " +
+          "Set ZC_API_URL to use it; zc_remember and zc_recall_context work locally." }] };
+      }
+
       case "zc_graph_backlinks": {
         const { source, limit } = args as { source: string; limit?: number };
         const { DatabaseSync: DSB } = await import("node:sqlite");

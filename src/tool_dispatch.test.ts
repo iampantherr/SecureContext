@@ -60,15 +60,15 @@ describe("MCP tool dispatch", () => {
     expect(orphaned, "handler lives in _handleRemoteTool but REMOTE_TOOLS never routes there").toEqual([]);
   });
 
-  it("gives every REMOTE_TOOLS entry a local branch or an explicit local message", () => {
+  it("gives every REMOTE_TOOLS entry a local branch", () => {
     // With ZC_API_URL unset, a remote-routed tool falls through to the local
-    // switch. Without a local case it dies on the default. Listed rather than
-    // asserted empty: several are genuinely API-only, and the point is that the
-    // set is visible and deliberate rather than discovered by an agent.
+    // switch; without a case it dies on the default with "Unknown tool".
+    //
+    // This started as an informational log — and that softness was wrong. The
+    // one tool it listed, zc_program, then failed in front of a real E2E agent
+    // with exactly that error. A branch may simply explain that the API is
+    // required, but a dead end is not acceptable for a tool agents can see.
     const noLocal = [...remoteRouted].filter((t) => declared.includes(t) && !localCases.has(t));
-    expect(noLocal.length).toBeLessThanOrEqual(remoteRouted.size);
-    if (noLocal.length > 0) {
-      console.info(`[dispatch] API-only without a local branch (${noLocal.length}): ${noLocal.join(", ")}`);
-    }
+    expect(noLocal, "no local branch: these die on 'Unknown tool' without ZC_API_URL").toEqual([]);
   });
 });
