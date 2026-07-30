@@ -128,7 +128,3 @@ export function formatBudgetSuffix(sessionId: string): string {
   return                              `[ctx: ${pct}% / ${budgetK}K — ⛔ EMERGENCY: edits/broadcasts only]`;
 }
 
-/** Test helper: reset all session counters. */
-export function _resetContextBudgetForTesting(): void {
-  usage.clear();
-}

@@ -174,9 +174,3 @@ export const rejectPromotion  = (db: DatabaseSync, id: string, by: string, ratio
 
 // ─── Test helper ─────────────────────────────────────────────────────────────
 
-export async function _dropPromotionQueueForTesting(): Promise<void> {
-  await withClient(async (c) => {
-    await c.query(`DROP TABLE IF EXISTS skill_promotion_queue_pg CASCADE`);
-    await c.query(`DELETE FROM schema_migrations_pg WHERE id = 9`);
-  });
-}

@@ -41,11 +41,6 @@ import type { RecordOutcomeInput, OutcomeRecord } from "./outcomes.js";
 
 export type TelemetryMode = "local" | "api" | "dual";
 
-export function getTelemetryMode(): TelemetryMode {
-  const mode = (process.env.ZC_TELEMETRY_MODE || "local").toLowerCase();
-  if (mode === "api" || mode === "dual") return mode;
-  return "local";
-}
 
 export function getApiUrl(): string {
   return process.env.ZC_API_URL || "http://localhost:3099";

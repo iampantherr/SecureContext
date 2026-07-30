@@ -210,22 +210,6 @@ async function recordQuarantine(parsed: ParsedFsSkill, newPath: string, reason: 
   }
 }
 
-/**
- * Resolve all the directories we should walk for filesystem skills.
- * Returns BOTH global (~/.claude/skills/) and per-project (.claude/skills/)
- * sources. Caller passes registered project paths for the project-scoped
- * walk.
- */
-export function resolveFsSkillRoots(projectPaths: string[] = []): string[] {
-  const roots: string[] = [];
-  const global = join(homedir(), ".claude", "skills");
-  if (existsSync(global)) roots.push(global);
-  for (const projPath of projectPaths) {
-    const projSkills = join(projPath, ".claude", "skills");
-    if (existsSync(projSkills)) roots.push(projSkills);
-  }
-  return roots;
-}
 
 /**
  * Minimal YAML frontmatter parser tailored for SKILL.md.

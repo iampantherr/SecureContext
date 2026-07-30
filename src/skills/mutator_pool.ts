@@ -37,7 +37,6 @@ export interface MutatorPoolsRegistry {
 let _cached: { registry: MutatorPoolsRegistry; loadedAt: number } | null = null;
 const CACHE_TTL_MS = 30_000;
 
-export function _resetCache(): void { _cached = null; }
 
 export function loadMutatorPoolsRegistry(): MutatorPoolsRegistry {
   if (_cached && (Date.now() - _cached.loadedAt) < CACHE_TTL_MS) {
@@ -86,20 +85,3 @@ export function resolveMutatorPool(role: string | null | undefined): string {
   return "mutator-general";
 }
 
-/**
- * Get the full pool config for a pool name (for prompt composition).
- * Returns null if the pool doesn't exist in the registry.
- */
-export function getMutatorPoolConfig(poolName: string): MutatorPoolConfig | null {
-  const registry = loadMutatorPoolsRegistry();
-  return registry[poolName] ?? null;
-}
-
-/**
- * Resolve a list of intended_roles → pool name. Uses the FIRST role as the
- * primary classifier (matches the design contract).
- */
-export function resolveMutatorPoolFromIntendedRoles(intendedRoles: string[] | undefined | null): string {
-  if (!intendedRoles || intendedRoles.length === 0) return "mutator-general";
-  return resolveMutatorPool(intendedRoles[0]);
-}

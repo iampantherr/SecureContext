@@ -201,17 +201,15 @@ export async function failTask(
   reason:   string,
 ): Promise<boolean> {
   return withClient(async (c: PoolClient) => {
+    // A task FAILURE reason is the field whose truncation costs most: it is what
+    // the next attempt reads to understand what went wrong, so silently losing
+    // its tail sends the retry in blind. clampWithMarker announces the cut.
     const r = await c.query(`
       UPDATE task_queue_pg
       SET state           = 'failed',
           failure_reason  = $3,
           retries         = retries + 1
       WHERE task_id = $1 AND claimed_by = $2 AND state = 'claimed'
-    // v0.53.1 - announce the clamp. A task FAILURE reason is the one field whose
-    // truncation costs the most: it is what the next attempt reads to understand
-    // what went wrong, and silently losing its tail sends the retry in blind.
-    // Same class as the 1000-char broadcast summary that cost a worker its
-    // acceptance criteria.
     `, [taskId, workerId, clampWithMarker(reason, 1000, "failure reason")]);
     return (r.rowCount ?? 0) > 0;
   });

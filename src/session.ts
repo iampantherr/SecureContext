@@ -85,24 +85,6 @@ export function getOrCreateSession(projectPath: string): number {
   return Number(result.lastInsertRowid);
 }
 
-export function recordEvent(projectPath: string, event: SessionEvent): void {
-  const db        = openDb(projectPath);
-  const sessionId = getOrCreateSession(projectPath);
-
-  db.prepare(
-    `INSERT INTO events(session_id, event_type, file_path, task_name, error_type, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    sessionId,
-    event.event_type,
-    event.file_path  ?? null,
-    event.task_name  ?? null,
-    event.error_type ?? null,
-    new Date().toISOString()
-  );
-
-  db.close();
-}
 
 export function getRecentEvents(projectPath: string, limit = 50): SessionEvent[] {
   // Read from the JSONL event log written by hooks (posttooluse.mjs, stop.mjs).

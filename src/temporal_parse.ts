@@ -131,10 +131,6 @@ export function parseTemporalQuery(query: string, now: Date = new Date()): Tempo
   return { cleaned: q };
 }
 
-/** True when the parse found any temporal constraint. */
-export function hasTemporalConstraint(w: TemporalWindow): boolean {
-  return !!(w.from || w.to || w.asOf);
-}
 
 // ─── S11 (v0.46.1) — interrogative-scaffolding stripper ─────────────────────
 //

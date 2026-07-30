@@ -293,11 +293,3 @@ export function scanScriptFile(scriptPath: string): ScriptScanResult {
   };
 }
 
-/**
- * Scan every file inside a skill directory's scripts/ subfolder.
- * Returns one ScriptScanResult per script. Caller decides quarantine
- * based on the aggregate result.
- */
-export function scanSkillScripts(scriptPaths: string[]): ScriptScanResult[] {
-  return scriptPaths.map((p) => scanScriptFile(p));
-}

@@ -60,8 +60,6 @@ import { budgetFacts, effectiveImportance, type TemporalWindow } from "./recall_
  */
 export const MEMORY_KINDS = ["fact", "decision", "hypothesis", "prediction", "constraint", "antipattern"] as const;
 export type MemoryKind = typeof MEMORY_KINDS[number];
-/** Kinds that pin a fact above the recall budget (see memory_quality.ts). */
-export const PINNED_MEMORY_KINDS: readonly MemoryKind[] = ["constraint", "antipattern"];
 /** Resolution state of a prediction/hypothesis (whether it came true). */
 export type ResolutionStatus = "open" | "resolved_correct" | "resolved_incorrect" | "resolved_partial";
 

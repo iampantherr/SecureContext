@@ -51,13 +51,6 @@ export const DEFAULT_SCORING: ScoringConfig = {
 /** Min improvement margin for a candidate to be promoted over the parent. */
 export const MIN_PROMOTION_DELTA = 0.10;
 
-/** Per-skill scoring config — lets a skill's frontmatter override defaults. */
-export function scoringConfigForSkill(skill: Skill, base: ScoringConfig = DEFAULT_SCORING): ScoringConfig {
-  // For now we don't read scoring from frontmatter — defaults apply.
-  // Future: skill.frontmatter.scoring?.weight_accuracy etc.
-  void skill;
-  return base;
-}
 
 /**
  * Score a single skill_run. Returns 0-1.

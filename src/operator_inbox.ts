@@ -100,13 +100,3 @@ export async function markInboxDelivered(id: number): Promise<boolean> {
   });
 }
 
-/**
- * Test helper — drop the inbox table so migrations recreate it fresh.
- * Same guard model as the other _dropXForTesting helpers: vitest.setup.ts
- * forces ZC_POSTGRES_DB to the test database before any test imports run.
- */
-export async function _dropOperatorInboxForTesting(): Promise<void> {
-  await withClient(async (c) => {
-    await c.query(`DROP TABLE IF EXISTS operator_inbox_pg CASCADE`);
-  });
-}

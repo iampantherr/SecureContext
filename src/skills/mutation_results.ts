@@ -695,9 +695,3 @@ export async function fetchRecentDecisions(
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
-export async function _dropMutationResultsForTesting(): Promise<void> {
-  await withClient(async (c) => {
-    await c.query(`DROP TABLE IF EXISTS mutation_results_pg CASCADE`);
-    await c.query(`DELETE FROM schema_migrations_pg WHERE id = 10`);
-  });
-}
