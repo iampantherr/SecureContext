@@ -69,6 +69,8 @@ import type {
   CrossProjectEntry,
   RetentionTier,
   ComplexityProfile,
+  CallImpactResult,
+  CallImpactTarget,
 } from "./store.js";
 import { projectHash as scopedProjectHash } from "./store.js";
 
@@ -1717,6 +1719,75 @@ export class PostgresStore implements Store {
         [projectHash, source, Math.min(Math.max(limit, 1), 100)])).rows;
       return { inDegree: bl.in_degree, weightedIn: bl.weighted_in, inbound: er.map((e) => ({ from: e.from_source, relation: e.relation_type, weight: e.weight })) };
     } catch { return null; }
+  }
+
+  async callImpactFor(
+    projectPath: string,
+    query: { file?: string; symbol?: string },
+  ): Promise<CallImpactResult> {
+    const projectHash = ph(projectPath);
+    const empty: CallImpactResult = { targets: [], dynamicSites: 0, built: false };
+    try {
+      // Built-ness is a property of the layer, not of this query matching rows.
+      // Without this an unbuilt graph and a genuinely uncalled symbol return the
+      // same shape, which is the fabricated zero this feature exists to avoid.
+      const built = ((await this.pool.query<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM kb_edges_pg WHERE project_hash = $1 AND match_kind = 'call' LIMIT 1`,
+        [projectHash])).rows[0]?.n ?? "0") !== "0";
+      if (!built) return empty;
+
+      const isSymbol = typeof query.symbol === "string" && query.symbol.length > 0;
+      const pattern = isSymbol
+        ? `func:%#${query.symbol}`
+        : `func:${(query.file ?? "").split("\\").join("/")}#%`;
+
+      const rows = (await this.pool.query<{
+        to_source: string; from_source: string; relation_type: string; weight: number;
+      }>(
+        `SELECT to_source, from_source, relation_type, weight
+           FROM kb_edges_pg
+          WHERE project_hash = $1 AND match_kind = 'call'
+            AND relation_type <> 'unresolved_calls'
+            AND to_source LIKE $2`,
+        [projectHash, pattern])).rows;
+
+      const byTarget = new Map<string, CallImpactTarget>();
+      for (const r of rows) {
+        const hash = r.to_source.lastIndexOf("#");
+        const symbol = r.to_source.slice(hash + 1);
+        // LIKE 'func:%#name' can also match a path containing '#'; require an exact tail.
+        if (isSymbol && symbol !== query.symbol) continue;
+
+        let t = byTarget.get(r.to_source);
+        if (!t) {
+          t = {
+            symbol, declaredIn: r.to_source.slice("func:".length, hash),
+            callers: 0, sites: 0, files: [], ambiguous: 0,
+          };
+          byTarget.set(r.to_source, t);
+        }
+        if (r.relation_type === "calls_ambiguous") { t.ambiguous++; continue; }
+        t.callers++;
+        t.sites += r.weight;
+        const f = r.from_source.slice("func:".length).split("#")[0]!;
+        if (!t.files.includes(f)) t.files.push(f);
+      }
+
+      let dynamicSites = 0;
+      if (!isSymbol) {
+        dynamicSites = (await this.pool.query<{ weight: number }>(
+          `SELECT weight FROM kb_edges_pg
+            WHERE project_hash = $1 AND match_kind = 'call'
+              AND relation_type = 'unresolved_calls' AND to_source = $2`,
+          [projectHash, `unresolved:${(query.file ?? "").split("\\").join("/")}`])).rows[0]?.weight ?? 0;
+      }
+
+      const targets = [...byTarget.values()].sort((a, b) => b.callers - a.callers);
+      for (const t of targets) t.files.sort();
+      return { targets, dynamicSites, built: true };
+    } catch {
+      return empty;
+    }
   }
 
   // ── Memory contradictions (Tier-1 B, PG-native) ───────────────────────────

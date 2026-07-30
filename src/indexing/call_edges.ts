@@ -34,6 +34,15 @@ import {
 
 export const CALL_MATCH_KIND = "call";
 
+/**
+ * Per-file count of call sites that could not be named at all (`handlers[t]()`).
+ * Stored as an edge to a sentinel node so no schema change is needed, and so the
+ * coverage number travels with the graph instead of being recomputed — or, as it
+ * was in the first cut of this file, hardcoded to 0 and quietly wrong.
+ */
+export const UNRESOLVED_RELATION = "unresolved_calls";
+const unresolvedNode = (path: string): string => `unresolved:${path}`;
+
 export interface CallGraphRebuildResult {
   files:        number;
   edges:        number;
@@ -114,7 +123,11 @@ export async function buildProjectCallGraph(
  * Replace the call layer for one open project DB. Caller owns the DB.
  * Full replace of match_kind='call' only — every other layer is untouched.
  */
-export function persistCallEdges(db: DatabaseSync, edges: CallEdge[]): void {
+export function persistCallEdges(
+  db: DatabaseSync,
+  edges: CallEdge[],
+  unresolvedByFile?: Map<string, number>,
+): void {
   const now = new Date().toISOString();
   db.exec("BEGIN");
   try {
@@ -124,6 +137,11 @@ export function persistCallEdges(db: DatabaseSync, edges: CallEdge[]): void {
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
     for (const e of edges) ins.run(e.from, e.to, e.relation, CALL_MATCH_KIND, e.sites, now);
+    for (const [path, count] of unresolvedByFile ?? []) {
+      if (count > 0) {
+        ins.run(`file:${path}`, unresolvedNode(path), UNRESOLVED_RELATION, CALL_MATCH_KIND, count, now);
+      }
+    }
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
@@ -142,9 +160,12 @@ export async function rebuildCallGraph(projectPath: string): Promise<CallGraphRe
     return { files: 0, edges: 0, ambiguous: 0, dynamicSites: 0, elapsedMs: Date.now() - start, unavailable: true };
   }
 
+  const unresolved = new Map<string, number>();
+  for (const f of files) if (f.dynamicSites > 0) unresolved.set(f.path, f.dynamicSites);
+
   const db = openDb(projectPath);
   try {
-    persistCallEdges(db, edges);
+    persistCallEdges(db, edges, unresolved);
   } finally {
     db.close();
   }
@@ -269,10 +290,16 @@ export function getFileImpact(db: DatabaseSync, filePath: string): FileImpact {
   const rows = db.prepare(
     `SELECT to_source, from_source, relation_type, weight
        FROM kb_edges
-      WHERE match_kind = ? AND to_source LIKE ? ESCAPE '\\'`,
-  ).all(CALL_MATCH_KIND, prefix.replace(/[%_]/g, "\\$&") + "%") as Array<{
+      WHERE match_kind = ? AND to_source LIKE ? ESCAPE '\\'
+        AND relation_type <> ?`,
+  ).all(CALL_MATCH_KIND, prefix.replace(/[%_]/g, "\\$&") + "%", UNRESOLVED_RELATION) as Array<{
     to_source: string; from_source: string; relation_type: string; weight: number;
   }>;
+
+  // Real count of unnameable call sites in this file, not an assumed zero.
+  const unresolvedRow = db.prepare(
+    `SELECT weight FROM kb_edges WHERE match_kind = ? AND relation_type = ? AND to_source = ?`,
+  ).get(CALL_MATCH_KIND, UNRESOLVED_RELATION, unresolvedNode(rel)) as { weight: number } | undefined;
 
   const bySymbol = new Map<string, SymbolImpact>();
   for (const r of rows) {
@@ -293,5 +320,145 @@ export function getFileImpact(db: DatabaseSync, filePath: string): FileImpact {
   const symbols = [...bySymbol.values()].sort((a, b) => b.callers - a.callers);
   for (const s of symbols) s.files.sort();
 
-  return { path: rel, symbols, dynamicSites: 0, built };
+  return { path: rel, symbols, dynamicSites: unresolvedRow?.weight ?? 0, built };
+}
+
+/**
+ * Fan-in threshold for the HIGH marker. From the measured distribution over this
+ * repo: a handful of genuine hubs at 20-126 and a long tail under 10, so 10
+ * flags about a dozen symbols rather than hundreds.
+ */
+export const HIGH_FAN_IN = 10;
+
+/**
+ * Render an impact result for an agent.
+ *
+ * ONE renderer, used by the MCP local handler, the MCP remote handler and the
+ * PreRead hook. Three copies is how the `warning` field silently went missing
+ * from three MCP tools and had to be fixed three times.
+ */
+export function renderImpact(
+  result: { targets: Array<{ symbol: string; declaredIn: string; callers: number; sites: number; files: string[]; ambiguous: number }>; dynamicSites: number; built: boolean },
+  query: { file?: string; symbol?: string },
+  opts: {
+    /** Omit symbols below this caller count from the list. Default 1. */
+    minCallers?: number;
+    /** Cap the listed symbols. Default 25. The remainder is counted, never dropped silently. */
+    limit?: number;
+  } = {},
+): string {
+  const subject = query.file ?? query.symbol ?? "(unknown)";
+  const minCallers = opts.minCallers ?? 1;
+  const limit = opts.limit ?? 25;
+
+  if (!result.built) {
+    return `## Impact — ${subject}\n\n` +
+      `The call graph has NOT been built for this project, so this is not an answer of ` +
+      `"nothing depends on it" — it is "unknown". Index the project (zc_index_project) or ` +
+      `run zc_graph_rebuild, then ask again.`;
+  }
+
+  const lines: string[] = [`## Impact — what depends on ${subject}`];
+
+  // A symbol reached only by name-only matches would otherwise render as
+  // "← 0 callers in 0 files", which reads like a finding and is just noise.
+  // Counted below instead of listed, so nothing is silently dropped.
+  const nameOnly = result.targets.filter((t) => t.callers < minCallers && t.ambiguous > 0).length;
+  const shown = result.targets.filter((t) => t.callers >= minCallers);
+  const truncated = Math.max(0, shown.length - limit);
+
+  if (shown.length === 0) {
+    lines.push(``);
+    lines.push(query.symbol
+      ? `No static callers found for '${query.symbol}'. That is not the same as safe to change: `
+      : `No functions declared here have static callers. That is not the same as safe to change: `);
+    lines.push(`dynamic dispatch, callbacks and string-keyed routing are invisible to static ` +
+               `extraction, and cross-repo callers are not counted at all.`);
+  } else {
+    lines.push(``);
+    for (const t of shown.slice(0, limit)) {
+      const high = t.callers >= HIGH_FAN_IN ? "   ⚠ HIGH FAN-IN" : "";
+      const where = query.symbol ? `  [declared in ${t.declaredIn}]` : "";
+      lines.push(
+        `  ${t.symbol}()${where}  ← ${t.callers} caller${t.callers === 1 ? "" : "s"} ` +
+        `in ${t.files.length} file${t.files.length === 1 ? "" : "s"} (${t.sites} call site${t.sites === 1 ? "" : "s"})${high}`,
+      );
+      if (t.files.length > 0) {
+        const shown = t.files.slice(0, 6).join(", ");
+        lines.push(`      ${shown}${t.files.length > 6 ? `, +${t.files.length - 6} more` : ""}`);
+      }
+      if (t.ambiguous > 0) {
+        lines.push(`      (${t.ambiguous} further reference${t.ambiguous === 1 ? "" : "s"} matched by name only ` +
+                   `and are NOT counted — same-named functions or a common method name)`);
+      }
+    }
+  }
+
+  if (truncated > 0) {
+    lines.push(`      … and ${truncated} more symbol${truncated === 1 ? "" : "s"} with callers (not shown)`);
+  }
+  if (nameOnly > 0) {
+    lines.push(``);
+    lines.push(`  ${nameOnly} further symbol${nameOnly === 1 ? " is" : "s are"} referenced by name only ` +
+               `and could not be attributed confidently.`);
+  }
+
+  // Coverage is mandatory, not decorative: an impact answer that hides what it
+  // could not see is how a confident wrong number gets believed.
+  if (result.dynamicSites > 0) {
+    lines.push(``);
+    lines.push(`  ⚠ ${result.dynamicSites} call site${result.dynamicSites === 1 ? "" : "s"} in this file ` +
+               `could not be resolved statically (dynamic dispatch / computed callee). Coverage is incomplete.`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Fan-in for one symbol name across the whole project — the deliberate-lookup
+ * path behind zc_impact, as opposed to the by-file path the PreRead hook uses.
+ *
+ * Returns one entry per declaring file, because a name declared twice is two
+ * different functions and collapsing them would be the same mistake the
+ * resolver already refuses to make.
+ */
+export function getSymbolImpact(
+  db: DatabaseSync,
+  symbol: string,
+): Array<SymbolImpact & { declaredIn: string }> {
+  const rows = db.prepare(
+    `SELECT to_source, from_source, relation_type, weight
+       FROM kb_edges
+      WHERE match_kind = ? AND relation_type <> ? AND to_source LIKE ? ESCAPE '\\'`,
+  ).all(
+    CALL_MATCH_KIND,
+    UNRESOLVED_RELATION,
+    "func:%#" + symbol.replace(/[%_]/g, "\\$&"),
+  ) as Array<{ to_source: string; from_source: string; relation_type: string; weight: number }>;
+
+  const byTarget = new Map<string, SymbolImpact & { declaredIn: string }>();
+  for (const r of rows) {
+    // LIKE 'func:%#name' can also match 'func:a.ts#other#name'; require an exact tail.
+    const hash = r.to_source.lastIndexOf("#");
+    if (r.to_source.slice(hash + 1) !== symbol) continue;
+
+    let t = byTarget.get(r.to_source);
+    if (!t) {
+      t = {
+        symbol,
+        declaredIn: r.to_source.slice("func:".length, hash),
+        callers: 0, sites: 0, files: [], ambiguousCallers: 0,
+      };
+      byTarget.set(r.to_source, t);
+    }
+    if (r.relation_type === "calls_ambiguous") { t.ambiguousCallers++; continue; }
+    t.callers++;
+    t.sites += r.weight;
+    const f = r.from_source.slice("func:".length).split("#")[0]!;
+    if (!t.files.includes(f)) t.files.push(f);
+  }
+
+  const out = [...byTarget.values()].sort((a, b) => b.callers - a.callers);
+  for (const t of out) t.files.sort();
+  return out;
 }

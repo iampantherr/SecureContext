@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { persistCallEdges, getFileImpact, CALL_MATCH_KIND } from "./call_edges.js";
+import { persistCallEdges, getFileImpact, getSymbolImpact, renderImpact, HIGH_FAN_IN, CALL_MATCH_KIND } from "./call_edges.js";
 import { rebuildBacklinks } from "./backlinks.js";
 import { nodeId, type CallEdge } from "./call_graph.js";
 
@@ -124,8 +124,83 @@ describe("getFileImpact", () => {
     expect(getFileImpact(db, "src\\lib.ts").symbols).toHaveLength(1);
   });
 
+  it("reports the real count of unnameable call sites, not an assumed zero", () => {
+    persistCallEdges(db, CALLS, new Map([["lib.ts", 4]]));
+    expect(getFileImpact(db, "lib.ts").dynamicSites).toBe(4);
+    expect(getFileImpact(db, "app.ts").dynamicSites).toBe(0);
+  });
+
+  it("keeps the unresolved sentinel out of the symbol list", () => {
+    persistCallEdges(db, CALLS, new Map([["lib.ts", 4]]));
+    const symbols = getFileImpact(db, "lib.ts").symbols.map((s) => s.symbol);
+    expect(symbols).toEqual(expect.arrayContaining(["helper", "close"]));
+    expect(symbols.some((s) => s.includes("unresolved"))).toBe(false);
+  });
+
   it("does not match a different file that shares a prefix", () => {
     persistCallEdges(db, [edge(nodeId("app.ts", "main"), nodeId("lib.ts.bak", "helper"))]);
     expect(getFileImpact(db, "lib.ts").symbols).toHaveLength(0);
+  });
+});
+
+describe("getSymbolImpact", () => {
+  it("reports one entry per declaring file, never merging same-named functions", () => {
+    persistCallEdges(db, [
+      edge(nodeId("a.ts", "useA"), nodeId("store.ts", "ph"), 2),
+      edge(nodeId("b.ts", "useB"), nodeId("other.ts", "ph"), 1),
+    ]);
+    const out = getSymbolImpact(db, "ph");
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ declaredIn: "store.ts", callers: 1, sites: 2 });
+    expect(out.map((o) => o.declaredIn).sort()).toEqual(["other.ts", "store.ts"]);
+  });
+
+  it("does not match a symbol whose name merely ends with the query", () => {
+    persistCallEdges(db, [edge(nodeId("a.ts", "x"), nodeId("lib.ts", "projectHash"))]);
+    expect(getSymbolImpact(db, "Hash")).toEqual([]);
+  });
+
+  it("returns an empty list for an unknown symbol", () => {
+    persistCallEdges(db, CALLS);
+    expect(getSymbolImpact(db, "nonexistent")).toEqual([]);
+  });
+});
+
+describe("renderImpact", () => {
+  const target = (symbol: string, callers: number, ambiguous = 0) =>
+    ({ symbol, declaredIn: "lib.ts", callers, sites: callers, files: callers ? ["a.ts"] : [], ambiguous });
+
+  it("says unknown, not zero, when the graph was never built", () => {
+    const out = renderImpact({ targets: [], dynamicSites: 0, built: false }, { file: "lib.ts" });
+    expect(out).toMatch(/NOT been built/);
+    expect(out).not.toMatch(/safe to change/);
+  });
+
+  it("refuses to call an empty result safe", () => {
+    const out = renderImpact({ targets: [], dynamicSites: 0, built: true }, { symbol: "x" });
+    expect(out).toMatch(/No static callers found/);
+    expect(out).toMatch(/not the same as safe to change/);
+  });
+
+  it("marks high fan-in and always states unresolved coverage", () => {
+    const out = renderImpact(
+      { targets: [target("hub", HIGH_FAN_IN)], dynamicSites: 7, built: true }, { file: "lib.ts" });
+    expect(out).toMatch(/HIGH FAN-IN/);
+    expect(out).toMatch(/7 call sites in this file could not be resolved/);
+  });
+
+  it("counts name-only symbols instead of listing them as zero-caller findings", () => {
+    const out = renderImpact(
+      { targets: [target("real", 2), target("noise", 0, 3)], dynamicSites: 0, built: true },
+      { file: "lib.ts" });
+    expect(out).toMatch(/real\(\)/);
+    expect(out).not.toMatch(/noise\(\).*0 callers/);
+    expect(out).toMatch(/1 further symbol is referenced by name only/);
+  });
+
+  it("caps the list but reports how many were withheld", () => {
+    const many = Array.from({ length: 30 }, (_, i) => target(`f${i}`, 2));
+    const out = renderImpact({ targets: many, dynamicSites: 0, built: true }, { file: "lib.ts" }, { limit: 5 });
+    expect(out).toMatch(/and 25 more symbols with callers/);
   });
 });

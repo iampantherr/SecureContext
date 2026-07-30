@@ -51,6 +51,31 @@ export type {
 // Store-specific types
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * One call target and everything that reaches it.
+ *
+ * `callers` and `sites` are different questions on purpose: callers is "how many
+ * places must I check", sites is "how many edits might be needed". `ambiguous`
+ * is what name-based resolution could not attribute confidently and is
+ * deliberately NOT folded into callers.
+ */
+export interface CallImpactTarget {
+  symbol:     string;
+  declaredIn: string;
+  callers:    number;
+  sites:      number;
+  files:      string[];
+  ambiguous:  number;
+}
+
+export interface CallImpactResult {
+  targets: CallImpactTarget[];
+  /** Call sites in the queried file that could not be named. Coverage, not noise. */
+  dynamicSites: number;
+  /** False when the call layer has never been built. Never render this as zero impact. */
+  built: boolean;
+}
+
 export interface MemoryStats {
   count:         number;
   max:           number;
@@ -179,6 +204,19 @@ export interface Store {
   runEnrichment?(): Promise<{ projects: number; flagged: number; backfilledProjects: number; ollamaDown: boolean; entities?: number }>;
   graphData(projectPath: string): Promise<{ nodes: Array<{ id: string; inDegree: number; weightedIn: number }>; edges: Array<{ from: string; to: string; relation: string; weight: number }> }>;
   backlinksFor(projectPath: string, source: string, limit: number): Promise<{ inDegree: number; weightedIn: number; inbound: Array<{ from: string; relation: string; weight: number }> } | null>;
+
+  /**
+   * Function-level impact: who calls what is declared in `file`, or who calls
+   * `symbol` anywhere. Exactly one of file/symbol is used.
+   *
+   * `built: false` means the call layer has never been built for this project —
+   * NOT that nothing depends on the target. Callers must render those
+   * differently, which is the entire point of the feature.
+   */
+  callImpactFor(
+    projectPath: string,
+    query: { file?: string; symbol?: string },
+  ): Promise<CallImpactResult>;
 
   // ── Community query mode (v0.37.0) ───────────────────────────────────────────
   /** Corpus-level Q&A over pre-computed Louvain community summaries (+ DRIFT-lite follow-ups). */

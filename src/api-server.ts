@@ -3665,6 +3665,27 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ── Function call graph: cascade impact (v0.55.0) ────────────────────────
+  app.get("/api/v1/graph/impact", async (request, reply) => {
+    try {
+      const { projectPath, file, symbol } = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      if (typeof file !== "string" && typeof symbol !== "string") {
+        throw new ApiError(400, "one of file or symbol is required");
+      }
+      const impact = await store.callImpactFor(pp, {
+        file:   typeof file   === "string" ? file   : undefined,
+        symbol: typeof symbol === "string" ? symbol : undefined,
+      });
+      // `built` rides on the response deliberately: a client must be able to tell
+      // "graph not built" from "nothing depends on this".
+      return { ok: true, ...impact };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
   // ── Memory contradictions (Tier-1 B) ─────────────────────────────────────
   app.post("/api/v1/contradictions", async (request, reply) => {
     try {

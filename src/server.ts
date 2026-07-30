@@ -842,6 +842,25 @@ const TOOLS: Tool[] = [
       required: ["source"],
     },
   },
+  // ── v0.55.0 function call graph (cascade impact) ─────────────────────────
+  {
+    name: "zc_impact",
+    description:
+      "BEFORE editing a function, show what depends on it: which functions call it, from how many " +
+      "files, and how many call sites. Answers 'what breaks if I change this?' — the question a " +
+      "single file cannot answer. Pass `file` for everything declared in a file you are about to " +
+      "edit, or `symbol` for one function by name. Reports unresolved (dynamic) call sites as a " +
+      "coverage warning, and says explicitly when the graph has not been built — a zero here never " +
+      "means 'safe to change' unless built=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file:   { type: "string", description: "Repo-relative path, e.g. 'src/store.ts' — returns impact for every function it declares" },
+        symbol: { type: "string", description: "Function name, e.g. 'projectHash' — returns one entry per declaring file" },
+      },
+      required: [],
+    },
+  },
   {
     name: "zc_graph_rebuild",
     description:
@@ -1551,6 +1570,27 @@ async function _handleRemoteTool(
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
+      case "zc_impact": {
+        const file   = body["file"]   ? String(body["file"])   : "";
+        const symbol = body["symbol"] ? String(body["symbol"]) : "";
+        if (!file && !symbol) {
+          return { content: [{ type: "text", text: "zc_impact needs `file` (a path you are about to edit) or `symbol` (a function name)." }] };
+        }
+        const q = `?projectPath=${encodeURIComponent(PROJECT_PATH)}` +
+                  (file ? `&file=${encodeURIComponent(file)}` : "") +
+                  (symbol ? `&symbol=${encodeURIComponent(symbol)}` : "");
+        const r = await apiCall("GET", `/api/v1/graph/impact${q}`);
+        const { renderImpact } = await import("./indexing/call_edges.js");
+        return { content: [{ type: "text", text: renderImpact(
+          {
+            targets:      (r["targets"] ?? []) as never[],
+            dynamicSites: Number(r["dynamicSites"] ?? 0),
+            built:        Boolean(r["built"]),
+          },
+          { file: file || undefined, symbol: symbol || undefined },
+        ) }] };
+      }
+
       case "zc_graph_backlinks": {
         const q = `?projectPath=${encodeURIComponent(PROJECT_PATH)}&source=${encodeURIComponent(String(body["source"] ?? ""))}&limit=${encodeURIComponent(String(body["limit"] ?? 20))}`;
         const r = await apiCall("GET", `/api/v1/graph/backlinks${q}`);
@@ -1952,6 +1992,8 @@ async function dispatchToolCall(
     // v0.31.0 Tier-1 — graph + contradictions are store-backed (PG in prod), so they
     // MUST proxy to the API; otherwise they'd run in-process against empty local SQLite.
     "zc_graph_rebuild", "zc_graph_backlinks", "zc_memory_contradictions",
+    // v0.55.0 — call-graph impact is store-backed for the same reason.
+    "zc_impact",
     // D1 — program memory is PG-backed; must proxy to the API.
     "zc_program",
   ]);
@@ -3041,6 +3083,19 @@ async function dispatchToolCall(
         lines.push(``);
         lines.push(`Backlink boost is ${Config.W_BACKLINK > 0 ? `ON (W_BACKLINK=${Config.W_BACKLINK})` : "OFF (W_BACKLINK=0)"} for zc_search ranking.`);
         return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_impact": {
+        const { file, symbol } = args as { file?: string; symbol?: string };
+        if (!file && !symbol) {
+          return { content: [{ type: "text", text: "zc_impact needs `file` (a path you are about to edit) or `symbol` (a function name)." }] };
+        }
+        // Uses the same store the API server would, so the local and proxied
+        // paths cannot drift in what they consider "built".
+        const { createStore } = await import("./store.js");
+        const { renderImpact } = await import("./indexing/call_edges.js");
+        const impact = await (await createStore()).callImpactFor(PROJECT_PATH, { file, symbol });
+        return { content: [{ type: "text", text: renderImpact(impact, { file, symbol }) }] };
       }
 
       case "zc_graph_backlinks": {

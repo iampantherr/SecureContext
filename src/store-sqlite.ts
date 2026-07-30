@@ -74,7 +74,7 @@ import type {
   TokenPayload,
   FetchStats,
 } from "./store.js";
-import type { MemoryFact, BroadcastType, BroadcastMessage, BroadcastResult, KnowledgeEntry, CrossProjectEntry, RetentionTier } from "./store.js";
+import type { MemoryFact, BroadcastType, BroadcastMessage, BroadcastResult, KnowledgeEntry, CrossProjectEntry, RetentionTier, CallImpactResult } from "./store.js";
 import { projectHash as scopedProjectHash } from "./store.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -273,6 +273,44 @@ export class SqliteStore implements Store {
       } catch { return null; }
       if (!bl) return null;
       return { inDegree: bl.in_degree, weightedIn: bl.weighted_in, inbound };
+    } finally {
+      db.close();
+    }
+  }
+
+  async callImpactFor(
+    projectPath: string,
+    query: { file?: string; symbol?: string },
+  ): Promise<CallImpactResult> {
+    const { getFileImpact, getSymbolImpact } = await import("./indexing/call_edges.js");
+    const db = openProjectDb(projectPath);
+    try {
+      if (query.symbol) {
+        const out = getSymbolImpact(db, query.symbol);
+        // built is derived from the layer, not from this query returning rows:
+        // an unknown symbol in a built graph is a real "no callers", while an
+        // unbuilt graph is "unknown". They must not look the same.
+        const built = getFileImpact(db, " never").built;
+        return {
+          targets: out.map((t) => ({
+            symbol: t.symbol, declaredIn: t.declaredIn, callers: t.callers,
+            sites: t.sites, files: t.files, ambiguous: t.ambiguousCallers,
+          })),
+          dynamicSites: 0,
+          built,
+        };
+      }
+      const imp = getFileImpact(db, query.file ?? "");
+      return {
+        targets: imp.symbols.map((s) => ({
+          symbol: s.symbol, declaredIn: imp.path, callers: s.callers,
+          sites: s.sites, files: s.files, ambiguous: s.ambiguousCallers,
+        })),
+        dynamicSites: imp.dynamicSites,
+        built: imp.built,
+      };
+    } catch {
+      return { targets: [], dynamicSites: 0, built: false };
     } finally {
       db.close();
     }
