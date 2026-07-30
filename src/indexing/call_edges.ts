@@ -345,6 +345,13 @@ export function renderImpact(
     minCallers?: number;
     /** Cap the listed symbols. Default 25. The remainder is counted, never dropped silently. */
     limit?: number;
+    /**
+     * Only symbols called from a DIFFERENT file. For the pre-edit case that is
+     * the whole question — a function used only inside its own file is visible
+     * in the file you are already looking at, while a cross-file caller is
+     * exactly what you cannot see and are about to break.
+     */
+    crossFileOnly?: boolean;
   } = {},
 ): string {
   const subject = query.file ?? query.symbol ?? "(unknown)";
@@ -364,14 +371,25 @@ export function renderImpact(
   // "← 0 callers in 0 files", which reads like a finding and is just noise.
   // Counted below instead of listed, so nothing is silently dropped.
   const nameOnly = result.targets.filter((t) => t.callers < minCallers && t.ambiguous > 0).length;
-  const shown = result.targets.filter((t) => t.callers >= minCallers);
+  const isCrossFile = (t: { declaredIn: string; files: string[] }): boolean =>
+    t.files.some((f) => f !== (query.file ?? t.declaredIn));
+  const shown = result.targets
+    .filter((t) => t.callers >= minCallers)
+    .filter((t) => !opts.crossFileOnly || isCrossFile(t));
+  const localOnly = opts.crossFileOnly
+    ? result.targets.filter((t) => t.callers >= minCallers && !isCrossFile(t)).length
+    : 0;
   const truncated = Math.max(0, shown.length - limit);
 
   if (shown.length === 0) {
     lines.push(``);
-    lines.push(query.symbol
-      ? `No static callers found for '${query.symbol}'. That is not the same as safe to change: `
-      : `No functions declared here have static callers. That is not the same as safe to change: `);
+    lines.push(
+      query.symbol
+        ? `No static callers found for '${query.symbol}'. That is not the same as safe to change: `
+        : opts.crossFileOnly && localOnly > 0
+          ? `Nothing here is called from another file (${localOnly} ${localOnly === 1 ? "symbol is" : "symbols are"} ` +
+            `used only within it). That is not the same as safe to change: `
+          : `No functions declared here have static callers. That is not the same as safe to change: `);
     lines.push(`dynamic dispatch, callbacks and string-keyed routing are invisible to static ` +
                `extraction, and cross-repo callers are not counted at all.`);
   } else {
@@ -396,6 +414,9 @@ export function renderImpact(
 
   if (truncated > 0) {
     lines.push(`      … and ${truncated} more symbol${truncated === 1 ? "" : "s"} with callers (not shown)`);
+  }
+  if (localOnly > 0) {
+    lines.push(`  (${localOnly} more ${localOnly === 1 ? "symbol is" : "symbols are"} called only within this file)`);
   }
   if (nameOnly > 0) {
     lines.push(``);

@@ -31,7 +31,7 @@
  * Failure mode: any error → fail open, allow Read through.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 
 // ─── Read the hook payload from stdin (Claude Code's hook protocol) ─────────
@@ -67,7 +67,35 @@ function normalizeForLookup(p, projectRoot) {
   return p.replace(/\\/g, "/");
 }
 
-const projectPath0 = input.cwd ?? process.cwd();
+/**
+ * v0.55.0 — resolve the project from the FILE, not from the session cwd.
+ *
+ * Found live: a session running in .../zeroclaw read .../SecureContext/src/embedder.ts.
+ * The hook looked the file up in zeroclaw's knowledge base under an absolute path,
+ * found nothing, and reported "NOT indexed" for a file that is fully indexed in
+ * SecureContext. Worse than the false negative was the advice attached to it —
+ * "run zc_file_summary" would have indexed a SecureContext file INTO zeroclaw's KB.
+ *
+ * Every SC lookup is project-scoped, so the project must come from the path being
+ * read. First .git walking up is the repo root; sessions that work across repos
+ * (the normal case here) then hit the right database.
+ */
+function resolveProjectRoot(absPath, fallback) {
+  try {
+    if (!/^([a-zA-Z]:[\\/]|\/)/.test(absPath)) return fallback;   // relative → already project-local
+    let dir = resolve(absPath, "..");
+    for (let i = 0; i < 40; i++) {
+      if (existsSync(join(dir, ".git"))) return dir;
+      const parent = resolve(dir, "..");
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch { /* fall through */ }
+  return fallback;
+}
+
+const sessionCwd = input.cwd ?? process.cwd();
+const projectPath0 = resolveProjectRoot(rawPath, sessionCwd);
 const path = normalizeForLookup(rawPath, projectPath0);
 
 // ─── Bypass checks ──────────────────────────────────────────────────────────
@@ -147,6 +175,44 @@ try {
   const scPath = process.env.ZC_CTX_DIST ?? resolve(process.env.HOME ?? process.env.USERPROFILE ?? "", "AI_projects/SecureContext/dist");
   const harness = await import(`file://${scPath.replace(/\\/g, "/")}/harness.js`);
   const { wasReadThisSession, recordSessionRead, getFileSummary } = harness;
+
+  /**
+   * v0.55.0 — cascade impact, attached to whatever the hook is about to return.
+   *
+   * This is the delivery mechanism the whole call-graph feature depends on.
+   * Measured precedent: kb_edges has 15,042 edges and zc_graph_backlinks was
+   * called ONCE in four weeks, while the same graph feeding search ranking is
+   * used on every query. An opt-in tool does not change behaviour; something
+   * that arrives whether or not you asked does. So impact is appended here
+   * rather than left for the agent to remember to look up.
+   *
+   * crossFileOnly: a function called only inside its own file is visible in the
+   * file you are already reading. A cross-file caller is the one you cannot see
+   * and are about to break.
+   *
+   * Never throws, never blocks: any failure returns "" and the read proceeds.
+   */
+  async function impactBlock(filePath) {
+    if (process.env.ZC_IMPACT_ON_READ === "0") return "";
+    if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(filePath)) return "";
+    try {
+      const [{ createStore }, { renderImpact }] = await Promise.all([
+        import(`file://${scPath.replace(/\\/g, "/")}/store.js`),
+        import(`file://${scPath.replace(/\\/g, "/")}/indexing/call_edges.js`),
+      ]);
+      const store = await createStore();
+      const impact = await store.callImpactFor(projectPath, { file: filePath });
+      // Silence is right when the layer is unbuilt: a "graph not built" banner on
+      // every Read would train agents to skip the whole block. Absence of the
+      // section is honest here because nothing is claimed.
+      if (!impact.built) return "";
+      if (impact.targets.length === 0 && impact.dynamicSites === 0) return "";
+      return "\n\n" + renderImpact(impact, { file: filePath },
+        { crossFileOnly: true, limit: 12 });
+    } catch {
+      return "";
+    }
+  }
 
   // ─── Bypass: force_full_read ────────────────────────────────────────────
   if (forceFullRead) {
@@ -234,18 +300,21 @@ try {
         ? "  (⚠️ summary may be stale — file modified after indexing)\n"
         : "";
       const summaryText = `\n## L0 (purpose, 1 line)\n${summary.l0 || "(no L0)"}\n\n## L1 (detail, ~5 lines)\n${summary.l1 || "(no L1)"}\n`;
+      const impactText = await impactBlock(path);
       const replacement =
         `[zc-ctx L0/L1 SUMMARY — file body NOT loaded]\n\n` +
         `Source: ${rawPath}\n` +
         `Indexed: ${summary.indexedAt}\n` +
         staleHint +
         summaryText +
-        `\n─────────────────────────────────────────────────────────────────\n` +
+        impactText +
+        `\n\n─────────────────────────────────────────────────────────────────\n` +
         `If this summary answers your question, proceed.\n\n` +
         `If you need the FULL file content (e.g. to Edit/Write it), retry Read with:\n` +
-        `  Read({ file_path: "${rawPath}", force_full_read: true })\n` +
-        `  OR pass offset/limit to read a specific range:\n` +
-        `  Read({ file_path: "${rawPath}", offset: 1, limit: 200 })\n\n` +
+        `  Read({ file_path: "${rawPath}", offset: 1, limit: 100000 })\n` +
+        `  (offset/limit always bypasses this; use a real range when you know it)\n` +
+        `  Some clients also accept force_full_read: true, but most reject unknown\n` +
+        `  Read parameters with a validation error — prefer offset/limit.\n\n` +
         `(This redirect saves ~95% of Read tokens. Set ZC_SUMMARY_REDIRECT=0 to disable globally.)`;
 
       // v0.22.5 — fire read_redirects telemetry (the existing per-success path)
@@ -292,8 +361,13 @@ try {
 
     // 2b — Not indexed: block + ask agent to index OR force-read.
     {
+      // Impact does not depend on the L0/L1 summary existing — the call graph is
+      // built from source, so an unindexed file can still have known callers.
+      // Withholding it here would be the one moment it matters most.
+      const impactText = await impactBlock(path);
       const hint =
-        `[zc-ctx] '${rawPath}' is NOT indexed yet (no L0/L1 summary in SecureContext).\n\n` +
+        `[zc-ctx] '${rawPath}' is NOT indexed yet (no L0/L1 summary in SecureContext).\n` +
+        impactText + `\n` +
         `To save tokens for yourself + every future session, build a summary FIRST:\n\n` +
         `  Option A — Index just this file (recommended for code/docs you'll re-read):\n` +
         `    1. zc_file_summary({ name: "${rawPath}" })  — auto-indexes via local LLM if missing\n` +
@@ -302,9 +376,11 @@ try {
         `    1. zc_index_project({ projectPath: "<your-project-root>" })  — kicks off bg indexer\n\n` +
         `  Option C — Skip indexing, read the raw file (use ONLY if the file is throwaway,\n` +
         `             generated, or you'll never re-read it):\n` +
-        `    Retry Read with: Read({ file_path: "${path}", force_full_read: true })\n\n` +
+        `    Read({ file_path: "${rawPath}", offset: 1, limit: 100000 })\n` +
+        `    offset/limit is the portable bypass. force_full_read: true also works,\n` +
+        `    but most clients reject unknown Read parameters with a validation error.\n\n` +
         `  Option D — Need a specific line range only:\n` +
-        `    Read({ file_path: "${rawPath}", offset: <N>, limit: <M> })  (offset/limit bypasses summary)\n\n` +
+        `    Read({ file_path: "${rawPath}", offset: <N>, limit: <M> })\n\n` +
         `─────────────────────────────────────────────────────────────────\n` +
         `WHY: every Read of an un-summarized file is a missed savings opportunity. By forcing\n` +
         `summaries to be created on-demand, the index builds as you work. Set\n` +
