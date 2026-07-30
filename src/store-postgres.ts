@@ -806,7 +806,7 @@ export class PostgresStore implements Store {
           if (ageMs < WM_CACHE_TTL) {
             return { max: cached.computedLimit, evictTo: cached.evictTo, profile: cached };
           }
-        } catch {}
+        } catch { /* malformed or stale cache row -> fall through and recompute */ }
       }
     }
 

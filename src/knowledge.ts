@@ -105,7 +105,7 @@ export function openDb(projectPath: string): DatabaseSync {
   try {
     db.prepare(`INSERT OR IGNORE INTO project_meta(key, value) VALUES ('project_label', ?)`)
       .run(basename(projectPath));
-  } catch {}
+  } catch { /* project label is cosmetic; never fail open() for it */ }
 
   // Tiered retention purge (run on every open — cheap O(index) deletes)
   _purgeStaleContent(db, projectPath);
@@ -661,7 +661,9 @@ function _searchDb(
     metaRows = db.prepare(
       `SELECT source, source_type FROM source_meta WHERE source IN (${placeholders})`
     ).all(...sources) as MetaRow[];
-  } catch {}
+    // source_meta is absent on pre-v0.6 DBs; results render without source-type
+    // enrichment rather than failing the search.
+  } catch { /* keep metaRows [] */ }
 
   const sourceTypeMap = new Map<string, string>();
   for (const row of metaRows) sourceTypeMap.set(row.source, row.source_type);
@@ -958,7 +960,7 @@ export async function searchKnowledge(
         for (const row of tierRows) {
           tierMap.set(row.source, { l0: row.l0_summary, l1: row.l1_summary });
         }
-      } catch {}
+      } catch { /* no tier columns on an old DB: render untiered, not not-at-all */ }
     }
 
     for (const result of results) {
@@ -1046,7 +1048,9 @@ export async function explainRetrieval(
     metaRows = db.prepare(
       `SELECT source, source_type, COALESCE(l0_summary,'') as l0_summary, COALESCE(l1_summary,'') as l1_summary FROM source_meta WHERE source IN (${placeholders})`
     ).all(...sources) as MetaRow[];
-  } catch {}
+    // Embedding/meta enrichment is optional: a missing table degrades ranking,
+    // it does not make the query wrong.
+  } catch { /* keep embedRows/metaRows [] */ }
 
   // S9 — group head + chunk vectors per PARENT source; cosine below max-pools.
   const embeddingMap = new Map<string, Float32Array[]>();
@@ -1185,7 +1189,7 @@ export async function searchAllProjects(
         "SELECT value FROM project_meta WHERE key = 'project_label'"
       ).get() as { value: string } | undefined;
       if (labelRow) projectLabel = labelRow.value;
-    } catch {}
+    } catch { /* keep the hash-prefix label set above */ }
 
     const results = _searchDb(db, queries, queryVector);
     db.close();
@@ -1227,7 +1231,12 @@ export function getKbStats(projectPath: string): {
     summaryEntries = (db.prepare(
       `SELECT COUNT(*) as n FROM source_meta WHERE retention_tier = 'summary'`
     ).get() as CountRow).n;
-  } catch {}
+    // ponytail: source_meta may not exist on a pre-v0.6 DB. NOTE THE CEILING -
+    // a 0 here means "not counted", but the operator sees it as "none", which is
+    // the benign-default class. Every other count in this function is deliberately
+    // UNWRAPPED and throws instead. Upgrade path: widen these two to number|null
+    // and render "-" in the dashboard when null.
+  } catch { /* leaves 0 - see ceiling note above */ }
 
   const embeddingsCached = (db.prepare("SELECT COUNT(*) as n FROM embeddings").get() as CountRow).n;
 

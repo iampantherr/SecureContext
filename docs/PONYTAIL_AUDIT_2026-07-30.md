@@ -77,9 +77,29 @@ Distribution:
 
 **200 carry a comment** (`/* best-effort */`, `/* non-fatal */`) — those are defensible.
 
-**22 are bare `catch {}` with no comment whatsoever.** These are the S1 subset, because nobody can tell whether the silence was intended:
+**22 appeared to be bare `catch {}`.** *(Corrected 2026-07-30 after reading all 22 — the detector over-counted.)*
 
-`harness.ts:709,774` · `knowledge.ts:108,664,961,1049,1188,1230` · `memory.ts:260,270` · `migrations.ts:62,82` *(+10 more — see `audit_raw.json`)*
+The regex only inspected text **between the braces**, so it flagged code whose intent is documented on the line above:
+
+```ts
+// Add agent_id to existing tables upgrading from v0.5.0 (safe: silently ignored if already present)
+try { db.exec(`ALTER TABLE working_memory ADD COLUMN agent_id ...`); } catch {}
+```
+
+Actual breakdown after reading each one:
+
+| count | kind | action taken |
+|---|---|---|
+| **12** | idempotent `ALTER TABLE`, intent stated on the preceding line | **none** — a second comment is noise (rung 1) |
+| **8** | degrade to a safe default already declared before the `try` (search enrichment, project label, cache parse, JSON parse) | one-line intent comment |
+| **1** | **reports a fabricated `0` to the operator** | `ponytail:` ceiling note + upgrade path |
+| **1** | nested `child.kill` fallback after a failed kill | one-line comment |
+
+**The one that mattered — `knowledge.ts:1230` (`getKnowledgeStats`).** On a pre-v0.6 DB without `source_meta`, it silently returns `externalEntries: 0, summaryEntries: 0`. The operator reads "none"; the truth is "not counted". The asymmetry proves the intent was known: **every other count in that same function — `totalEntries`, `embeddingsCached`, `dbSizeBytes` — is deliberately unwrapped and throws.** Only these two lie.
+
+Left non-throwing on purpose (an old DB should still render stats), but the ceiling is now named in-code with the upgrade path: widen both to `number | null` and render `—` when null.
+
+**FIXED in v0.54.5.** 1032/1032 tests pass. Remaining bare-looking catches: 12, all documented `ALTER TABLE`.
 
 **This class has already cost this project three separate incidents**, all in the last week: telemetry `.catch(() => {})` hiding a 400 that made a detector unobservable; a swallowed embedding timeout; and the PreRead hook silently discarding rejected outcomes.
 

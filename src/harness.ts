@@ -706,7 +706,7 @@ export function getProjectCard(projectPath: string): ProjectCard {
     }
 
     let hot: string[] = [];
-    try { hot = JSON.parse(row.hot_files) as string[]; } catch {}
+    try { hot = JSON.parse(row.hot_files) as string[]; } catch { /* keep [] */ }
 
     return {
       stack:     row.stack,
@@ -771,7 +771,7 @@ function getProjectCardRaw(db: DatabaseSync): ProjectCard | null {
     ).get() as Row | undefined;
     if (!row) return null;
     let hot: string[] = [];
-    try { hot = JSON.parse(row.hot_files) as string[]; } catch {}
+    try { hot = JSON.parse(row.hot_files) as string[]; } catch { /* keep [] */ }
     return {
       stack: row.stack, layout: row.layout, state: row.state,
       gotchas: row.gotchas, hotFiles: hot, updatedAt: row.updated_at,

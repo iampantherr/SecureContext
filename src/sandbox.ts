@@ -63,7 +63,7 @@ function killProcessTree(child: ReturnType<typeof spawn>): void {
       process.kill(-child.pid, "SIGKILL");
     }
   } catch {
-    try { child.kill("SIGKILL"); } catch {}
+    try { child.kill("SIGKILL"); } catch { /* already dead */ }
   }
 }
 
