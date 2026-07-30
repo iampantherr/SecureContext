@@ -1836,42 +1836,6 @@ ${sr["warning"]}` : "";
         return { content: [{ type: "text", text: lines.join("\n\n") }] };
       }
 
-      case "zc_verify_claim": {
-        // Runs LOCALLY, not via the API. Found on the first live call: the
-        // containerized API answered "not a git work tree" for every path,
-        // because the host repo does not exist inside the container — so every
-        // repo-backed check degraded to UNVERIFIABLE and the tool was useless
-        // where it matters. The MCP server runs on the host in the agent's own
-        // process and can see the repository; verification belongs here.
-        //
-        // Note the fail-safe held: the mismatch produced "unchecked", never a
-        // false pass. That is the property the module was designed around.
-        const { verifyClaim } = await import("./claim_verify.js");
-        const cv = verifyClaim(PROJECT_PATH, {
-          summary:      typeof body["summary"] === "string" ? body["summary"] : undefined,
-          commit:       typeof body["commit"] === "string" ? body["commit"] : undefined,
-          evidenceFile: typeof body["evidenceFile"] === "string" ? body["evidenceFile"] : undefined,
-          files:        Array.isArray(body["files"]) ? (body["files"] as unknown[]).map(String).slice(0, 100) : undefined,
-        }) as unknown as Record<string, unknown>;
-        const lines = [
-          `## Claim verification`,
-          `verified=${cv["verified"]}  refuted=${cv["refuted"]}  unverifiable=${cv["unverifiable"]}`,
-          ``,
-        ];
-        for (const c of (cv["checks"] as Array<{ assertion: string; status: string; detail: string }> ?? [])) {
-          lines.push(`[${c.status.toUpperCase()}] ${c.assertion}`);
-          if (c.status !== "verified") lines.push(`    ${c.detail}`);
-        }
-        if (cv["refuted"] && Number(cv["refuted"]) > 0) {
-          lines.push(``, `DO NOT present this as delivered: the repository refutes part of the claim.`);
-        } else if (cv["unverifiable"] && Number(cv["unverifiable"]) > 0) {
-          // The distinction that matters: nothing refuted is not the same as verified.
-          lines.push(``, `Nothing was refuted, but ${cv["unverifiable"]} assertion(s) are UNCHECKED — not passed. ` +
-                         `Commit the program's own output if they need to count as evidence.`);
-        }
-        return { content: [{ type: "text", text: lines.join("\n") }] };
-      }
-
       case "zc_status": {
         const st = await apiCall("GET", `/api/v1/status?projectPath=${encodeURIComponent(PROJECT_PATH)}&agentId=${encodeURIComponent(String(body["agent_id"] ?? "default"))}`);
         const wm = st["workingMemory"] as Record<string, unknown>;
@@ -1900,24 +1864,6 @@ ${sr["warning"]}` : "";
           `${r["summary"]}\n\n` +
           `_Stored as working memory key: \`${r["written_to_memory_key"]}\` (importance=4)._\n` +
           `_Window: ${r["oldest_compacted_at"]} → ${r["newest_compacted_at"]}_`,
-        }] };
-      }
-
-      case "zc_context_status": {
-        // v0.20.0 — context budget for this MCP session
-        const { getContextStatus } = await import("./context_budget.js");
-        const s = getContextStatus(MCP_SESSION_ID);
-        const tierBadge = s.tier === "ok"        ? "✓ OK" :
-                          s.tier === "warn"      ? "⚠ WARN" :
-                          s.tier === "alert"     ? "🚨 ALERT" :
-                                                   "⛔ EMERGENCY";
-        return { content: [{ type: "text", text:
-          `## Context Budget — ${tierBadge}\n\n` +
-          `Tokens used:   **${s.totalTokens.toLocaleString()}** / ${s.budget.toLocaleString()}  (**${s.pct.toFixed(1)}%**)\n` +
-          `Tool calls:    ${s.callCount}\n` +
-          `Cost so far:   $${s.cost.toFixed(4)}\n` +
-          `Tier:          ${s.tier}\n\n` +
-          `**Recommendation:** ${s.recommendation}`,
         }] };
       }
 
@@ -1992,6 +1938,10 @@ async function dispatchToolCall(
     // v0.31.0 Tier-1 — graph + contradictions are store-backed (PG in prod), so they
     // MUST proxy to the API; otherwise they'd run in-process against empty local SQLite.
     "zc_graph_rebuild", "zc_graph_backlinks", "zc_memory_contradictions",
+    // v0.55.0 — zc_compact_window's handler already lived in _handleRemoteTool
+    // (it POSTs /api/v1/compact) but was never listed here, so that function was
+    // never entered for it and the tool always failed with "Unknown tool".
+    "zc_compact_window",
     // v0.55.0 — call-graph impact is store-backed for the same reason.
     "zc_impact",
     // D1 — program memory is PG-backed; must proxy to the API.
@@ -3094,6 +3044,82 @@ async function dispatchToolCall(
         return { content: [{ type: "text", text: renderImpact(impact, { file, symbol }) }] };
       }
 
+      // v0.55.0 - MOVED here from _handleRemoteTool. Its own comment said it
+      // "Runs LOCALLY, not via the API" - correct intent, unreachable placement:
+      // _handleRemoteTool is only entered for REMOTE_TOOLS members and this was
+      // never one, so the MERGE claim gate always returned "Unknown tool".
+      case "zc_verify_claim": {
+        // Runs LOCALLY, not via the API. Found on the first live call: the
+        // containerized API answered "not a git work tree" for every path,
+        // because the host repo does not exist inside the container — so every
+        // repo-backed check degraded to UNVERIFIABLE and the tool was useless
+        // where it matters. The MCP server runs on the host in the agent's own
+        // process and can see the repository; verification belongs here.
+        //
+        // Note the fail-safe held: the mismatch produced "unchecked", never a
+        // false pass. That is the property the module was designed around.
+        const { verifyClaim } = await import("./claim_verify.js");
+        // The local switch names its argument `args`; the remote one used `body`.
+        const vcArgs = (args ?? {}) as Record<string, unknown>;
+        const cv = verifyClaim(PROJECT_PATH, {
+          summary:      typeof vcArgs["summary"] === "string" ? vcArgs["summary"] : undefined,
+          commit:       typeof vcArgs["commit"] === "string" ? vcArgs["commit"] : undefined,
+          evidenceFile: typeof vcArgs["evidenceFile"] === "string" ? vcArgs["evidenceFile"] : undefined,
+          files:        Array.isArray(vcArgs["files"]) ? (vcArgs["files"] as unknown[]).map(String).slice(0, 100) : undefined,
+        }) as unknown as Record<string, unknown>;
+        const lines = [
+          `## Claim verification`,
+          `verified=${cv["verified"]}  refuted=${cv["refuted"]}  unverifiable=${cv["unverifiable"]}`,
+          ``,
+        ];
+        for (const c of (cv["checks"] as Array<{ assertion: string; status: string; detail: string }> ?? [])) {
+          lines.push(`[${c.status.toUpperCase()}] ${c.assertion}`);
+          if (c.status !== "verified") lines.push(`    ${c.detail}`);
+        }
+        if (cv["refuted"] && Number(cv["refuted"]) > 0) {
+          lines.push(``, `DO NOT present this as delivered: the repository refutes part of the claim.`);
+        } else if (cv["unverifiable"] && Number(cv["unverifiable"]) > 0) {
+          // The distinction that matters: nothing refuted is not the same as verified.
+          lines.push(``, `Nothing was refuted, but ${cv["unverifiable"]} assertion(s) are UNCHECKED — not passed. ` +
+                         `Commit the program's own output if they need to count as evidence.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_context_status": {
+        // v0.55.0 — MOVED here from _handleRemoteTool, where it was unreachable.
+        // It is not in REMOTE_TOOLS, so that function was never entered for it and
+        // every call returned "Unknown tool" — a tool advertised to every agent
+        // that could never run. Found by an E2E agent actually calling it, not by
+        // any test, because nothing asserted that a declared tool dispatches.
+        //
+        // Local is also the only correct home: the context budget is per-MCP-process
+        // state, so proxying it to the API server would report another session's usage.
+        const { getContextStatus } = await import("./context_budget.js");
+        const cs = getContextStatus(MCP_SESSION_ID);
+        const tierBadge = cs.tier === "ok"    ? "OK"
+                        : cs.tier === "warn"  ? "WARN"
+                        : cs.tier === "alert" ? "ALERT"
+                        :                       "EMERGENCY";
+        return { content: [{ type: "text", text:
+          `## Context Budget — ${tierBadge}\n\n` +
+          `Tokens used:   **${cs.totalTokens.toLocaleString()}** / ${cs.budget.toLocaleString()}  (**${cs.pct.toFixed(1)}%**)\n` +
+          `Tool calls:    ${cs.callCount}\n` +
+          `Cost so far:   $${cs.cost.toFixed(4)}\n` +
+          `Tier:          ${cs.tier}\n\n` +
+          `**Recommendation:** ${cs.recommendation}`,
+        }] };
+      }
+
+      case "zc_compact_window": {
+        // Reached only when ZC_API_URL is unset — otherwise REMOTE_TOOLS routes this
+        // to the API handler. Compaction needs the server's session tables, so say so
+        // plainly instead of failing with "Unknown tool".
+        return { content: [{ type: "text", text:
+          "zc_compact_window needs the SecureContext API server (it compacts server-side " +
+          "session history). Set ZC_API_URL, or use zc_summarize_session for a local summary." }] };
+      }
+
       case "zc_graph_backlinks": {
         const { source, limit } = args as { source: string; limit?: number };
         const { DatabaseSync: DSB } = await import("node:sqlite");
@@ -3178,7 +3204,7 @@ async function dispatchToolCall(
         const ssDbFile = ssJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const ssDb = new SsDb(ssDbFile);
         ssDb.exec("PRAGMA journal_mode = WAL");
-        const { resolveSkill } = await import("./skills/storage.js");
+        const { resolveSkill } = await import("./skills/storage_dual.js");  // v0.55.0: dual-backend resolver — storage.js is SQLite-only, so global/PG skills were "not found"
         const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         try {
           let skill = await resolveSkill(ssDb, name, projectScope);
@@ -3308,7 +3334,7 @@ async function dispatchToolCall(
         const srrDbFile = srrJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const srrDb = new SrrDb(srrDbFile);
         srrDb.exec("PRAGMA journal_mode = WAL");
-        const { resolveSkill } = await import("./skills/storage.js");
+        const { resolveSkill } = await import("./skills/storage_dual.js");  // v0.55.0: dual-backend resolver — storage.js is SQLite-only, so global/PG skills were "not found"
         const { replaySkill, LocalDeterministicExecutor } = await import("./skills/replay.js");
         const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(srrDb, name, projectScope);
@@ -3342,7 +3368,7 @@ async function dispatchToolCall(
         const spmDbFile = spmJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const spmDb = new SpmDb(spmDbFile);
         spmDb.exec("PRAGMA journal_mode = WAL");
-        const { resolveSkill } = await import("./skills/storage.js");
+        const { resolveSkill } = await import("./skills/storage_dual.js");  // v0.55.0: dual-backend resolver — storage.js is SQLite-only, so global/PG skills were "not found"
         const { runMutationCycle } = await import("./skills/orchestrator.js");
         const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(spmDb, name, projectScope);
@@ -3371,7 +3397,7 @@ async function dispatchToolCall(
         const seDbFile = seJoin(Config.DB_DIR, `${scopedProjectHash(PROJECT_PATH)}.db`);
         const seDb = new SeDb(seDbFile);
         seDb.exec("PRAGMA journal_mode = WAL");
-        const { resolveSkill } = await import("./skills/storage.js");
+        const { resolveSkill } = await import("./skills/storage_dual.js");  // v0.55.0: dual-backend resolver — storage.js is SQLite-only, so global/PG skills were "not found"
         const { exportToAgentSkillsIo } = await import("./skills/format/agentskills_io.js");
         const projectScope = `project:${scopedProjectHash(PROJECT_PATH)}` as `project:${string}`;
         const skill = await resolveSkill(seDb, name, projectScope);
