@@ -152,7 +152,8 @@ export function persistCallEdges(
 /** Full rebuild + persist for one project. Returns counts; never throws. */
 export async function rebuildCallGraph(projectPath: string): Promise<CallGraphRebuildResult> {
   const start = Date.now();
-  const { edges, files, unavailable } = await buildProjectCallGraph(projectPath);
+  const { edges: baseEdges, files, unavailable } = await buildProjectCallGraph(projectPath);
+  const edges = [...baseEdges];
 
   if (unavailable) {
     // Do NOT wipe the existing layer: a missing parser is not evidence that
@@ -162,6 +163,19 @@ export async function rebuildCallGraph(projectPath: string): Promise<CallGraphRe
 
   const unresolved = new Map<string, number>();
   for (const f of files) if (f.dynamicSites > 0) unresolved.set(f.path, f.dynamicSites);
+
+  // Cross-repo consumers, opt-in (ZC_CROSS_REPO_SCAN=1 or ZC_CROSS_REPO_ROOTS).
+  // Stored in THIS project's layer because the provider is who needs the warning
+  // before changing a route another repository calls.
+  let crossRepo: CallEdge[] = [];
+  try {
+    const { discoverConsumerRoots, buildCrossRepoEdges } = await import("./cross_repo.js");
+    const consumers = discoverConsumerRoots(projectPath);
+    if (consumers.length > 0) {
+      crossRepo = (await buildCrossRepoEdges(projectPath, consumers)).edges;
+    }
+  } catch { /* never fail a rebuild on the cross-repo pass */ }
+  edges.push(...crossRepo);
 
   const db = openDb(projectPath);
   try {
@@ -287,12 +301,19 @@ export function getFileImpact(db: DatabaseSync, filePath: string): FileImpact {
     `SELECT COUNT(*) AS c FROM kb_edges WHERE match_kind = ? LIMIT 1`,
   ).get(CALL_MATCH_KIND) as { c: number }).c > 0;
 
+  // Two node kinds live in a file: functions it declares (func:) and HTTP routes
+  // it registers (route:). A route is the cross-repo coupling point, so omitting
+  // it here would hide exactly the dependency the graph was extended to find.
+  const esc = (s: string) => s.replace(/[%_]/g, "\\$&") + "%";
   const rows = db.prepare(
     `SELECT to_source, from_source, relation_type, weight
        FROM kb_edges
-      WHERE match_kind = ? AND to_source LIKE ? ESCAPE '\\'
-        AND relation_type <> ?`,
-  ).all(CALL_MATCH_KIND, prefix.replace(/[%_]/g, "\\$&") + "%", UNRESOLVED_RELATION) as Array<{
+      WHERE match_kind = ? AND relation_type <> ?
+        AND (to_source LIKE ? ESCAPE '\\' OR to_source LIKE ? ESCAPE '\\')`,
+  ).all(
+    CALL_MATCH_KIND, UNRESOLVED_RELATION,
+    esc(prefix), esc(`route:${rel}#`),
+  ) as Array<{
     to_source: string; from_source: string; relation_type: string; weight: number;
   }>;
 
@@ -303,7 +324,8 @@ export function getFileImpact(db: DatabaseSync, filePath: string): FileImpact {
 
   const bySymbol = new Map<string, SymbolImpact>();
   for (const r of rows) {
-    const symbol = r.to_source.slice(prefix.length);
+    // "func:src/x.ts#foo" -> "foo";  "route:src/x.ts#GET /api/v1/y" -> "GET /api/v1/y"
+    const symbol = r.to_source.slice(r.to_source.indexOf("#") + 1);
     let s = bySymbol.get(symbol);
     if (!s) {
       s = { symbol, callers: 0, sites: 0, files: [], ambiguousCallers: 0 };
@@ -397,9 +419,19 @@ export function renderImpact(
     for (const t of shown.slice(0, limit)) {
       const high = t.callers >= HIGH_FAN_IN ? "   ⚠ HIGH FAN-IN" : "";
       const where = query.symbol ? `  [declared in ${t.declaredIn}]` : "";
+      // An HTTP route is not a function; "GET /api/v1/x()" reads like a bug.
+      const isRoute = /^[A-Z]+ \//.test(t.symbol);
+      const label = isRoute ? t.symbol : `${t.symbol}()`;
+      // A caller path carrying a repo prefix comes from ANOTHER repository —
+      // the coupling static analysis usually cannot see, and the one most worth
+      // flagging before an edit.
+      const external = t.files.some((f) => !f.startsWith("src/") && f.includes("/") && /^[A-Za-z0-9_]+\//.test(f)
+                                            && !f.startsWith("scripts/") && !f.startsWith("hooks/")
+                                            && !f.startsWith("security-tests/") && !f.startsWith("bench/"));
+      const cross = external ? "   ⚠ CROSS-REPO CONSUMER" : "";
       lines.push(
-        `  ${t.symbol}()${where}  ← ${t.callers} caller${t.callers === 1 ? "" : "s"} ` +
-        `in ${t.files.length} file${t.files.length === 1 ? "" : "s"} (${t.sites} call site${t.sites === 1 ? "" : "s"})${high}`,
+        `  ${label}${where}  ← ${t.callers} caller${t.callers === 1 ? "" : "s"} ` +
+        `in ${t.files.length} file${t.files.length === 1 ? "" : "s"} (${t.sites} call site${t.sites === 1 ? "" : "s"})${high}${cross}`,
       );
       if (t.files.length > 0) {
         const shown = t.files.slice(0, 6).join(", ");
