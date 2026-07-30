@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-30 · **Scope:** all 106 source files, 49,986 lines (`src/`, excluding tests)
 **Method:** the decision ladder from [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)
-**Status:** AUDIT ONLY — nothing in this document has been fixed. Findings are evidence, ranked by payoff against risk.
+**Status:** CLOSED OUT 2026-07-30 — see "Final status" at the end. Findings are evidence, ranked by payoff against risk; four of ten shrank or vanished on inspection.
 
 ---
 
