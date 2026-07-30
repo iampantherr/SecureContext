@@ -1,0 +1,177 @@
+# Design — function call graph for cascade-aware edits
+
+**Status:** DESIGN, not implemented. For review before any code.
+**Problem owner's words:** *"The agent just focuses on the current function and enhancing its functionality but fails to consider all the cascading dependent functions. I have seen this happen a lot."*
+
+---
+
+## 1. The problem, with evidence from this codebase
+
+Not hypothetical. Every one of these happened in the last three days:
+
+| incident | what the agent could not see |
+|---|---|
+| `recordEvent` removed | its removal made `getOrCreateSession` dead. Nobody noticed until a second scan. |
+| `projectHash` semantics | 42 call sites. An agent editing one had no way to know. |
+| MCP dropped `warning` | the same bug existed in `zc_remember`, `zc_search`, `zc_summarize_session`. Fixed three times because the pattern was invisible. |
+| `clampWithMarker` reused | changing it silently affects broadcasts, session summaries and task-queue failure reasons. |
+| `failTask` SQL comment | editing the function revealed nothing about who depends on it. |
+
+The shape is constant: **the edit is local, the consequence is not.**
+
+## 2. What already exists — do not rebuild it
+
+This design is an **extension**, not a new subsystem. Checked before designing (rung 2):
+
+| need | already in SecureContext |
+|---|---|
+| parser | `typescript@5.9.3` in `node_modules` — real AST available, no new dependency (rung 5) |
+| edge storage | `kb_edges (from_source, to_source, relation_type, match_kind, weight, computed_at)` — free-form TEXT keys, PK includes `relation_type`, so call edges coexist with the existing document edges |
+| **reverse index** | `idx_kbe_to ON kb_edges(to_source)` — the "who calls me" query is *already indexed* |
+| in-degree aggregate | `kb_backlinks` |
+| query tools | `zc_graph_neighbors`, `zc_graph_path`, `zc_graph_query`, `zc_graph_rebuild` |
+| rebuild plumbing | debounced fire-and-forget after `indexContent`, PG mirroring to `kb_edges_pg` |
+| **delivery at read time** | the PreRead hook, already enforcing summary-redirect |
+
+**The only genuine gap is call-edge extraction.** `indexing/ast_extractor.ts` extracts declarations (classes, functions, interfaces, exports) by regex. It does not record call sites.
+
+No schema migration is required.
+
+## 3. Node identity
+
+```
+func:<repo-relative-path>#<symbol>      e.g. func:src/store.ts#projectHash
+file:<repo-relative-path>               e.g. file:src/store.ts
+```
+
+Human-readable, greppable, stable across moves within a repo, and consistent with the existing `memory:<agent>:<key>` / `file:` source conventions.
+
+## 4. Extraction — real AST, not regex
+
+Use the TypeScript compiler API for `.ts`/`.mts`/`.js`/`.mjs`. **This is deliberate and the audit is the argument:** six findings across two audits were corrected because regexes reported a *shape* and a human supplied a *meaning*. A call graph built on regex would confidently report "no callers" for a function called via `obj.method()` and produce exactly the fabricated-zero failure this project has a pinned antipattern about.
+
+For each source file:
+1. `ts.createSourceFile(...)` → walk the AST
+2. record every function/method/arrow declaration as a node, with its line
+3. for every `CallExpression`, resolve the callee name and emit `calls` edge caller → callee
+4. weight = number of call sites (a function called 5 times in a loop body is more coupled than one called once)
+
+Resolution is **name-based within the repo**, not type-based. Full type resolution needs a `ts.Program` over the whole project, which is slower and still cannot resolve dynamic dispatch. Name-based resolution with an explicit ambiguity marker is the honest 80%.
+
+## 4b. Feasibility probe — RUN, not assumed
+
+A throwaway TS-AST extractor was run over SC's own `src/` before writing any implementation, and checked against numbers this session established by hand.
+
+```
+parsed 106 files, 11,652 call sites, 484 unresolved (dynamic) — 4.2% unresolved
+
+clampWithMarker    4 distinct callers   (hand count 4)   MATCH
+verifyWrite        2 distinct callers   (hand count 2)   MATCH
+scopedProjectHash 31 distinct callers   (42 call sites)  see below
+```
+
+**The approach works**, and 95.8% static resolution is a usable base.
+
+**Two things the probe taught that the design was silently wrong about:**
+
+**(1) "Callers" and "call sites" are different numbers, and the useful one is both.** `scopedProjectHash` has 42 call *sites* but 31 distinct *calling functions* — several functions call it more than once. An impact answer must say `31 functions across 18 files (42 sites)`, because "how many places must I check" and "how many edits might be needed" are different questions.
+
+**(2) Name-based resolution collapses common method names, and the failure is loud.** Top fan-in from the probe:
+
+```
+122  withClient     (pg_pool.ts)        ← real, useful
+ 70  close          (store-sqlite.ts)   ← MEANINGLESS: every db.close(), child.close(), …
+ 46  run            (embedder.ts)       ← MEANINGLESS
+ 35  ph             (store-postgres.ts) ← real
+ 30  add            (retrieval_advanced) ← MEANINGLESS: every Set.add()
+ 28  escapeHtml     (dashboard/render)  ← real, and security-relevant
+ 26  sanitize       (store-postgres.ts) ← real
+```
+
+`withClient`, `escapeHtml`, `sanitize` are genuine hubs — exactly the "what breaks if I touch this" signal we want. `close`, `run`, `add` are noise: an unqualified `.close()` matches every object with that method.
+
+**Mitigation, decided by this probe:**
+- emit a `calls` edge only when the callee name resolves to **exactly one** declaration in the repo
+- when a name resolves to several, or matches a built-in method name, emit it as `relation_type='calls_ambiguous'` and render it separately, never in the fan-in count
+- prefer the receiver when available (`store.close()` → `store-sqlite#close`) as a later refinement
+
+Without this the graph would have reported "70 things depend on `close`" — a confident, useless number, and precisely the kind of fabricated figure the rest of this codebase has spent a week removing.
+
+## 5. What the graph CANNOT see — and must say so
+
+This is the most important section. A graph that silently omits edges tells an agent *"nothing depends on this"* — a fabricated zero, and the exact class this codebase has spent a week eliminating.
+
+Unresolvable by static extraction:
+- dynamic dispatch — `handlers[type]()`, `obj[method]()`
+- higher-order — a function passed as a callback and invoked elsewhere
+- string-keyed dispatch — the dispatcher's broadcast routing, SC's MCP tool `switch`
+- cross-language — a `.ps1` invoking `node dispatcher.mjs`, an agent calling an MCP tool
+- reflection, `eval`, dynamic `import()` with a computed path
+
+**Therefore every impact answer carries a coverage statement**, not just a count:
+
+```
+projectHash()  ← 42 static callers across 18 files
+               ⚠ 3 unresolved dynamic call sites in this file; coverage is not complete
+```
+
+A zero must be rendered as **"no static callers found"**, never as "safe to change". `emptyResultAnomaly` already encodes this principle for search; the same rule applies here.
+
+## 6. Surfacing — three places, cheapest first
+
+### 6a. In the PreRead hook (highest value)
+The hook already intercepts `Read` and returns an L0/L1 summary. Append an impact block:
+
+```
+## L0 / L1 summary
+  …existing…
+
+## Impact — what depends on this file
+  projectHash()        ← 42 callers in 18 files   ⚠ HIGH FAN-IN
+  clampWithMarker()    ← 6 callers  (broadcast, session summary, task queue)
+  verifyClaim()        ← 1 caller
+  ⚠ 4 call sites in this file are dynamic and were not resolved
+```
+
+This is the key integration: **the agent gets impact at the moment it decides to read, before it edits.** No new discipline required, no tool it must remember to call.
+
+### 6b. `zc_impact(symbol)` tool
+For deliberate lookup: `zc_impact("projectHash")` → callers, callees, fan-in, unresolved count. Thin wrapper over `kb_edges` + `idx_kbe_to`.
+
+### 6c. Commit-time advisory
+Pairs with the planned dead-code gate: if a staged diff modifies a function with fan-in > N, note the affected callers. **Advisory, never blocking** — high fan-in is a fact, not a defect.
+
+## 7. Freshness
+
+Reuse the existing trigger: `indexContent` already schedules a debounced backlink rebuild. Extend that to re-extract call edges for the changed file only. Full rebuild via `zc_graph_rebuild` stays the batch-authoritative path.
+
+A per-file rebuild is O(file), not O(repo) — cheap enough to run on every write.
+
+## 8. Staged plan
+
+| stage | deliverable | verifiable by |
+|---|---|---|
+| **1** | `extractCallGraph(content, path)` in `indexing/` using the TS AST; returns nodes + edges + `unresolved` + `ambiguous` counts | fixtures **plus** a run over SC's own `src/`; assert `clampWithMarker`=4 and `verifyWrite`=2 (both confirmed by the probe), and assert `close`/`run`/`add` are classified ambiguous, not counted |
+| **2** | persist to `kb_edges` with `relation_type='calls'`; per-file incremental refresh | query `kb_edges` directly; re-run after an edit and confirm the delta |
+| **3** | `zc_impact(symbol)` MCP tool + API endpoint | live agent asks for a known-high-fan-in symbol |
+| **4** | PreRead hook impact block | **E2E terminal test** — an agent Reads a file and reports whether impact appeared and was accurate |
+| **5** | commit-time advisory | staged-diff dry run |
+
+Ground truth for stage 1 is unusually good here: this session established real numbers by hand (`projectHash` 42 sites, `clampWithMarker` 6, the MCP `warning` drop in 3). **If the extractor disagrees with those, the extractor is wrong** — that is a real oracle, not a fixture.
+
+## 9. Risks
+
+| risk | mitigation |
+|---|---|
+| false "no callers" → agent deletes live code | never render 0 as safe; always show unresolved count; the commit gate stays advisory |
+| noise on every Read | only show fan-in ≥ 2, cap the list, one line per symbol |
+| stale graph after edits | per-file refresh on write; `computed_at` per edge so staleness is visible |
+| extraction cost on large files | AST parse is ~ms; already debounced |
+| over-trust | the coverage statement is mandatory, not optional |
+
+## 10. Open questions for review
+
+1. **Scope:** SC + dispatcher only at first, or A2A (Python) too? Python needs a second extractor — `ast` module, same edge shape. Recommend deferring.
+2. **Cross-repo edges:** should `A2A_dispatcher` calling an SC MCP tool be an edge? Valuable but needs a shared node namespace. Recommend deferring to a later stage.
+3. **Fan-in threshold** for the ⚠ HIGH marker — the probe gives a real distribution now: a handful of genuine hubs at 20-122 (`withClient` 122, `ph` 35, `escapeHtml` 28, `sanitize` 26) and a long tail below 10. **Proposed: ⚠ at ≥ 10**, which flags roughly a dozen symbols repo-wide rather than hundreds.
+4. **Should the PreRead block be opt-out?** `ZC_IMPACT_ON_READ=0` for parity with the other kill switches. Recommend yes.
