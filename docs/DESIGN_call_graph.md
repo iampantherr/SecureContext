@@ -97,6 +97,30 @@ scopedProjectHash 31 distinct callers   (42 call sites)  see below
 
 Without this the graph would have reported "70 things depend on `close`" — a confident, useless number, and precisely the kind of fabricated figure the rest of this codebase has spent a week removing.
 
+## 4c. What building it corrected in this design — three claims were wrong
+
+Stage 1 is implemented (`src/indexing/call_graph.ts`, 14 tests + the oracle). The probe validated the *approach*; the implementation falsified three specifics, and all three were the same failure mode this feature exists to prevent — **a confident zero**.
+
+**(1) "No new dependency" (§2) was false.** `typescript` is a **devDependency**. A production `npm i --omit=dev` has no parser, a static import would fail to load the module, and every impact answer would read "no callers" — for every symbol, silently. Fixed two ways: `typescript` promoted to `dependencies`, and the import made lazy behind `callGraphAvailable()`, so a broken install reports *unavailable* rather than *nothing depends on this*. The oracle test asserts nothing when the parser is missing, rather than passing vacuously.
+
+**(2) Import aliases were unhandled — 47 call sites reported as 0.** `import { projectHash as scopedProjectHash }` means every call site uses a local name that matches no declaration. The single most-depended-on symbol in the repo reported **no callers**. Twelve fixture tests passed while this was broken; only the run against real source caught it.
+
+**(3) The single-declaration rule then produced a *second* zero on the same symbol.** `projectHash` is declared **twice** — `store.ts:229` and `access-control.ts:80` — so once aliases resolved, all 47 sites were dumped into `calls_ambiguous` and fan-in stayed 0. Name-only resolution is not sufficient in this repo. Fixed by using the import specifier: a named import pins the call to exactly one file, which settles both same-name collisions and the common-method denylist (`import { close }` is real; a stray `db.close()` is not — distinguished by `viaProperty`).
+
+Measured effect of the pinning fix over SC's `src/`:
+
+| | before | after |
+|---|---|---|
+| trusted `calls` edges | 1,140 | **1,225** |
+| `calls_ambiguous` | 1,455 | **1,268** |
+| `projectHash` fan-in | **0** | **31 callers / 18 files / 45 sites** |
+
+31 distinct callers matches the hand count exactly. `clampWithMarker`=4 and `verifyWrite`=2 held throughout.
+
+**Method note.** The pattern from the two audits repeated verbatim: fixtures confirmed what I already believed and the oracle falsified it. Both bugs were invisible to a green suite because a fixture builds its own input. **The oracle — real source, hand-established counts — is the only part of this test file that could have failed.** Any future extractor change must be judged against it, not against the fixtures.
+
+Also surfaced, not yet acted on: **two `projectHash` implementations and two `ph` implementations** exist in `src/`. The graph found duplicate-logic candidates as a side effect on its first real run.
+
 ## 5. What the graph CANNOT see — and must say so
 
 This is the most important section. A graph that silently omits edges tells an agent *"nothing depends on this"* — a fabricated zero, and the exact class this codebase has spent a week eliminating.
@@ -151,7 +175,7 @@ A per-file rebuild is O(file), not O(repo) — cheap enough to run on every writ
 
 | stage | deliverable | verifiable by |
 |---|---|---|
-| **1** | `extractCallGraph(content, path)` in `indexing/` using the TS AST; returns nodes + edges + `unresolved` + `ambiguous` counts | fixtures **plus** a run over SC's own `src/`; assert `clampWithMarker`=4 and `verifyWrite`=2 (both confirmed by the probe), and assert `close`/`run`/`add` are classified ambiguous, not counted |
+| **1 ✅ DONE** | `extractFileCalls` + `resolveCallGraph` + `impactOf` in `indexing/call_graph.ts` | 14 tests + oracle green; `clampWithMarker`=4, `verifyWrite`=2, `projectHash`=31/18 files, `close`/`run`/`add` all ambiguous. Full suite 1,046 pass. See §4c for what it corrected. |
 | **2** | persist to `kb_edges` with `relation_type='calls'`; per-file incremental refresh | query `kb_edges` directly; re-run after an edit and confirm the delta |
 | **3** | `zc_impact(symbol)` MCP tool + API endpoint | live agent asks for a known-high-fan-in symbol |
 | **4** | PreRead hook impact block | **E2E terminal test** — an agent Reads a file and reports whether impact appeared and was accurate |
