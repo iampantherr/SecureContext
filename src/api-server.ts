@@ -45,6 +45,7 @@ import type { Store, RetentionTier } from "./store.js";
 import { Config } from "./config.js";
 import type { EpistemicOpts } from "./memory.js";
 import { checkOllamaAvailable } from "./embedder.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config from environment
@@ -146,7 +147,7 @@ function _registerProjectPath(projectPath: string): void {
   if (projectPath.startsWith("workspace:")) return;
   if (_registeredPaths.has(projectPath)) return;
   _registeredPaths.add(projectPath);
-  const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const projectHash = scopedProjectHash(projectPath);
   void (async () => {
     try {
       const { withClient } = await import("./pg_pool.js");
@@ -1096,7 +1097,7 @@ export async function createApiServer(storeOverride?: Store) {
           const { realpathSync } = await import("node:fs");
           let normalized = pp;
           try { normalized = realpathSync(pp); } catch { /* use raw */ }
-          projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+          projectHash = scopedProjectHash(normalized);
         }
       }
       const { withClient } = await import("./pg_pool.js");
@@ -3692,7 +3693,7 @@ export async function createApiServer(storeOverride?: Store) {
             await withClient(async (c) => c.query(
               `UPDATE memory_contradictions_pg SET status='open', resolution_mode=NULL, reviewed_at=NULL
                 WHERE project_hash = $1 AND key_a = LEAST($2,$3) AND key_b = GREATEST($2,$3)`,
-              [createHash("sha256").update(pp).digest("hex").slice(0, 16), key_a, key_b]));
+              [scopedProjectHash(pp), key_a, key_b]));
           } catch { /* SQLite-only install: acknowledged status above is the fallback */ }
           return { ok: true, reviewed: n, revived };
         }
@@ -4240,7 +4241,7 @@ function _recordResultCount(op: string, n: number): number[] {
     const { realpathSync } = await import("node:fs");
     let normalized = pp;
     try { normalized = realpathSync(pp); } catch { /* use raw */ }
-    return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+    return scopedProjectHash(normalized);
   };
 
   app.get("/api/v1/replay/sessions", async (request, reply) => {
@@ -4480,7 +4481,7 @@ function _recordResultCount(op: string, n: number): number[] {
         try {
           const { withClient } = await import("./pg_pool.js");
           const { createHash } = await import("node:crypto");
-          const projectHash = createHash("sha256").update(pp).digest("hex").slice(0, 16);
+          const projectHash = scopedProjectHash(pp);
           await withClient(async (c) => {
             await c.query(`
               INSERT INTO project_paths_pg (project_hash, project_path)

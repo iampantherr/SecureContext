@@ -33,6 +33,7 @@ import { Config } from "./config.js";
 import { openDb, indexContent, dbPath } from "./knowledge.js";
 import { summarizeFile, selectSummaryModel } from "./summarizer.js";
 import { detectLanguage, extractAst } from "./indexing/ast_extractor.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -475,7 +476,7 @@ async function mirrorSourceMetaToPg(
   }
   try {
     const { withClient } = await import("./pg_pool.js");
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     const now = new Date().toISOString();
     await withClient(async (c) => {
       await c.query(
@@ -513,7 +514,7 @@ async function getFileSummaryFromPg(
   }
   try {
     const { withClient } = await import("./pg_pool.js");
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     return await withClient(async (c) => {
       const r = await c.query<{ l0_summary: string; l1_summary: string; created_at: string; source_type: string }>(
         `SELECT l0_summary, l1_summary, created_at::text AS created_at, source_type
@@ -986,7 +987,7 @@ export interface IndexingStatus {
 }
 
 function statusFilePath(projectPath: string): string {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = scopedProjectHash(projectPath);
   return join(Config.DB_DIR, `${hash}.indexing.status`);
 }
 

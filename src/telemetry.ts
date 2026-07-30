@@ -61,6 +61,7 @@ import { canonicalize, type ChainableRow } from "./security/hmac_chain.js";
 import { runMigrations } from "./migrations.js";
 import { ChainedTableSqlite } from "./security/chained_table_sqlite.js";
 import { verifyChainRows } from "./security/chained_table.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -543,7 +544,7 @@ export function sanitizeToolInput(rawInput: unknown, maxLen: number = 200): stri
 // ─── Internal ──────────────────────────────────────────────────────────────
 
 function sha256ProjectHash(projectPath: string): string {
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return scopedProjectHash(projectPath);
 }
 
 function openProjectDb(projectPath: string): DatabaseSync {

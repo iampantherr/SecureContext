@@ -50,6 +50,7 @@ import {
 import { runMigrations } from "./migrations.js";
 import { ChainedTableSqlite } from "./security/chained_table_sqlite.js";
 import { verifyChainRows } from "./security/chained_table.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -202,7 +203,7 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
   const { createHash } = await import("node:crypto");
   const { Config } = await import("./config.js");
   mkdirSync(Config.DB_DIR, { recursive: true });
-  const dbPath = join(Config.DB_DIR, `${createHash("sha256").update(projectPath).digest("hex").slice(0,16)}.db`);
+  const dbPath = join(Config.DB_DIR, `${scopedProjectHash(projectPath)}.db`);
   const db = new DatabaseSync(dbPath);
   try {
     db.exec("PRAGMA journal_mode = WAL");
@@ -239,7 +240,7 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
     }
     // Resolve the skill so we can pass body + traces + fixtures into the mutator
     const { getActiveSkill } = await import("./skills/storage.js");
-    const projectScope = `project:${createHash("sha256").update(projectPath).digest("hex").slice(0,16)}` as `project:${string}`;
+    const projectScope = `project:${scopedProjectHash(projectPath)}` as `project:${string}`;
     const skill = await getActiveSkill(db, "skill_id_will_be_resolved_below" as never, projectScope).catch(() => null);
     // The above would only work by name; fallback to direct skill_id lookup
     const { getSkillById } = await import("./skills/storage.js");
@@ -352,7 +353,7 @@ async function maybeTriggerL1Mutation(projectPath: string, runId: string): Promi
     const { enqueueTask } = await import("./task_queue.js");
     const { randomUUID } = await import("node:crypto");
     const taskId = `mut-${randomUUID().slice(0, 12)}`;
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     await enqueueTask({
       taskId,
       projectHash,
@@ -863,7 +864,7 @@ function classifySentiment(text: string): "positive" | "negative" | "neutral" {
 }
 
 function sha256ProjectHash(projectPath: string): string {
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return scopedProjectHash(projectPath);
 }
 
 function openProjectDb(projectPath: string): DatabaseSync {

@@ -61,6 +61,7 @@ import {
 } from "./harness.js";
 import { ACTIVE_MODEL, checkOllamaAvailable } from "./embedder.js";
 import { isTemporalQuestion as _isTemporalQ } from "./temporal_parse.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 const PROJECT_PATH = process.env["ZC_PROJECT_PATH"] || cwd();
 
@@ -150,7 +151,7 @@ function openGlobalDb(): DatabaseSync {
 
 function checkAndIncrementFetchLimit(projectPath: string): { remaining: number } {
   const db          = openGlobalDb();
-  const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const projectHash = scopedProjectHash(projectPath);
   const today       = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
   type Row = { fetch_count: number };
@@ -2412,7 +2413,7 @@ async function dispatchToolCall(
 
         // Today's fetch budget
         const db          = openGlobalDb();
-        const projectHash = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHash = scopedProjectHash(PROJECT_PATH);
         const today       = new Date().toISOString().slice(0, 10);
         type FetchRow     = { fetch_count: number };
         const fetchRow    = db.prepare(
@@ -3723,7 +3724,7 @@ async function dispatchToolCall(
       case "zc_orchestrator_advisory": {
         try {
           const { createHash } = await import("node:crypto");
-          const projectHash = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+          const projectHash = scopedProjectHash(PROJECT_PATH);
           const { buildOrchestratorAdvisory } = await import("./dashboard/savings_snapshotter.js");
           const advisory = await buildOrchestratorAdvisory(projectHash);
           if (!advisory) {
@@ -4244,7 +4245,7 @@ async function dispatchToolCall(
           return { content: [{ type: "text", text: "Error: task_id and role are required" }], isError: true };
         }
         const { enqueueTask } = await import("./task_queue.js");
-        const projectHashTq = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHashTq = scopedProjectHash(PROJECT_PATH);
         const deps = Array.isArray(depends_on) ? depends_on.filter((d) => typeof d === "string") : [];
         const inserted = await enqueueTask({
           taskId:      task_id,
@@ -4262,7 +4263,7 @@ async function dispatchToolCall(
           return { content: [{ type: "text", text: "Error: plan_id is required" }], isError: true };
         }
         const { getPlanStatus } = await import("./task_queue.js");
-        const projectHashPs = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHashPs = scopedProjectHash(PROJECT_PATH);
         const plan = await getPlanStatus(projectHashPs, plan_id.slice(0, 100));
         return { content: [{ type: "text", text: JSON.stringify(plan) }] };
       }
@@ -4272,7 +4273,7 @@ async function dispatchToolCall(
           return { content: [{ type: "text", text: "Error: role is required" }], isError: true };
         }
         const { claimTask } = await import("./task_queue.js");
-        const projectHashCt = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHashCt = scopedProjectHash(PROJECT_PATH);
         const workerIdCt = process.env.ZC_AGENT_ID || "unknown-worker";
         const claim = await claimTask(projectHashCt, role, workerIdCt);
         if (!claim) {
@@ -4300,7 +4301,7 @@ async function dispatchToolCall(
         // unblock — measured live in the s8 E2E).
         let unblocked: Array<{ task_id: string; role: string; plan_id: string | null }> = [];
         if (ok) {
-          try { unblocked = await listUnblockedBy(createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16), task_id); } catch { /* best-effort */ }
+          try { unblocked = await listUnblockedBy(scopedProjectHash(PROJECT_PATH), task_id); } catch { /* best-effort */ }
         }
         const unblockNote = unblocked.length > 0
           ? ` UNBLOCKED: ${unblocked.map((u) => `${u.task_id} (role ${u.role})`).join(", ")} — claim it if it's your role, otherwise broadcast STATUS so that worker claims it.`
@@ -4317,7 +4318,7 @@ async function dispatchToolCall(
       }
       case "zc_queue_stats": {
         const { getQueueStats } = await import("./task_queue.js");
-        const projectHashSt = createHash("sha256").update(PROJECT_PATH).digest("hex").slice(0, 16);
+        const projectHashSt = scopedProjectHash(PROJECT_PATH);
         const stats = await getQueueStats(projectHashSt);
         return { content: [{ type: "text", text: JSON.stringify({ ok: true, stats }) }] };
       }

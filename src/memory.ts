@@ -48,6 +48,7 @@ import {
 import { computeRowHash, getLastHash, verifyChain } from "./chain.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance, type TemporalWindow } from "./recall_budget.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 /** v0.31.0 epistemology layer — WHAT kind of claim a fact is. */
 /**
@@ -221,7 +222,7 @@ export function getWorkingMemoryLimits(
 }
 
 function dbPath(projectPath: string): string {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = scopedProjectHash(projectPath);
   return join(Config.DB_DIR, `${hash}.db`);
 }
 

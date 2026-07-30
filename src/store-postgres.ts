@@ -70,6 +70,7 @@ import type {
   RetentionTier,
   ComplexityProfile,
 } from "./store.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 const { Pool } = pg;
 
@@ -78,7 +79,7 @@ const { Pool } = pg;
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ph(projectPath: string): string {
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return scopedProjectHash(projectPath);
 }
 
 /** Lever-4 diversity guard: `event:` pseudo-entries are one-liners, so BM25's

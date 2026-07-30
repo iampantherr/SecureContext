@@ -43,6 +43,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { withClient } from "../../pg_pool.js";
 import { logger } from "../../logger.js";
 import { ANTHROPIC_SKILL_STANDARD } from "../anthropic_standard.js";
+import { projectHash as scopedProjectHash } from "../../store.js";
 
 export type FilerOutcome =
   | "filed_candidate"
@@ -324,7 +325,7 @@ async function fetchDecisionsFromSideChannel(
 
   const dbDir = join(homedir(), ".claude", "zc-ctx", "sessions");
   mkdirSync(dbDir, { recursive: true });
-  const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const projectHash = scopedProjectHash(projectPath);
   const dbFile = join(dbDir, `${projectHash}.db`);
 
   const db = new DatabaseSync(dbFile);
@@ -376,7 +377,7 @@ async function enqueueAndAwaitAgent(opts: {
   payload:         Record<string, unknown>;
 }): Promise<AgentResponse> {
   const { enqueueTask } = await import("../../task_queue.js");
-  const projectHash = createHash("sha256").update(opts.projectPath).digest("hex").slice(0, 16);
+  const projectHash = scopedProjectHash(opts.projectPath);
 
   // 1. Capture broadcast watermark BEFORE enqueuing.
   const sinceId = await currentMaxBroadcastId(projectHash);

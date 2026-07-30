@@ -16,9 +16,10 @@
  */
 import { withClient } from "./pg_pool.js";
 import { createHash } from "node:crypto";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 const ph = (projectPath: string): string =>
-  createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  scopedProjectHash(projectPath);
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 

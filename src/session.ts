@@ -5,6 +5,7 @@ import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Config } from "./config.js";
 import { runMigrations } from "./migrations.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 export type EventType = "file_write" | "file_edit" | "task_complete" | "error" | "fetch" | "session_ended";
 
@@ -18,12 +19,12 @@ export interface SessionEvent {
 }
 
 function getEventLogPath(projectPath: string): string {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = scopedProjectHash(projectPath);
   return join(Config.DB_DIR, `${hash}.events.jsonl`);
 }
 
 function dbPath(projectPath: string): string {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = scopedProjectHash(projectPath);
   return join(Config.DB_DIR, `${hash}.db`);
 }
 
@@ -63,7 +64,7 @@ function openDb(projectPath: string): DatabaseSync {
 
 export function getOrCreateSession(projectPath: string): number {
   const db   = openDb(projectPath);
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = scopedProjectHash(projectPath);
   const now  = new Date().toISOString();
 
   type Row = { id: number };

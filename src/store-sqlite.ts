@@ -75,6 +75,7 @@ import type {
   FetchStats,
 } from "./store.js";
 import type { MemoryFact, BroadcastType, BroadcastMessage, BroadcastResult, KnowledgeEntry, CrossProjectEntry, RetentionTier } from "./store.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -82,7 +83,7 @@ import type { MemoryFact, BroadcastType, BroadcastMessage, BroadcastResult, Know
 
 function openProjectDb(projectPath: string): DatabaseSync {
   mkdirSync(Config.DB_DIR, { recursive: true });
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = scopedProjectHash(projectPath);
   const db   = new DatabaseSync(join(Config.DB_DIR, `${hash}.db`));
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
@@ -111,7 +112,7 @@ function todayUtc(): string {
 }
 
 function projectHashOf(projectPath: string): string {
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return scopedProjectHash(projectPath);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

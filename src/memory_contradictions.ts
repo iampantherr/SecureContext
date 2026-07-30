@@ -28,6 +28,7 @@ import { recallWorkingMemory, retireFact, type MemoryFact } from "./memory.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity } from "./embedder.js";
 import { SIM_HIGH, MAX_SCAN_FACTS, detectConflict, autoResolveVictim } from "./contradiction_heuristics.js";
 import { Config } from "./config.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 export interface OpenContradiction {
   key_a:      string;
@@ -341,7 +342,7 @@ async function mirrorContradictionsPgAsync(
   if (rows.length === 0) return;
   try {
     const { withClient } = await import("./pg_pool.js");
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     await withClient(async (c) => {
       for (const r of rows) {
         await c.query(

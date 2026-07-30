@@ -39,6 +39,7 @@ import type { Mutator } from "../mutator.js";
 import type { MutationContext, MutationResult, MutationCandidate } from "../types.js";
 import { buildProposerPrompt, parseProposerResponse, preSubmissionSecretScan } from "../mutator.js";
 import { randomUUID } from "node:crypto";
+import { projectHash as scopedProjectHash } from "../../store.js";
 
 /** How long to wait for the mutator agent's broadcast response. */
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -111,7 +112,7 @@ class MemoryBroadcastSource implements BroadcastSource {
 async function defaultEnqueueTask(payload: { taskId: string; projectPath: string; role: string; payload: Record<string, unknown> }): Promise<boolean> {
   const { enqueueTask } = await import("../../task_queue.js");
   const { createHash } = await import("node:crypto");
-  const projectHash = createHash("sha256").update(payload.projectPath).digest("hex").slice(0, 16);
+  const projectHash = scopedProjectHash(payload.projectPath);
   return enqueueTask({
     taskId: payload.taskId,
     projectHash,
@@ -281,7 +282,7 @@ export class CliClaudeMutator implements Mutator {
           const { createHash } = await import("node:crypto");
           const dbDir = join(homedir(), ".claude", "zc-ctx", "sessions");
           mkdirSync(dbDir, { recursive: true });
-          const projectHash = createHash("sha256").update(this.projectPath).digest("hex").slice(0, 16);
+          const projectHash = scopedProjectHash(this.projectPath);
           const dbFile = join(dbDir, `${projectHash}.db`);
           const db = new DatabaseSync(dbFile);
           db.exec("PRAGMA journal_mode = WAL");

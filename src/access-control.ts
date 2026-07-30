@@ -25,6 +25,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { Config } from "./config.js";
 import type { BroadcastType } from "./memory.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 // ── RBAC permission matrix (Chapter 14) ──────────────────────────────────────
 export const ROLE_PERMISSIONS: Record<string, BroadcastType[]> = {
@@ -77,7 +78,7 @@ function uuidV4(): string {
 
 /** Compute the project hash (16-char SHA256 prefix) */
 function projectHash(projectPath: string): string {
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return scopedProjectHash(projectPath);
 }
 
 /**

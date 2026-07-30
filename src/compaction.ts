@@ -22,6 +22,7 @@
 import { withClient } from "./pg_pool.js";
 import { logger } from "./logger.js";
 import { createHash } from "node:crypto";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 // v0.20.0 — ZC_OLLAMA_URL might be set to the full embeddings endpoint
 // (e.g. "http://sc-ollama:11434/api/embeddings"). Strip any /api/* suffix
@@ -141,7 +142,7 @@ export async function compactRecentWindow(opts: {
   turns?:      number;
 }): Promise<CompactionResult> {
   const turnsLimit  = Math.max(5, Math.min(100, opts.turns ?? DEFAULT_TURNS));
-  const projectHash = createHash("sha256").update(opts.projectPath).digest("hex").slice(0, 16);
+  const projectHash = scopedProjectHash(opts.projectPath);
   try {
     const turns = await loadRecentTurns(projectHash, opts.sessionId ?? null, turnsLimit);
     if (turns.length === 0) {

@@ -23,6 +23,7 @@ import * as sqlite from "./storage.js";
 import * as pg from "./storage_pg.js";
 import { createHash } from "node:crypto";
 import { withClient } from "../pg_pool.js";
+import { projectHash as scopedProjectHash } from "../store.js";
 
 function getBackend(): "sqlite" | "postgres" | "dual" {
   const raw = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
@@ -32,7 +33,7 @@ function getBackend(): "sqlite" | "postgres" | "dual" {
 
 /** Compute the project_hash used by skill_runs_pg / skill_mutations_pg. */
 export function projectHashOf(projectPath: string): string {
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  return scopedProjectHash(projectPath);
 }
 
 // ─── Skills CRUD ─────────────────────────────────────────────────────────────

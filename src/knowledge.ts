@@ -45,6 +45,7 @@ import { runMigrations } from "./migrations.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, serializeVector, deserializeVector, ACTIVE_MODEL } from "./embedder.js";
 import { rebuildBacklinksAsync } from "./indexing/backlinks.js";
 import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
+import { projectHash as scopedProjectHash } from "./store.js";
 
 export type RetentionTier = "external" | "internal" | "summary";
 
@@ -76,7 +77,7 @@ export function hasNonAsciiChars(s: string): boolean {
 }
 
 export function dbPath(projectPath: string): string {
-  const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+  const hash = scopedProjectHash(projectPath);
   return join(Config.DB_DIR, `${hash}.db`);
 }
 
@@ -284,7 +285,7 @@ async function storeEmbeddingPgAsync(
   try {
     const { withClient } = await import("./pg_pool.js");
     const { createHash } = await import("node:crypto");
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     const vectorStr = "[" + Array.from(result.vector).join(",") + "]";
     await withClient(async (c) => {
       const existing = (await c.query<{ content_hash: string | null; model_name: string }>(
@@ -451,7 +452,7 @@ async function storeSourceMetaPgAsync(
   try {
     const { withClient } = await import("./pg_pool.js");
     const { createHash } = await import("node:crypto");
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     await withClient(async (c) => {
       await c.query(
         `INSERT INTO source_meta(project_hash, source, source_type, retention_tier, created_at, l0_summary, l1_summary)
@@ -488,7 +489,7 @@ async function storeKnowledgePgAsync(
   try {
     const { withClient } = await import("./pg_pool.js");
     const { createHash } = await import("node:crypto");
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     const safeContent = content.slice(0, 50_000);
     await withClient(async (c) => {
       await c.query(

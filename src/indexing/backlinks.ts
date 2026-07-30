@@ -26,6 +26,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { openDb } from "../knowledge.js";
 import { extractCoReferences, classifyRelation } from "./community.js";
+import { projectHash as scopedProjectHash } from "../store.js";
 
 interface TypedEdge {
   from:      string;
@@ -206,7 +207,7 @@ export async function rebuildBacklinksPgAsync(projectPath: string, edges: TypedE
   if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) return;
   try {
     const { withTransaction } = await import("../pg_pool.js");
-    const projectHash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
+    const projectHash = scopedProjectHash(projectPath);
     await withTransaction(async (c) => {
       await c.query(`DELETE FROM kb_edges_pg     WHERE project_hash = $1`, [projectHash]);
       await c.query(`DELETE FROM kb_backlinks_pg WHERE project_hash = $1`, [projectHash]);
