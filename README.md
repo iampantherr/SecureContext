@@ -173,6 +173,74 @@ Database migrations run automatically on boot; every feature ships with a kill-s
 
 ---
 
+## Choosing a storage backend — SQLite or PostgreSQL
+
+**SQLite is the default. You do not need to configure anything to use it.** If
+`ZC_STORE` is unset, SecureContext stores everything in per-project SQLite files
+under `~/.claude/zc-ctx/`. That is the right choice for one developer on one
+machine, and it is the mode `node init.mjs --sqlite` installs.
+
+Switch to PostgreSQL when your setup actually needs it:
+
+| Use PostgreSQL when | Stay on SQLite when |
+|---|---|
+| Several agents write concurrently (the A2A dispatcher, a worker fleet) | One Claude Code session at a time |
+| The API server and agents run in different containers | Everything runs as one local process |
+| You want `pgvector` similarity search rather than the SQLite BLOB path | You want zero infrastructure |
+| Memory must outlive the machine, or be backed up centrally | A local file is fine |
+
+SQLite is not a degraded mode. PostgreSQL buys concurrency and shared access,
+not features — the full test suite passes on both:
+
+```bash
+npx vitest run                      # SQLite   → 1084 passed
+ZC_STORE=postgres npx vitest run    # Postgres → 1084 passed
+```
+
+If you switch backends, run the suite the same way. That parity is not automatic:
+four tests were SQLite-only until v0.55.0 because the harness minted RBAC tokens
+straight into a SQLite file while the server verified them against Postgres.
+
+### Switching
+
+```bash
+export ZC_STORE=postgres
+export ZC_POSTGRES_URL=postgresql://scuser:PASSWORD@localhost:5432/securecontext
+```
+
+or supply the parts instead of a URL:
+
+```bash
+export ZC_STORE=postgres
+export ZC_POSTGRES_HOST=localhost      # ZC_POSTGRES_PORT defaults to 5432
+export ZC_POSTGRES_USER=scuser         # ZC_POSTGRES_DB defaults to securecontext
+export ZC_POSTGRES_PASSWORD=...
+```
+
+To make it permanent for Claude Code, put the same variables in the top-level
+`env` block of `~/.claude/settings.json` — **not** only in the `mcpServers` block.
+Hooks are separate processes that inherit the *session* environment, so
+credentials placed only under `mcpServers` never reach them, and the hooks would
+silently keep reading SQLite while the MCP server writes PostgreSQL.
+
+`ZC_PG_URL` is still accepted as a legacy alias, but prefer `ZC_POSTGRES_URL` —
+it is the variable the connection pool has always used.
+
+### Migrating existing SQLite data
+
+Switching backends does **not** copy your data; PostgreSQL starts empty and the
+SQLite files are left untouched. Re-index the project after switching:
+
+```bash
+# per project, once
+zc_index_project({ projectPath: "/path/to/project" })
+```
+
+Your SQLite databases remain in `~/.claude/zc-ctx/` and can be switched back to
+at any time by unsetting `ZC_STORE`.
+
+---
+
 ## Architecture in one diagram
 
 ```

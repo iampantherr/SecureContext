@@ -67,7 +67,24 @@ function cleanMachineSecret(): void {
  * Issue a session_token directly against the project DB (bypassing the API)
  * so we can construct test scenarios with controlled tokens.
  */
-function mintTokenForTest(projectPath: string, agentId: string, role: string): string {
+/**
+ * Mint a session token in whichever store the API server is using.
+ *
+ * This used to write straight into a SQLite file via `new DatabaseSync(...)`.
+ * That silently assumed the server was SQLite-backed: under ZC_STORE=postgres
+ * the token was issued into SQLite and verified against Postgres'
+ * agent_sessions, so four tests failed with 401 while the RBAC code was
+ * perfectly correct — the harness was testing a store the server was not using.
+ *
+ * Found when this machine switched its default backend to Postgres. The product
+ * path was never affected; only the test's shortcut around the Store interface.
+ */
+async function mintTokenForTest(projectPath: string, agentId: string, role: string): Promise<string> {
+  if ((process.env.ZC_STORE ?? "sqlite") === "postgres") {
+    const { createStore } = await import("./store.js");
+    const store = await createStore();
+    return store.issueToken(projectPath, agentId, role as never);
+  }
   const dbPath = projectDbPath(projectPath);
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode = WAL");
@@ -137,7 +154,7 @@ describe("Reference Monitor — telemetry endpoints", () => {
   // ── Happy path ─────────────────────────────────────────────────────────
 
   it("POST /api/v1/telemetry/tool_call with valid token + matching agentId succeeds", async () => {
-    const aliceToken = mintTokenForTest(projectA, "alice", "developer");
+    const aliceToken = await mintTokenForTest(projectA, "alice", "developer");
     const callId = newCallId();
     const res = await fetch(`${baseUrl}/api/v1/telemetry/tool_call`, {
       method: "POST",
@@ -158,7 +175,7 @@ describe("Reference Monitor — telemetry endpoints", () => {
   });
 
   it("POST /api/v1/telemetry/outcome with valid token succeeds", async () => {
-    const orchToken = mintTokenForTest(projectA, "orchestrator", "orchestrator");
+    const orchToken = await mintTokenForTest(projectA, "orchestrator", "orchestrator");
     const res = await fetch(`${baseUrl}/api/v1/telemetry/outcome`, {
       method: "POST",
       headers: {
@@ -181,7 +198,7 @@ describe("Reference Monitor — telemetry endpoints", () => {
   // ── RT-S2-02: cross-agent forgery via API ─────────────────────────────
 
   it("[RT-S2-02] alice's token cannot write a row claiming bob — 403", async () => {
-    const aliceToken = mintTokenForTest(projectA, "alice", "developer");
+    const aliceToken = await mintTokenForTest(projectA, "alice", "developer");
     const res = await fetch(`${baseUrl}/api/v1/telemetry/tool_call`, {
       method: "POST",
       headers: {
@@ -219,7 +236,7 @@ describe("Reference Monitor — telemetry endpoints", () => {
   });
 
   it("[RT-S2-03] malformed Authorization header (no Bearer prefix) is rejected with 401", async () => {
-    const aliceToken = mintTokenForTest(projectA, "alice", "developer");
+    const aliceToken = await mintTokenForTest(projectA, "alice", "developer");
     const res = await fetch(`${baseUrl}/api/v1/telemetry/tool_call`, {
       method: "POST",
       headers: {
@@ -254,17 +271,25 @@ describe("Reference Monitor — telemetry endpoints", () => {
   // ── RT-S2-04: revoked token ──────────────────────────────────────────
 
   it("[RT-S2-04] a revoked token is rejected with 401", async () => {
-    const aliceToken = mintTokenForTest(projectA, "alice", "developer");
+    const aliceToken = await mintTokenForTest(projectA, "alice", "developer");
 
-    // Revoke directly in the DB
-    const dbPath = projectDbPath(projectA);
-    const db = new DatabaseSync(dbPath);
-    db.exec("PRAGMA journal_mode = WAL");
-    // Get the token_id from the token (zcst.<payload>.<sig> — payload is base64 JSON)
-    const parts = aliceToken.split(".");
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-    revokeToken(db, payload.tid);
-    db.close();
+    // Revoke in whichever store the server is using. Reaching into a SQLite
+    // file here threw "no such table: agent_sessions" under ZC_STORE=postgres,
+    // for the same reason mintTokenForTest did: the harness bypassed the Store
+    // interface and assumed one backend.
+    if ((process.env.ZC_STORE ?? "sqlite") === "postgres") {
+      const { createStore } = await import("./store.js");
+      await (await createStore()).revokeTokens(projectA, "alice");
+    } else {
+      const dbPath = projectDbPath(projectA);
+      const db = new DatabaseSync(dbPath);
+      db.exec("PRAGMA journal_mode = WAL");
+      // Get the token_id from the token (zcst.<payload>.<sig> — payload is base64 JSON)
+      const parts = aliceToken.split(".");
+      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+      revokeToken(db, payload.tid);
+      db.close();
+    }
 
     const res = await fetch(`${baseUrl}/api/v1/telemetry/tool_call`, {
       method: "POST",
@@ -286,7 +311,7 @@ describe("Reference Monitor — telemetry endpoints", () => {
   // ── RT-S2-05: cross-project token ────────────────────────────────────
 
   it("[RT-S2-05] a token from project A cannot write to project B", async () => {
-    const aliceTokenForA = mintTokenForTest(projectA, "alice", "developer");
+    const aliceTokenForA = await mintTokenForTest(projectA, "alice", "developer");
 
     const res = await fetch(`${baseUrl}/api/v1/telemetry/tool_call`, {
       method: "POST",
@@ -308,7 +333,7 @@ describe("Reference Monitor — telemetry endpoints", () => {
   // ── RT-S2-06: end-to-end via client helper ───────────────────────────
 
   it("[RT-S2-06] recordToolCallViaApi succeeds end-to-end with valid token", async () => {
-    const aliceToken = mintTokenForTest(projectA, "alice", "developer");
+    const aliceToken = await mintTokenForTest(projectA, "alice", "developer");
     const callId = newCallId();
     const r = await recordToolCallViaApi(
       {
@@ -333,7 +358,7 @@ describe("Reference Monitor — telemetry endpoints", () => {
   });
 
   it("recordToolCallViaApi returns null on cross-agent forgery (server returns 403)", async () => {
-    const aliceToken = mintTokenForTest(projectA, "alice", "developer");
+    const aliceToken = await mintTokenForTest(projectA, "alice", "developer");
     const r = await recordToolCallViaApi(
       {
         callId: newCallId(), sessionId: "s-forge", agentId: "bob",

@@ -463,11 +463,30 @@ Store interface (src/store.ts)
 **Selection at startup:**
 ```typescript
 // createStore() in src/store.ts:
-if (process.env.ZC_STORE === "postgres") return new StorePostgres(pgUrl);
-return new StoreSqlite();
+const backend = process.env.ZC_STORE ?? "sqlite";     // SQLite is the default
+if (backend === "postgres") return new PostgresStore(resolvePgConnectionString());
+return new SqliteStore();
 ```
 
+`resolvePgConnectionString()` accepts, in order: `ZC_POSTGRES_URL`, the legacy
+`ZC_PG_URL`, or the `ZC_POSTGRES_HOST/PORT/USER/PASSWORD/DB` parts — the same
+configuration `pg_pool.ts` uses.
+
+> **v0.55.0 correction.** `createStore` previously read **only** `ZC_PG_URL`, a
+> variable used nowhere else in the codebase, while every PG-native path
+> (telemetry, `kb_edges_pg`, the task queue) read `ZC_POSTGRES_*`. A machine
+> correctly configured for PostgreSQL would throw *"requires ZC_PG_URL"* the
+> moment you set `ZC_STORE=postgres` — the documented switch did not work with
+> the documented configuration.
+
 In Docker mode, `ZC_STORE=postgres` is set in `docker-compose.yml`. The MCP server itself never touches PostgreSQL directly — all calls go through the HTTP API.
+
+**A note on where credentials live.** Hooks run as separate processes and inherit
+the *session* environment, not the `mcpServers` environment in
+`~/.claude/settings.json`. Credentials placed only under `mcpServers` therefore
+never reach the hooks, which silently fall back to SQLite while the MCP server
+writes PostgreSQL — two stores, no error. Put backend configuration in the
+top-level `env` block.
 
 **PostgreSQL notes:**
 - `broadcasts.created_at` stored as `TEXT` (ISO-8601) — prevents `pg` driver `TIMESTAMPTZ → Date` type coercion breaking the SHA256 hash chain

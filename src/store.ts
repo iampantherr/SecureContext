@@ -321,15 +321,48 @@ export function todayUtc(): string {
  * The factory is async because PostgresStore needs to verify the connection
  * and run schema migrations before first use.
  */
+/**
+ * Connection string for the Postgres store.
+ *
+ * Accepts the SAME configuration pg_pool.ts already uses. Before this,
+ * `createStore` read only `ZC_PG_URL` — a name referenced nowhere else in the
+ * codebase — while every PG-native path (telemetry, kb_edges_pg, task queue)
+ * read `ZC_POSTGRES_URL` / `ZC_POSTGRES_*`. A machine fully configured for
+ * Postgres would therefore throw "requires ZC_PG_URL" the moment you set
+ * ZC_STORE=postgres: the documented switch did not work with the documented
+ * configuration.
+ *
+ * Returns null when nothing is configured, so the caller can say what is missing
+ * rather than attempting a connection to a default that was never intended.
+ */
+export function resolvePgConnectionString(): string | null {
+  const direct = process.env["ZC_POSTGRES_URL"] || process.env["ZC_PG_URL"];
+  if (direct) return direct;
+
+  const host = process.env["ZC_POSTGRES_HOST"];
+  const password = process.env["ZC_POSTGRES_PASSWORD"];
+  // Host alone is not enough to be sure Postgres was actually intended; requiring
+  // one credential avoids silently connecting to a stray localhost server.
+  if (!host && !password) return null;
+
+  const user = process.env["ZC_POSTGRES_USER"] || "scuser";
+  const port = process.env["ZC_POSTGRES_PORT"] || "5432";
+  const db   = process.env["ZC_POSTGRES_DB"]   || "securecontext";
+  const auth = `${encodeURIComponent(user)}${password ? ":" + encodeURIComponent(password) : ""}`;
+  return `postgresql://${auth}@${host || "localhost"}:${port}/${db}`;
+}
+
 export async function createStore(): Promise<Store> {
   const backend = process.env["ZC_STORE"] ?? "sqlite";
 
   if (backend === "postgres") {
-    const pgUrl = process.env["ZC_PG_URL"];
+    const pgUrl = resolvePgConnectionString();
     if (!pgUrl) {
       throw new Error(
-        "ZC_STORE=postgres requires ZC_PG_URL to be set.\n" +
-        "Example: ZC_PG_URL=postgresql://postgres:password@localhost:5432/securecontext"
+        "ZC_STORE=postgres needs connection details. Any of these works:\n" +
+        "  ZC_POSTGRES_URL=postgresql://user:pass@host:5432/securecontext   (same var pg_pool.ts uses)\n" +
+        "  ZC_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DB              (parts)\n" +
+        "  ZC_PG_URL=...                                                    (legacy alias)"
       );
     }
     const { PostgresStore } = await import("./store-postgres.js");
