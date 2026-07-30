@@ -40,7 +40,7 @@ import cors from "@fastify/cors";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { isAbsolute as posixIsAbsolute } from "node:path/posix";
 import { isAbsolute as win32IsAbsolute } from "node:path/win32";
-import { createStore } from "./store.js";
+import { createStore, projectHash as projectHashOfPath } from "./store.js";
 import type { Store, RetentionTier } from "./store.js";
 import { Config } from "./config.js";
 import type { EpistemicOpts } from "./memory.js";
@@ -611,11 +611,17 @@ export async function createApiServer(storeOverride?: Store) {
       if (!allowed.includes(outcome)) {
         return reply.status(400).send({ error: `outcome must be one of ${allowed.join(", ")}` });
       }
-      const { createHash } = await import("node:crypto");
-      const { realpathSync } = await import("node:fs");
-      let normalized = pp;
-      try { normalized = realpathSync(pp); } catch { /* use raw */ }
-      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      // v0.54.4 — hash the VALIDATED path, like every other writer.
+      //
+      // These two telemetry writers were the only sites that realpath'd first,
+      // so their project_hash could differ from source_meta / project_paths_pg
+      // for the same project. The dashboard filters both by one hash it takes
+      // from the non-realpath side, so a symlinked or mapped path makes the
+      // summarizer panel report zero while the count beside it is correct —
+      // the "dashboard inconsistency" class this realpath was meant to cure.
+      // Currently dormant (realpath is a no-op on plain local paths, measured),
+      // which is why it survived: a latent divergence looks identical to none.
+      const projectHash = projectHashOfPath(pp);
       const { withClient } = await import("./pg_pool.js");
       await withClient(async (c) => {
         await c.query(
@@ -670,11 +676,17 @@ export async function createApiServer(storeOverride?: Store) {
       if (!allowedStat.includes(status)) {
         return reply.status(400).send({ error: `status must be one of ${allowedStat.join(", ")}` });
       }
-      const { createHash } = await import("node:crypto");
-      const { realpathSync } = await import("node:fs");
-      let normalized = pp;
-      try { normalized = realpathSync(pp); } catch { /* use raw */ }
-      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      // v0.54.4 — hash the VALIDATED path, like every other writer.
+      //
+      // These two telemetry writers were the only sites that realpath'd first,
+      // so their project_hash could differ from source_meta / project_paths_pg
+      // for the same project. The dashboard filters both by one hash it takes
+      // from the non-realpath side, so a symlinked or mapped path makes the
+      // summarizer panel report zero while the count beside it is correct —
+      // the "dashboard inconsistency" class this realpath was meant to cure.
+      // Currently dormant (realpath is a no-op on plain local paths, measured),
+      // which is why it survived: a latent divergence looks identical to none.
+      const projectHash = projectHashOfPath(pp);
       const { withClient } = await import("./pg_pool.js");
       await withClient(async (c) => {
         await c.query(
@@ -4560,11 +4572,17 @@ function _recordResultCount(op: string, n: number): number[] {
     try {
       const { projectPath } = request.query as Record<string, unknown>;
       const pp = validateProjectPath(projectPath);
-      const { createHash } = await import("node:crypto");
-      const { realpathSync } = await import("node:fs");
-      let normalized = pp;
-      try { normalized = realpathSync(pp); } catch { /* use raw */ }
-      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      // v0.54.4 — hash the VALIDATED path, like every other writer.
+      //
+      // These two telemetry writers were the only sites that realpath'd first,
+      // so their project_hash could differ from source_meta / project_paths_pg
+      // for the same project. The dashboard filters both by one hash it takes
+      // from the non-realpath side, so a symlinked or mapped path makes the
+      // summarizer panel report zero while the count beside it is correct —
+      // the "dashboard inconsistency" class this realpath was meant to cure.
+      // Currently dormant (realpath is a no-op on plain local paths, measured),
+      // which is why it survived: a latent divergence looks identical to none.
+      const projectHash = projectHashOfPath(pp);
       const { withClient } = await import("./pg_pool.js");
       const rows = await withClient(async (c) => {
         const r = await c.query<{ role: string; state: string; n: string }>(
@@ -4630,11 +4648,17 @@ function _recordResultCount(op: string, n: number): number[] {
       if (!filePath || !Number.isFinite(fullFile) || !Number.isFinite(summary)) {
         return reply.status(400).send({ error: "filePath, fullFileTokens, summaryTokens required" });
       }
-      const { createHash } = await import("node:crypto");
-      const { realpathSync } = await import("node:fs");
-      let normalized = pp;
-      try { normalized = realpathSync(pp); } catch { /* use raw */ }
-      const projectHash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+      // v0.54.4 — hash the VALIDATED path, like every other writer.
+      //
+      // These two telemetry writers were the only sites that realpath'd first,
+      // so their project_hash could differ from source_meta / project_paths_pg
+      // for the same project. The dashboard filters both by one hash it takes
+      // from the non-realpath side, so a symlinked or mapped path makes the
+      // summarizer panel report zero while the count beside it is correct —
+      // the "dashboard inconsistency" class this realpath was meant to cure.
+      // Currently dormant (realpath is a no-op on plain local paths, measured),
+      // which is why it survived: a latent divergence looks identical to none.
+      const projectHash = projectHashOfPath(pp);
       const { withClient } = await import("./pg_pool.js");
       await withClient(async (c) => {
         await c.query(
