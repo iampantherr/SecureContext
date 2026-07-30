@@ -605,15 +605,9 @@ export async function createApiServer(storeOverride?: Store) {
       const filePath = typeof b["filePath"] === "string" ? b["filePath"].slice(0, 1024) : null;
       const outcome  = String(b["outcome"] ?? "error").slice(0, 32);
       const detail   = typeof b["detail"] === "string" ? b["detail"].slice(0, 2048) : null;
-      // v0.52.6 — 'pass_brief_exempt' added. Its absence made the hook's new
-      // task-brief exemption UNOBSERVABLE: the hook posts fire-and-forget, this
-      // endpoint 400s an unknown outcome, and the error was swallowed. So I could
-      // not tell whether my own detector had fired, because the observability
-      // path silently dropped the value — the same silent-rejection class, one
-      // layer further out. Any new hook outcome must be added here or it vanishes.
-      const allowed = ["redirect", "block_unindexed", "block_dedup",
-                       "bypass_force_read", "bypass_partial_read", "pass_through",
-                       "pass_brief_exempt", "error"];
+      // Derived from Config.PRETOOL_OUTCOMES so the validator and the DB
+      // CHECK constraint cannot drift apart again.
+      const allowed: readonly string[] = Config.PRETOOL_OUTCOMES;
       if (!allowed.includes(outcome)) {
         return reply.status(400).send({ error: `outcome must be one of ${allowed.join(", ")}` });
       }
@@ -635,7 +629,12 @@ export async function createApiServer(storeOverride?: Store) {
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       // Hook is fire-and-forget — never break agent flow on telemetry failures
-      return { ok: false, error: (e as Error).message };
+      // v0.54.2 - a failed insert must NOT answer HTTP 200. It previously
+      // returned 200 with {ok:false}, so every caller checking resp.ok saw
+      // success - including this project's own hook, whose new failure logging
+      // could not fire. A success-shaped failure is the exact class this
+      // codebase spends its time removing; the status code has to carry it.
+      return reply.status(500).send({ ok: false, error: (e as Error).message });
     }
   });
 

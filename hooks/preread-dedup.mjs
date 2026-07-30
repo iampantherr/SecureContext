@@ -102,7 +102,7 @@ async function emitPretoolEvent(outcome, detail) {
     if (!apiUrl) return;
     const apiKey = process.env.ZC_API_KEY ?? "";
     const agentId = process.env.ZC_AGENT_ID || "default";
-    await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
+    const resp = await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -118,8 +118,29 @@ async function emitPretoolEvent(outcome, detail) {
       // Cap latency: if the API is unreachable, hook still exits quickly.
       // 1500ms is plenty for a localhost POST; far exceeds typical latency.
       signal: AbortSignal.timeout(1500),
-    }).catch(() => { /* swallow but at least we waited */ });
-  } catch { /* never break the hook on telemetry failure */ }
+    });
+    // v0.54.2 - a REJECTED telemetry post is no longer silent.
+    //
+    // This previously swallowed every failure, including the 400 the API returns
+    // for an unknown outcome value. The consequence was concrete: a new hook
+    // outcome ('pass_brief_exempt') was rejected, the rejection was discarded,
+    // and I could not tell whether my own detector had fired - the observability
+    // path silently dropping the very signal that proves observability works.
+    //
+    // stderr, not stdout: stdout is the hook protocol channel and writing there
+    // would corrupt the decision. stderr is captured and breaks nothing.
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      process.stderr.write(
+        `[zc-ctx telemetry] pretool-event REJECTED ${resp.status} for outcome='${outcome}': ` +
+        `${body.slice(0, 200)}
+`);
+    }
+  } catch (e) {
+    // Network/timeout failures stay non-fatal but are no longer invisible.
+    process.stderr.write(`[zc-ctx telemetry] pretool-event failed: ${String(e).slice(0, 160)}
+`);
+  }
 }
 
 try {

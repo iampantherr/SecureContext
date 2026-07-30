@@ -1150,6 +1150,22 @@ export const PG_MIGRATIONS: PgMigration[] = [
       await client.query(`CREATE INDEX IF NOT EXISTS operator_inbox_status_idx ON operator_inbox_pg (status, created_at DESC)`);
     },
   },
+  {
+    id: 45,
+    description:
+      "v0.54.2: widen chk_pte_outcome to Config.PRETOOL_OUTCOMES. The allowed-outcome " +
+      "list lived in TWO places - an array in api-server.ts and this CHECK constraint. " +
+      "Adding 'pass_brief_exempt' to the array alone left the constraint rejecting the " +
+      "insert, so a new hook detector was unobservable: its telemetry was refused by the " +
+      "database while the endpoint still answered HTTP 200. Derived from one source now.",
+    up: async (client) => {
+      const { Config: C } = await import("./config.js");
+      const list = C.PRETOOL_OUTCOMES.map((o: string) => `'${o}'`).join(", ");
+      await client.query(`ALTER TABLE pretool_events_pg DROP CONSTRAINT IF EXISTS chk_pte_outcome`);
+      await client.query(
+        `ALTER TABLE pretool_events_pg ADD CONSTRAINT chk_pte_outcome CHECK (outcome IN (${list}))`);
+    },
+  },
 
 ];
 

@@ -221,6 +221,16 @@ export const Config = {
   // always defined; relevant is not. Without a floor, a nonsense query returns
   // the ten nearest documents and looks like a real answer. 0 disables.
   SEARCH_MIN_COSINE:      parseFloat(env["ZC_SEARCH_MIN_COSINE"] ?? "0.28"),
+  // v0.54.2 - SINGLE SOURCE for PreRead hook outcomes. This list existed twice:
+  // an array in api-server.ts and a CHECK constraint in the pretool_events_pg
+  // migration. Widening only the array produced a 400-free but rejected insert -
+  // the same duplicated-enum defect that silently coerced kind:'constraint' to
+  // 'fact' earlier in this session. Both the validator and the migration now
+  // derive from here, so a new outcome cannot be half-added.
+  PRETOOL_OUTCOMES: [
+    "redirect", "block_unindexed", "block_dedup", "bypass_force_read",
+    "bypass_partial_read", "pass_through", "pass_brief_exempt", "error",
+  ] as const,
   EFFECT_VERIFY:          (env["ZC_EFFECT_VERIFY"] ?? "1") !== "0",
   // Hard-fail a write whose 'exact' fields did not round-trip, instead of
   // returning ok:true with a discrepancy notice. Off by default: reporting is
