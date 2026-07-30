@@ -500,7 +500,7 @@ export class PostgresStore implements Store {
   async recall(
     projectPath: string,
     agentId: string,
-    opts: { focus?: string; from?: Date; to?: Date; asOf?: Date } = {},
+    opts: { focus?: string; from?: Date; to?: Date; asOf?: Date; role?: string } = {},
   ): Promise<MemoryFact[]> {
     const projectHash = ph(projectPath);
     const safeAgent   = sanitize(agentId, 64);
@@ -574,6 +574,31 @@ export class PostgresStore implements Store {
       rows = res.rows;
     }
 
+    // v0.54.0 - CROSS-PROJECT pinned lessons. An antipattern about how code fails
+    // ("a stub returning a benign default hides a missing implementation") is not
+    // about one repo. Measured: the identical class hit SecureContext and A2A
+    // hours apart with nothing connecting them, because memory is per-project.
+    //
+    // Only PINNED kinds cross the boundary, and only from the reserved global
+    // scope an author opts into - project facts never leak sideways.
+    if (Config.SHARE_GLOBAL_PINNED && !opts.asOf) {
+      try {
+        const g = await this.pool.query<MemoryFact>(
+          `SELECT ${COLS} FROM working_memory
+            WHERE project_hash = $1 AND valid_to IS NULL
+              AND kind IN ('constraint','antipattern')
+            ORDER BY importance DESC, created_at DESC
+            LIMIT 12`,
+          // ph() the sentinel: remember() hashes whatever projectPath it is given,
+          // so the write lands under hash("__global__"). Matching the raw literal
+          // here made the pool unreachable - a write that succeeds into something
+          // nothing reads. Both sides must hash identically.
+          [ph(Config.GLOBAL_PROJECT_HASH)]);
+        const seen = new Set(rows.map((r) => r.key));
+        for (const gr of g.rows) if (!seen.has(gr.key)) rows.push(gr);
+      } catch { /* global scope is additive; never break recall */ }
+    }
+
     // Tier-2 #4: secondary salience re-sort (importance stays primary) + best-effort
     // access bump (single batched UPDATE via unnest, fire-and-forget). Inert when
     // W_SALIENCE=0 — byte-identical ordering, no writes (the kill-switch).
@@ -590,9 +615,24 @@ export class PostgresStore implements Store {
         : null;
       const prio = (r: MemoryFact) => (safeAgent !== "default" && r.agent_id === safeAgent ? 0 : 1);
       const eff  = (r: MemoryFact) => (demoteStale ? effectiveImportance(r, now) : r.importance);
+      // v0.54.0 - role affinity RANKS, it does not filter. QA carrying the
+      // developer's private constraints is noise worth demoting; hiding a fact
+      // from a role that turns out to need it is the silent-loss failure this
+      // codebase spent a day removing. Pinned kinds are exempt - a standing rule
+      // applies to everyone regardless of who wrote it.
+      const wRole = Config.W_ROLE_AFFINITY;
+      const callerRole = String(opts.role ?? "").trim().toLowerCase();
+      const roleBoost = (r: MemoryFact): number => {
+        if (!wRole || !callerRole) return 0;
+        if (["constraint", "antipattern"].includes(String(r.kind ?? ""))) return 0;
+        const owner = String(r.agent_id ?? "").toLowerCase();
+        if (owner === callerRole) return wRole;            // mine
+        if (owner === "default")  return wRole / 2;        // shared, applies to all
+        return -wRole;                                     // another role's private note
+      };
       rows = [...rows].sort((a, b) =>
         prio(a) - prio(b) ||
-        eff(b) - eff(a) ||
+        (eff(b) + roleBoost(b)) - (eff(a) + roleBoost(a)) ||
         (sal ? (sal.get(k(b)) ?? 0) - (sal.get(k(a)) ?? 0) : 0) ||
         (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
       );

@@ -152,7 +152,7 @@ export interface Store {
   // M1 (v0.41.0): optional focus re-ranks live facts by blended relevance to the
   // agent's current task; without it, ordering is unchanged (backward-compatible).
   // M3 (v0.41.0): from/to = temporal-window bonus; asOf = point-in-time reconstruction.
-  recall(projectPath: string, agentId: string, opts?: { focus?: string; from?: Date; to?: Date; asOf?: Date }): Promise<MemoryFact[]>;
+  recall(projectPath: string, agentId: string, opts?: { focus?: string; from?: Date; to?: Date; asOf?: Date; role?: string }): Promise<MemoryFact[]>;
   archiveSummary(projectPath: string, summary: string): Promise<{ submitted: number; stored: number; dropped: number } | void>;
   getMemoryStats(projectPath: string, agentId: string): Promise<MemoryStats>;
   getWorkingMemoryLimits(projectPath: string, forceRecompute?: boolean): Promise<MemoryLimits>;

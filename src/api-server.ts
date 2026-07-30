@@ -3385,7 +3385,13 @@ export async function createApiServer(storeOverride?: Store) {
         const hdr = request.headers["x-zc-user"];
         if (typeof hdr === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(hdr)) epi.createdBy = hdr;
       }
-      const _verify = await store.remember(pp, key, value, Number(importance), String(agentId), epi);
+      // v0.54.0 - scope:'global' routes a PINNED lesson to the cross-project pool.
+      // Restricted to constraint/antipattern on purpose: a project fact has no
+      // business leaking sideways, but "how code fails" is not repo-specific.
+      const wantGlobal = String((request.body as Record<string, unknown>)["scope"] ?? "") === "global";
+      const isPinnedKind_ = ["constraint", "antipattern"].includes(String(epi.kind ?? ""));
+      const targetPath = wantGlobal && isPinnedKind_ ? Config.GLOBAL_PROJECT_HASH : pp;
+      const _verify = await store.remember(targetPath, key, value, Number(importance), String(agentId), epi);
       // v0.31.0 — re-arm the contradiction scan for this project. A new fact can form
       // a contradiction with an existing one, so the next recall must re-scan. Without
       // this the guard is once-per-PROCESS and mid-run contradictions go undetected
@@ -3538,7 +3544,10 @@ export async function createApiServer(storeOverride?: Store) {
       // M3 (v0.41.0) — natural-language time expressions inside the focus ("last week",
       // "as of one month ago") are parsed into a structured window; structured
       // dateFrom/dateTo/asOf params are also accepted directly (Graphiti parity).
-      const recallOpts: { focus?: string; from?: Date; to?: Date; asOf?: Date } = {};
+      const recallOpts: { focus?: string; from?: Date; to?: Date; asOf?: Date; role?: string } = {};
+      // 'role' arrived on this endpoint since v0.41 and was destructured but never
+      // used - the caller told us who was asking and we threw it away.
+      if (typeof role === "string" && role.trim()) recallOpts.role = role.trim();
       if (typeof focus === "string" && focus.trim()) {
         const { parseTemporalQuery } = await import("./temporal_parse.js");
         const w = parseTemporalQuery(focus.slice(0, 2000));

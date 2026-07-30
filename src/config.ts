@@ -46,7 +46,6 @@ export const Config = {
 
   // ── Working memory ────────────────────────────────────────────────────────
   WORKING_MEMORY_MAX:      100,  // evict when this count is exceeded
-  WORKING_MEMORY_EVICT_TO: 80,   // target count after eviction batch (80% of MAX)
 
   // ── Knowledge base retention (tiered by content type) ────────────────────
   // External (web-fetched) content expires soonest — untrusted, ephemeral
@@ -171,7 +170,18 @@ export const Config = {
   IMPORTANCE_DECAY_FLOOR: parseInt(env["ZC_IMPORTANCE_DECAY_FLOOR"] ?? "3", 10),
   // Recall bonus for facts owned by the REQUESTING role. Shared ('default')
   // facts are never re-weighted — they are the cross-agent contract. 0 disables.
+  // Per-role recall ranking weight. Defined in v0.51.0 and read by NOTHING until
+  // v0.54.0 - a dead knob that looked like a feature. Now used to RANK, never to
+  // hide: QA carrying the developer's constraints is noise, but hiding a fact
+  // from a role that turns out to need it is the failure this codebase spent a
+  // day eliminating. Pinned kinds are exempt from role ranking entirely.
   W_ROLE_AFFINITY:        parseFloat(env["ZC_W_ROLE_AFFINITY"] ?? "0.75"),
+  // v0.54.0 - reserved project scope for lessons that are not project-specific.
+  // The same antipattern class hit SecureContext and A2A hours apart and nothing
+  // connected them, because memory is per-project. An antipattern about HOW code
+  // fails is rarely about one repo.
+  GLOBAL_PROJECT_HASH:    env["ZC_GLOBAL_PROJECT_HASH"] ?? "__global__",
+  SHARE_GLOBAL_PINNED:    (env["ZC_SHARE_GLOBAL_PINNED"] ?? "1") !== "0",
   // Pin kind='constraint' / kind='antipattern' above the recall budget so
   // standing rules and known traps can never be truncated away. 0 disables.
   PIN_CONSTRAINTS:        (env["ZC_PIN_CONSTRAINTS"] ?? "1") !== "0",
@@ -358,7 +368,6 @@ export const Config = {
   // line count, the PostToolUse hook pushes the full output into KB and
   // replaces it in agent context with a compact summary.
   // Empirically, 50 lines ≈ 400 tokens — above that, savings compound fast.
-  BASH_CAPTURE_LINES: parseInt(env["ZC_BASH_CAPTURE_LINES"] ?? "50", 10),
 
   // Lines preserved in the compact summary (head + tail slice).
   // 20 tail lines = ~160 tokens, enough for an error message + stack trace.
