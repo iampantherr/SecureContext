@@ -282,6 +282,13 @@ export async function indexProject(
     await flushBacklinkRebuild(projectPath);
   } catch { /* best-effort — never fail the index on a backlink-rebuild error */ }
 
+  // v0.55.0 — the call graph has exactly the same short-lived-process problem, so
+  // it gets the same awaited flush rather than the unref'd debounce.
+  try {
+    const { flushCallGraphRebuild } = await import("./indexing/call_edges.js");
+    await flushCallGraphRebuild(projectPath);
+  } catch { /* best-effort — never fail the index on a call-graph error */ }
+
   return {
     filesScanned,
     filesIndexed,

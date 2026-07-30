@@ -422,6 +422,14 @@ export function indexContent(
   // index triggers exactly ONE rebuild 5s after it settles; never blocks this call.
   rebuildBacklinksAsync(projectPath);
 
+  // v0.55.0 — same trigger, same 5s debounce, for the function call graph. This is
+  // the per-file refresh: an agent edits one file, impact is correct 5s later.
+  // Dynamic import so call_edges (which needs openDb from here) does not deepen the
+  // import cycle, matching the pattern memory.ts already uses for backlinks.
+  void import("./indexing/call_edges.js")
+    .then((m) => m.rebuildCallGraphAsync(projectPath))
+    .catch(() => undefined);
+
   // Lever-4 (v0.48.0): event-fact extraction for session-tier sources —
   // serialized background lane; pseudo-entries re-enter through this same
   // function (eligibleForExtraction excludes "event:" so it can't recurse).
