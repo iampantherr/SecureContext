@@ -1631,6 +1631,23 @@ async function _handleRemoteTool(
         const headCount  = fBudget.collapsed.length > 0
           ? `${facts.length}/${max} facts · top ${shownFacts.length} rendered`
           : `${facts.length}/${max} facts`;
+        // v0.54.1 - label the OWNER of any fact that is not the caller's own.
+        //
+        // A live agent probe reported "namespace NOT LABELED per fact": with
+        // role-affinity ranking now reordering recall, an agent could see facts
+        // move without any way to tell whose they were, or whether a fact was its
+        // own, shared, or another role's. Ranking you cannot attribute is ranking
+        // you cannot trust.
+        //
+        // Own facts stay unlabeled so the common case costs zero tokens; only
+        // foreign and shared ones carry a short tag.
+        const ownerTag = (f: { agent_id?: string; kind?: string }): string => {
+          const owner = String(f.agent_id ?? "").trim();
+          if (!owner || owner === recallAgentId) return "";
+          if (owner === "default") return "  <shared>";
+          if (["constraint", "antipattern"].includes(String(f.kind ?? ""))) return `  <${owner}·pinned>`;
+          return `  <${owner}>`;
+        };
         const lines     = [`## Working Memory (${headCount})${healthLine}`];
         // v0.31.0 — plain facts render byte-identical; typed/resolved claims get an inline badge.
         const epiBadge = (f: { kind?: string; confidence?: number | null; resolution_status?: string | null }): string => {
@@ -1647,11 +1664,11 @@ async function _handleRemoteTool(
         if (recallFocus) {
           // M1 — facts arrive RELEVANCE-ordered; regrouping by ★ would undo the ranking.
           lines[0] = `## Working Memory (${headCount} · ranked by task relevance)${healthLine}`;
-          for (const f of shownFacts) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          for (const f of shownFacts) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${ownerTag(f)}${citeChip(f)}`);
         } else {
-          for (const f of shownFacts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
-          for (const f of shownFacts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
-          for (const f of shownFacts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${citeChip(f)}`);
+          for (const f of shownFacts.filter(f => f.importance >= 4)) lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${ownerTag(f)}${citeChip(f)}`);
+          for (const f of shownFacts.filter(f => f.importance === 3))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${ownerTag(f)}${citeChip(f)}`);
+          for (const f of shownFacts.filter(f => f.importance <= 2))  lines.push(`  [★${f.importance}] ${f.key}: ${f.value}${epiBadge(f)}${ownerTag(f)}${citeChip(f)}`);
         }
         if (fBudget.tailNotice) lines.push(fBudget.tailNotice);
         // v0.21.0 — append skill inventory so the agent sees what's available
