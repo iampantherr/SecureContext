@@ -133,7 +133,30 @@ Other oversized functions:
 
 *(20 further functions over 80 lines — full list in `audit_raw.json`)*
 
-**Fix shape:** extract route groups into modules that take the fastify instance. Mechanical, low-risk, testable in pieces. This is the largest single structural item in the codebase and should be scheduled deliberately, not done opportunistically.
+### Measured feasibility (2026-07-30) — DEFERRED, with a concrete plan
+
+Two facts change the picture, both measured rather than assumed:
+
+**Encouraging:** the 123 route handlers close over exactly **two** variables — `store` and `app`. There is no hidden shared state, so extracted modules need only the signature `(app, store)`. That is a far better risk profile than 4,462 lines suggests.
+
+**Blocking:** the routes are **heavily interleaved**. `/api/*` (62) and `/dashboard/*` (56) alternate 15+ times through the function:
+
+```
+line  330 api → 363 DASH → 546 api → 553 DASH → 600 api → 718 DASH
+     1020 api → 1138 DASH → 1715 api → 2067 DASH → 2220 api → …
+```
+
+So extraction is not a contiguous cut; it is cherry-picking ~56 scattered blocks out of a 4.5k-line body. Dashboard routes return HTML and are the *thinnest*-covered part of the suite, so a misplaced block can pass CI and fail in the browser.
+
+**Deliberately not done in this pass.** Ponytail's own rule decides it: *"the smallest change in the wrong place isn't lazy, it's a second bug."* A blind mass-move at the end of a long session, to close a checklist item, is exactly that. This one is a refactor, not a cleanup — it moves code rather than deleting any, so the payoff is testability, not leanness.
+
+**Staged plan when it is scheduled:**
+1. `src/api/routes_dashboard.ts` exporting `registerDashboardRoutes(app, store)` — move the 56 `/dashboard/*` handlers **one group at a time**, running the suite after each
+2. Add a smoke test that GETs every `/dashboard/*` path and asserts HTTP 200 + non-empty body **before** moving anything — the current gap is why this is risky
+3. Then `routes_telemetry.ts`, `routes_memory.ts`, `routes_skills.ts` from the `/api/v1/*` groups
+4. `createApiServer` ends as ~200 lines of setup plus registration calls
+
+Do step 2 first. Without it the refactor is unverifiable.
 
 ---
 
@@ -180,21 +203,50 @@ Thin but harmless (judgement call):
 
 ---
 
-## S3-1 · 25 duplicated six-line blocks
+## S3-1 · 25 duplicated six-line blocks — NOT ACTIONED (mostly noise)
 
-Identical normalised runs appearing in more than one file. Mostly PG boilerplate (connect / query / map rows) and dashboard HTML fragments. Not individually harmful; collectively they are why `store-postgres.ts` and `render.ts` are as large as they are. Full list with locations in `audit_raw.json`.
+Inspected. Breakdown:
+- `const { createHash } = await import("node:crypto");` ×4 — a trivial import line; two of those sites disappeared in the hash consolidation anyway
+- `body: row.body,` / `body_hmac: row.body_hmac,` ×4 — row→DTO field mapping. Extracting a helper for three sites buys indirection, not clarity
+- SQL DDL fragments in `migrations.ts` — **historical migrations must not be edited**
+- `task?: string; state?: string; summary?: string;` ×3 across `memory.ts`, `server.ts`, `store.ts` — the one *real* item: the broadcast-options shape is declared three times. Type-level, low-risk, and consolidating it crosses module boundaries with import-cycle implications. **Left deliberately; noted for whoever next touches that shape.**
 
-## S3-2 · Repeated magic numbers
+## S3-2 · Repeated magic numbers — NOT ACTIONED (false positives)
 
-20 numeric literals appearing 4+ times across files with no named constant. Highest counts are timeouts and byte limits. Each is a candidate for `Config`, where it becomes tunable and greppable. Full list in `audit_raw.json`.
+The detector counted any 3+ digit literal. Inspected, the top hits are:
+- `255`, `230`, `166`, `108`, `162`, `241` — **RGB channel values** in `dashboard/render.ts` CSS (`rgba(255,255,255,.045)`)
+- `2026` — the current year, in dates
+- `1024` — byte→KB conversion
+- `256` — text inside a comment (`// 256-bit random salt`)
 
-## S3-3 · Nine lines of commented-out code
+Nothing here wants a named constant. **No change.**
 
-`// const ...`, `// await ...`, `// return ...` — dead by a different mechanism. Delete; git remembers.
+## S3-3 · Nine lines of commented-out code — NOT ACTIONED (false positives)
+
+All nine were prose beginning with a keyword, or documentation:
+- `// let consumers filter rows when querying:` — prose
+- `// import keeps the memory↔knowledge↔backlinks module graph cycle-free` — prose
+- six in `indexing/ast_extractor.ts` (`// export class Foo`) — **pattern labels documenting the regex on the line below**, which are genuinely useful
+
+**Nothing deleted.**
 
 ## S3-4 · One debt marker
 
-A single `TODO/FIXME/HACK` in 50k lines. Unusually clean — but read alongside the 222 empty catches, it suggests debt is being *absorbed silently* rather than marked.
+A single `TODO/FIXME/HACK` in 50k lines. Unusually clean — but read alongside the empty catches, it suggests debt is being *absorbed silently* rather than marked.
+
+## S3-5 · `mutation_guardrails` daily cap is unreliable near midnight — NOTED, not fixed
+
+Found by a real failure during this work, not by a detector. `checkMutationGuardrails` builds the day boundary with local time and compares it against UTC ISO timestamps:
+
+```ts
+const todayStart = new Date();
+todayStart.setHours(0, 0, 0, 0);          // LOCAL midnight
+const todayIso = todayStart.toISOString(); // ...compared against UTC rows
+```
+
+The daily-cap test failed once at **00:05** and passes at every other hour; it passes in isolation both with and without the change that was in flight, so it is a date-boundary flake, not a regression. Left alone because the fix (decide whether the cap is a local-day or UTC-day policy) is a behaviour decision, not a cleanup.
+
+**Worth flagging as process:** the honest move on a single red test minutes after midnight is to prove *why* before re-running. Re-running until green would have hidden this.
 
 ---
 
@@ -236,3 +288,34 @@ Rationale for pairing: the plugin covers judgement it cannot enforce; the gate e
 The decision ladder, the safety carve-outs, and the audit shapes used here come from
 **[DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)** (MIT).
 Raw machine-readable findings: `audit_raw.json`.
+
+---
+
+## Final status — every finding
+
+| id | finding | status |
+|---|---|---|
+| **S1-1** | project hash reimplemented, copies disagreed | **FIXED** v0.54.4 (divergence) + v0.54.6 (42 sites consolidated) |
+| **S1-2** | silent catch blocks | **FIXED** v0.54.5 — 10 real, not 22 |
+| **S2-1** | `createApiServer` 4,462 lines | **DEFERRED** with a staged plan + a prerequisite smoke test |
+| **S2-2** | dead exports | **FIXED** v0.54.3 + v0.54.6, run to a **fixpoint** (0 remain) |
+| **S2-3** | forwarding wrappers | **FIXED** — true duplicate removed; the rest are named domain concepts, kept |
+| **S3-1** | duplicated blocks | **NOT ACTIONED** — noise, except one triplicated type shape, noted |
+| **S3-2** | repeated magic numbers | **NOT ACTIONED** — RGB channels and a year |
+| **S3-3** | commented-out code | **NOT ACTIONED** — prose and pattern labels |
+| **S3-4** | one debt marker | informational |
+| **S3-5** | midnight-flaky daily cap | **NOTED** — behaviour decision, not a cleanup |
+
+Suite: **1032/1032** after every change.
+
+## What this audit taught about auditing
+
+**Four of ten findings shrank or vanished on inspection.** S1-1 was latent not active; S1-2 was 10 not 22; S3-2 and S3-3 were entirely false positives. The detectors were regexes, and regexes cannot tell an RGB channel from a magic number, prose from commented-out code, or a comment above a line from no comment at all.
+
+The audit's value was in **pointing at the right files**. Every count in it needed a human read before it meant anything — which is the same lesson the codebase keeps teaching about green test suites.
+
+Two real bugs were found *while fixing*, not by any detector:
+- a v0.53.1 comment sitting **inside a SQL template literal**, shipped and pushed, breaking every `failTask` call — the suite was green because the live-PG tests had not run that session
+- the midnight-boundary flake (S3-5)
+
+**Implication for the enforcement plan above:** the commit-time gate must stay narrow. Dead code is mechanically decidable and worth blocking. "Is this over-engineered" is not, and a gate that guesses at it would produce exactly the false positives this audit produced — and would be disabled within a day.
