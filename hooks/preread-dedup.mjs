@@ -130,20 +130,38 @@ function readBypassStats() {
   catch { return {}; }
 }
 
+function fileMtime(rel) {
+  try {
+    const isAbs = /^[a-zA-Z]:/.test(rawPath) || rawPath.startsWith("/");
+    const full = isAbs ? rawPath : join(projectPath0, rel);
+    return statSync(full).mtimeMs;
+  } catch { return 0; }
+}
+
 function recordBypass(rel) {
   try {
     const p = bypassStatsPath();
     mkdirSync(dirname(p), { recursive: true });
     const stats = readBypassStats();
-    stats[rel] = { n: (stats[rel]?.n ?? 0) + 1, last: new Date().toISOString() };
+    // v0.55.2 — pin the record to the file's mtime. A bypass proves the CURRENT
+    // summary was insufficient for the CURRENT file. When the file changes
+    // (usually because the agent edited it after bypassing), postedit-reindex
+    // regenerates the summary — and the block must come back to give the fresh
+    // summary its chance. Suppression tied to stale evidence would otherwise
+    // outlive the thing it was evidence about.
+    stats[rel] = { n: (stats[rel]?.n ?? 0) + 1, last: new Date().toISOString(), mtime: fileMtime(rel) };
     writeFileSync(p, JSON.stringify(stats), "utf8");
   } catch { /* never break a read over bookkeeping */ }
 }
 
-/** True when this file has proven it gets read in full anyway. */
+/** True while the file is UNCHANGED since it proved it needs full reads. */
 function redirectSuppressed(rel) {
-  try { return (readBypassStats()[rel]?.n ?? 0) >= BYPASS_THRESHOLD; }
-  catch { return false; }
+  try {
+    const rec = readBypassStats()[rel];
+    if (!rec || (rec.n ?? 0) < BYPASS_THRESHOLD) return false;
+    // Legacy records (no mtime) stay suppressed; new ones expire on change.
+    return rec.mtime === undefined || rec.mtime === fileMtime(rel);
+  } catch { return false; }
 }
 
 /**
