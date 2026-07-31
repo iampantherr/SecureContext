@@ -378,6 +378,25 @@ try {
 
   // ─── STAGE 2 — SUMMARY REDIRECT ─────────────────────────────────────────
   if (summaryRedirectEnabled) {
+    // v0.55.3 EDIT MODE — the agent has explicitly declared "I am editing; I
+    // need bytes, not summaries" via zc-edit-mode.mjs. While active (and not
+    // expired), reads pass through. Blast radius is still enforced by the
+    // prewrite-impact hook on the first Edit/Write of each file, so the agent
+    // sees cross-file callers before changing anything. The mode auto-expires,
+    // so a forgotten one cannot disable the redirect forever.
+    try {
+      const modeFile = join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".claude", "zc-ctx", "edit-mode",
+        `${nodeCrypto.createHash("sha256").update(projectPath0).digest("hex").slice(0, 16)}.json`);
+      const m = JSON.parse(readFileSync(modeFile, "utf8"));
+      const live = new Date(m.expires) > new Date();
+      const covers = !m.files?.length || m.files.some((f) => path === f || path.endsWith("/" + f));
+      if (live && covers) {
+        await emitPretoolEvent("pass_edit_mode", "agent-declared edit mode; summaries suspended");
+        if (dedupEnabled) { try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ } }
+        process.exit(0);
+      }
+    } catch { /* no mode file — normal path */ }
+
     // v0.55.1 ADAPTIVE SUPPRESSION — this file has been bypassed before, so the
     // summary demonstrably was not enough for it. Serving it again charges for a
     // summary AND the file AND an extra round-trip. Skip straight to the read.
@@ -440,7 +459,8 @@ try {
         `  (offset/limit always bypasses this; use a real range when you know it)\n` +
         `  Some clients also accept force_full_read: true, but most reject unknown\n` +
         `  Read parameters with a validation error — prefer offset/limit.\n\n` +
-        `(This redirect saves ~95% of Read tokens. Set ZC_SUMMARY_REDIRECT=0 to disable globally.)`;
+        `(Editing this file repeatedly? Engage edit mode so reads pass through while you work:
+  Bash: node ~/.claude/hooks/zc-edit-mode.mjs on 30   -- auto-expires; write-hook impact still applies.)`;
 
       // v0.22.5 — fire read_redirects telemetry (the existing per-success path)
       // v0.22.10 BUG FIX: was fire-and-forget but process.exit(0) immediately
