@@ -184,7 +184,12 @@ export async function rebuildCallGraph(projectPath: string): Promise<CallGraphRe
     db.close();
   }
 
-  await mirrorCallEdgesPg(projectPath, edges).catch(() => undefined);
+  // Mirror the unresolved sentinels too. They were written to SQLite only, so
+  // the operator dashboard read 0 unresolved sites from Postgres and claimed
+  // complete coverage for a graph with 649 unfollowed dynamic calls — a
+  // fabricated zero on the one field whose entire job is admitting what is
+  // missing.
+  await mirrorCallEdgesPg(projectPath, edges, unresolved).catch(() => undefined);
 
   return {
     files:        files.length,
@@ -234,7 +239,11 @@ export async function flushCallGraphRebuild(projectPath: string): Promise<CallGr
 // ─── PG mirror ─────────────────────────────────────────────────────────────
 
 /** Best-effort PG mirror of the call layer only. Skips silently without creds. */
-export async function mirrorCallEdgesPg(projectPath: string, edges: CallEdge[]): Promise<void> {
+export async function mirrorCallEdgesPg(
+  projectPath: string,
+  edges: CallEdge[],
+  unresolvedByFile?: Map<string, number>,
+): Promise<void> {
   if (!process.env.ZC_POSTGRES_HOST && !process.env.ZC_POSTGRES_PASSWORD) return;
   try {
     const { withTransaction } = await import("../pg_pool.js");
@@ -260,6 +269,20 @@ export async function mirrorCallEdgesPg(projectPath: string, edges: CallEdge[]):
            ON CONFLICT (project_hash, from_source, to_source, relation_type) DO UPDATE SET
              match_kind = EXCLUDED.match_kind, weight = EXCLUDED.weight, computed_at = NOW()`,
           params,
+        );
+      }
+
+      // Coverage sentinels. Without these the dashboard reads 0 unresolved sites
+      // from Postgres and reports complete coverage for a graph that could not
+      // follow hundreds of dynamic calls.
+      for (const [path, count] of unresolvedByFile ?? []) {
+        if (count <= 0) continue;
+        await c.query(
+          `INSERT INTO kb_edges_pg(project_hash, from_source, to_source, relation_type, match_kind, weight)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (project_hash, from_source, to_source, relation_type) DO UPDATE SET
+             weight = EXCLUDED.weight, computed_at = NOW()`,
+          [projectHash, `file:${path}`, unresolvedNode(path), UNRESOLVED_RELATION, CALL_MATCH_KIND, count],
         );
       }
     });

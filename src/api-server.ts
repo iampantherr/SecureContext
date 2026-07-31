@@ -1322,6 +1322,102 @@ export async function createApiServer(storeOverride?: Store) {
   // Pulls from skills_pg WHERE quarantined=TRUE; shows skill name, quarantine
   // path, and the first-line reason. No bulk-restore button — operator must
   // re-import explicitly (defense-in-depth).
+  // ── v0.55.0 — the codebase call graph, for the operator ─────────────────
+  //
+  // 4,645 call edges existed with no way to look at them: impact reached agents
+  // through the hooks and zc_impact, but an operator could not see which
+  // functions the codebase leans on, or that another repository depends on this
+  // one's routes.
+  //
+  // Shows what a human wants before a refactor: the hubs, the cross-repo
+  // consumers, and — stated rather than hidden — how much could not be resolved.
+  app.get("/dashboard/code-graph", async (request, reply) => {
+    try {
+      const { withClient: wc } = await import("./pg_pool.js");
+      const q = request.query as Record<string, unknown>;
+      const projectPath = typeof q.projectPath === "string" ? q.projectPath : undefined;
+      const ph = projectPath ? scopedProjectHash(projectPath) : null;
+
+      const data = await wc(async (c) => {
+        const scope = ph ? `AND project_hash = $1` : ``;
+        const params = ph ? [ph] : [];
+
+        const hubs = await c.query<{ to_source: string; callers: string; sites: string }>(
+          `SELECT to_source, COUNT(*)::text AS callers, SUM(weight)::text AS sites
+             FROM kb_edges_pg
+            WHERE match_kind = 'call' AND relation_type = 'calls' ${scope}
+            GROUP BY to_source ORDER BY COUNT(*) DESC LIMIT 15`, params);
+
+        const cross = await c.query<{ to_source: string; from_source: string }>(
+          `SELECT to_source, from_source FROM kb_edges_pg
+            WHERE match_kind = 'call' AND to_source LIKE 'route:%' ${scope}
+            ORDER BY to_source LIMIT 40`, params);
+
+        const totals = await c.query<{ edges: string; ambiguous: string; unresolved: string; projects: string }>(
+          `SELECT COUNT(*) FILTER (WHERE relation_type = 'calls')::text            AS edges,
+                  COUNT(*) FILTER (WHERE relation_type = 'calls_ambiguous')::text  AS ambiguous,
+                  COALESCE(SUM(weight) FILTER (WHERE relation_type = 'unresolved_calls'),0)::text AS unresolved,
+                  COUNT(DISTINCT project_hash)::text                                AS projects
+             FROM kb_edges_pg WHERE match_kind = 'call' ${scope}`, params);
+
+        return { hubs: hubs.rows, cross: cross.rows, totals: totals.rows[0] };
+      });
+
+      if (!data.totals || data.totals.edges === "0") {
+        reply.type("text/html").send(
+          `<p class="empty" style="color:#94a3b8">No call graph built yet. ` +
+          `Run <code>zc_index_project</code> or <code>zc_graph_rebuild</code> — ` +
+          `this is "not built", not "nothing depends on anything".</p>`);
+        return;
+      }
+
+      const nice = (node: string) => node.replace(/^(func|route):/, "");
+      const hubRows = data.hubs.map((h) => {
+        const n = Number(h.callers);
+        const flag = n >= 10 ? ` <span style="color:#fbbf24">⚠ HIGH</span>` : "";
+        return `<tr>
+          <td><code style="font-size:0.8rem">${escapeHtml(nice(h.to_source))}</code>${flag}</td>
+          <td style="text-align:right">${escapeHtml(h.callers)}</td>
+          <td style="text-align:right;color:#94a3b8">${escapeHtml(h.sites)}</td></tr>`;
+      }).join("");
+
+      const byRoute = new Map<string, string[]>();
+      for (const r of data.cross) {
+        const list = byRoute.get(r.to_source) ?? [];
+        list.push(r.from_source);
+        byRoute.set(r.to_source, list);
+      }
+      const crossHtml = byRoute.size === 0
+        ? `<p style="color:#94a3b8;font-size:0.85rem">No cross-repo consumers recorded. ` +
+          `Set <code>ZC_CROSS_REPO_SCAN=1</code> to scan sibling repositories.</p>`
+        : `<ul style="list-style:none;padding-left:0">` + [...byRoute.entries()].map(([route, callers]) => `
+            <li style="margin-bottom:0.4rem">
+              <code style="color:#86efac">${escapeHtml(nice(route))}</code>
+              <span style="color:#94a3b8;font-size:0.82rem"> ← ${callers.length} caller(s) in another repo</span>
+              <div style="color:#94a3b8;font-size:0.78rem">${escapeHtml(callers.slice(0, 4).map(nice).join(", "))}${callers.length > 4 ? " …" : ""}</div>
+            </li>`).join("") + `</ul>`;
+
+      reply.type("text/html").send(`
+        <div style="display:flex;gap:1.2rem;flex-wrap:wrap;margin-bottom:0.8rem">
+          <div><b>${escapeHtml(data.totals.edges)}</b> <span style="color:#94a3b8">trusted call edges</span></div>
+          <div><b>${escapeHtml(data.totals.ambiguous)}</b> <span style="color:#94a3b8">name-only (not counted)</span></div>
+          <div><b style="color:#fbbf24">${escapeHtml(data.totals.unresolved)}</b> <span style="color:#94a3b8">unresolved call sites</span></div>
+          <div><b>${escapeHtml(data.totals.projects)}</b> <span style="color:#94a3b8">project(s)</span></div>
+        </div>
+        <p style="color:#94a3b8;font-size:0.8rem;margin-top:0">Unresolved sites are dynamic dispatch the extractor could not follow — coverage is incomplete by that much, and a zero here never means "safe to change".</p>
+        <h4 style="margin-bottom:0.3rem">Most depended-on functions</h4>
+        <table style="width:100%;font-size:0.85rem">
+          <thead><tr><th style="text-align:left">Function</th><th style="text-align:right">Callers</th><th style="text-align:right">Sites</th></tr></thead>
+          <tbody>${hubRows}</tbody>
+        </table>
+        <h4 style="margin-bottom:0.3rem;margin-top:0.9rem">Cross-repo consumers</h4>
+        ${crossHtml}`);
+    } catch (e) {
+      reply.type("text/html").send(
+        `<p class="empty" style="color:#fca5a5">Could not load the code graph: ${escapeHtml(String(e).slice(0, 200))}</p>`);
+    }
+  });
+
   // ── v0.55.0 — skill failure evidence, finally rendered ──────────────────
   //
   // zc_record_skill_outcome has REQUIRED what_didnt and recommendation_for_skill

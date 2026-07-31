@@ -946,6 +946,17 @@ export function renderDashboardHtml(): string {
     Loading chain integrity…
   </div>
 
+  <details class="code-graph-details">
+    <summary><strong>Codebase call graph</strong>
+      <small>(what depends on what — and what the extractor could not resolve)</small></summary>
+    <div id="code-graph-panel"
+         hx-get="/dashboard/code-graph"
+         hx-trigger="load, every 120s"
+         hx-target="this" hx-swap="innerHTML">
+      Loading call graph…
+    </div>
+  </details>
+
   <details class="skill-failures-details" open>
     <summary><strong>Skill failures — what agents said was missing</strong>
       <small>(the mutator's input: what_didnt + recommendation_for_skill)</small></summary>
