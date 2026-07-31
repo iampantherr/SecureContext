@@ -3575,9 +3575,52 @@ async function dispatchToolCall(
             { promoted_from: result_id },
           );
 
-          // Atomic-ish: archive current → upsert new → mark consumed
+          // v0.55.0 — an approval changes the FILE, not a Postgres row.
+          //
+          // This used to be archiveSkill + upsertSkill. upsertSkill never sets
+          // skill_dir, so every approved mutation minted an orphan: a skill row
+          // with a body and no file behind it. The operator approved a change
+          // and SKILL.md on disk never moved — and because the PreToolUse runner
+          // verifies the file against the admission HMAC, a Postgres-only change
+          // was a change the runner could not see.
+          //
+          // Order matters: write the file, then re-admit. Re-admitting first
+          // would hash the OLD body and the runner would block the skill as
+          // tampered the moment the write landed.
+          const { writeSkillBody, reAdmitSkillDir } = await import("./skills/skill_file_writer.js");
+          const skillDir = (current as unknown as { skill_dir?: string | null }).skill_dir ?? null;
+          if (!skillDir) {
+            maDb.close();
+            return { content: [{ type: "text", text:
+              `Cannot apply: skill ${current.skill_id} has no skill_dir, so there is no file to write.\n` +
+              `Skills are owned by ~/.claude/skills/<name>/SKILL.md. This row predates that rule ` +
+              `(or was created by a writer that does not set skill_dir) and cannot be mutated in place.\n` +
+              `Nothing was changed — refusing to create a Postgres-only copy.` }], isError: true };
+          }
+
+          let written;
+          try {
+            written = writeSkillBody(skillDir, picked.candidate_body, { version: newVersion });
+          } catch (e) {
+            maDb.close();
+            return { content: [{ type: "text", text:
+              `Cannot apply: ${(e as Error).message}\nNothing was changed.` }], isError: true };
+          }
+
+          const readmit = await reAdmitSkillDir(skillDir);
+          if (!readmit.readmitted) {
+            // The file is already changed. Say so plainly and name the backup —
+            // a stale HMAC means the runner will block this skill's scripts until
+            // admission is refreshed.
+            return { content: [{ type: "text", text:
+              `SKILL.md was written (${written.skillMdPath}) but RE-ADMISSION FAILED: ${readmit.reason}\n` +
+              `The stored HMAC now disagrees with the file, so the PreToolUse runner will BLOCK ` +
+              `this skill's scripts until it is re-admitted.\n` +
+              `Restore with: copy "${written.backupPath}" over SKILL.md, or fix the file and re-run the import.` }],
+              isError: true };
+          }
+
           await archiveSkill(maDb, current.skill_id, `promoted_to_${newSkill.skill_id}`);
-          await upsertSkill(maDb, newSkill);
           await approveMutation(maDb, result_id, picked_candidate_index, rationale, AGENT_ID || "operator");
 
           // v0.22.0 — operator action audit. Best-effort PG write.

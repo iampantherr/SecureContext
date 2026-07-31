@@ -16,6 +16,13 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+
+// v0.55.0 — these fixtures are DELIBERATELY detached: they exercise the storage
+// layer directly and have no ~/.claude/skills directory behind them. Production
+// writes without a filesystem source are now refused (DetachedSkillError), because
+// that path silently minted 28 orphan rows. Opting in here states the intent
+// explicitly rather than weakening the guard for everyone.
+process.env.ZC_ALLOW_DETACHED_SKILLS = "1";
 import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";

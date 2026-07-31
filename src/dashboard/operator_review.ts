@@ -157,8 +157,32 @@ export async function handleApproveFromDashboard(args: ApproveArgs): Promise<App
       { promoted_from: args.result_id },
     );
 
+    // v0.55.0 — approving from the DASHBOARD must change the file too.
+    //
+    // This path had the identical defect the MCP tool did: archiveSkill +
+    // upsertSkill wrote a Postgres row with no skill_dir, so the operator
+    // approved a change and SKILL.md never moved. Two approval paths, one bug;
+    // fixing only the MCP one would have left the dashboard quietly minting
+    // orphans — which is how the 28 archived rows accumulated.
+    const { writeSkillBody, reAdmitSkillDir } = await import("../skills/skill_file_writer.js");
+    const skillDir = (current as unknown as { skill_dir?: string | null }).skill_dir ?? null;
+    if (!skillDir) {
+      throw new Error(
+        `Cannot apply: skill ${current.skill_id} has no skill_dir, so there is no file to write. ` +
+        `Skills are owned by ~/.claude/skills/<name>/SKILL.md. Nothing was changed.`,
+      );
+    }
+    const written = writeSkillBody(skillDir, picked.candidate_body, { version: newVersion });
+    const readmit = await reAdmitSkillDir(skillDir);
+    if (!readmit.readmitted) {
+      throw new Error(
+        `SKILL.md was written (${written.skillMdPath}) but re-admission failed: ${readmit.reason}. ` +
+        `The stored HMAC now disagrees with the file, so this skill's scripts will be BLOCKED. ` +
+        `Restore from ${written.backupPath} or re-run the filesystem import.`,
+      );
+    }
+
     await archiveSkill(db, current.skill_id, `promoted_to_${newSkill.skill_id}`);
-    await upsertSkill(db, newSkill);
     await approveMutation(db, args.result_id, args.picked_candidate_index, args.rationale, args.decided_by ?? "operator-dashboard");
 
     // v0.22.1 — write to mutation_reviews_pg (operator audit log; was missing

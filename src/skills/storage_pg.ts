@@ -45,7 +45,41 @@ function rowToSkill(row: Record<string, unknown>): Skill {
   };
 }
 
+/**
+ * v0.55.0 — refuse to write a skill row that has no file behind it.
+ *
+ * This function's INSERT has no skill_dir column, so every row it ever wrote had
+ * skill_dir NULL: an orphan by construction. 28 such rows accumulated before
+ * anyone noticed, and the operator dashboard listed them beside real skills.
+ *
+ * Skills are owned by ~/.claude/skills/<name>/SKILL.md. filesystem_skill_import
+ * does its own INSERT (and sets skill_dir), so nothing legitimate reaches here —
+ * only the paths that treated SecureContext as a second skill library.
+ *
+ * Opt-out exists for one honest case: a caller that genuinely owns a detached
+ * skill and has said so explicitly. Silence is not consent.
+ */
+export class DetachedSkillError extends Error {
+  constructor(skillId: string) {
+    super(
+      `Refusing to write skill '${skillId}' with no filesystem source. Skills are owned by ` +
+      `~/.claude/skills/<name>/SKILL.md — write the file and let the importer admit it. ` +
+      `A row without skill_dir cannot be HMAC-verified by the PreToolUse runner and shows up ` +
+      `on the dashboard as a skill nobody can edit. Set ZC_ALLOW_DETACHED_SKILLS=1 to override.`,
+    );
+    this.name = "DetachedSkillError";
+  }
+}
+
 export async function upsertSkillPg(skill: Skill): Promise<void> {
+  const hasSource = Boolean(
+    (skill as unknown as { skill_dir?: string | null }).skill_dir ??
+    (skill as unknown as { source_path?: string | null }).source_path,
+  );
+  if (!hasSource && process.env.ZC_ALLOW_DETACHED_SKILLS !== "1") {
+    throw new DetachedSkillError(skill.skill_id);
+  }
+
   const ok = await verifySkillHmac(skill.body, skill.body_hmac);
   if (!ok) throw new SkillTamperedError(skill.skill_id, skill.body_hmac);
 

@@ -1322,6 +1322,105 @@ export async function createApiServer(storeOverride?: Store) {
   // Pulls from skills_pg WHERE quarantined=TRUE; shows skill name, quarantine
   // path, and the first-line reason. No bulk-restore button — operator must
   // re-import explicitly (defense-in-depth).
+  // ── v0.55.0 — skill failure evidence, finally rendered ──────────────────
+  //
+  // zc_record_skill_outcome has REQUIRED what_didnt and recommendation_for_skill
+  // on every failed or low-scoring run since v0.30.8, and stored them in
+  // skill_runs_pg.evidence. Nothing ever displayed them: 18 of 24 failed runs
+  // carried an agent's written explanation of which guidance was wrong or
+  // missing, and the operator never saw one. The mutator's whole input was being
+  // collected and dropped.
+  //
+  // This is the operator's answer to "which skills are failing, and what did the
+  // agent say was missing?" — grouped by skill so a pattern across runs is
+  // visible rather than one row at a time.
+  app.get("/dashboard/skill-failures", async (_request, reply) => {
+    try {
+      const { withClient: wc } = await import("./pg_pool.js");
+      const rows = await wc(async (c) => {
+        const r = await c.query<{
+          skill_id: string; runs: string; last_ts: string;
+          evidence: Record<string, unknown> | null; agent_id: string | null;
+          outcome_score: string | null; status: string;
+        }>(
+          `SELECT skill_id, status, agent_id, outcome_score::text, ts::text AS last_ts, evidence,
+                  COUNT(*) OVER (PARTITION BY skill_id)::text AS runs
+             FROM skill_runs_pg
+            WHERE (status IN ('failed','timeout') OR outcome_score < 0.6)
+              AND evidence IS NOT NULL
+            ORDER BY skill_id, ts DESC
+            LIMIT 200`,
+        );
+        return r.rows;
+      });
+
+      if (rows.length === 0) {
+        // Distinguish "nothing failed" from "failures exist but carry no
+        // evidence" — the second is a gap in agent reporting, not good news.
+        const bare = await wc(async (c) => {
+          const r = await c.query<{ n: string }>(
+            `SELECT COUNT(*)::text AS n FROM skill_runs_pg
+              WHERE status IN ('failed','timeout') AND evidence IS NULL`);
+          return r.rows[0]?.n ?? "0";
+        });
+        reply.type("text/html").send(
+          Number(bare) > 0
+            ? `<p class="empty" style="color:#fbbf24">⚠ ${escapeHtml(bare)} failed run(s) recorded NO evidence — ` +
+              `agents are not filling what_didnt / recommendation_for_skill, so the mutator has nothing to act on.</p>`
+            : `<p class="empty" style="color:#10b981">✅ No failing skills with recorded evidence.</p>`);
+        return;
+      }
+
+      // Group by skill: one card per skill, newest evidence first.
+      const bySkill = new Map<string, typeof rows>();
+      for (const r of rows) {
+        const list = bySkill.get(r.skill_id) ?? [];
+        list.push(r);
+        bySkill.set(r.skill_id, list);
+      }
+
+      const field = (ev: Record<string, unknown> | null, k: string): string =>
+        typeof ev?.[k] === "string" ? String(ev[k]) : "";
+
+      const html = [...bySkill.entries()].map(([skillId, runsForSkill]) => {
+        const latest = runsForSkill[0]!;
+        const items = runsForSkill.slice(0, 5).map((r) => {
+          const didnt = field(r.evidence, "what_didnt");
+          const rec   = field(r.evidence, "recommendation_for_skill");
+          const trace = field(r.evidence, "failure_trace");
+          const worked = field(r.evidence, "what_worked");
+          return `
+            <li style="margin-bottom:0.6rem">
+              <div style="color:#94a3b8;font-size:0.78rem">
+                ${escapeHtml(r.last_ts.slice(0, 19))} · ${escapeHtml(r.status)}
+                ${r.outcome_score ? " · score " + escapeHtml(r.outcome_score) : ""}
+                ${r.agent_id ? " · " + escapeHtml(r.agent_id) : ""}
+              </div>
+              ${trace  ? `<div style="color:#fca5a5"><b>failed:</b> ${escapeHtml(trace.slice(0, 300))}</div>` : ""}
+              ${didnt  ? `<div style="color:#fbbf24"><b>what was missing:</b> ${escapeHtml(didnt.slice(0, 500))}</div>` : ""}
+              ${rec    ? `<div style="color:#86efac"><b>suggested change:</b> ${escapeHtml(rec.slice(0, 400))}</div>` : ""}
+              ${worked ? `<div style="color:#94a3b8"><b>what helped:</b> ${escapeHtml(worked.slice(0, 250))}</div>` : ""}
+            </li>`;
+        }).join("");
+        return `
+          <div class="skill-failure-card" style="border:1px solid #334155;border-radius:8px;padding:0.8rem;margin-bottom:0.9rem">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <code style="font-size:0.95rem">${escapeHtml(skillId)}</code>
+              <span style="color:#94a3b8;font-size:0.8rem">${escapeHtml(latest.runs)} failing run(s) with evidence</span>
+            </div>
+            <ul style="list-style:none;padding-left:0;margin-top:0.5rem">${items}</ul>
+          </div>`;
+      }).join("");
+
+      reply.type("text/html").send(
+        `<p style="color:#94a3b8;font-size:0.85rem">Agent-reported evidence from failing skill runs. ` +
+        `<b>what was missing</b> and <b>suggested change</b> are what the mutator acts on.</p>` + html);
+    } catch (e) {
+      reply.type("text/html").send(
+        `<p class="empty" style="color:#fca5a5">Could not load skill failures: ${escapeHtml(String(e).slice(0, 200))}</p>`);
+    }
+  });
+
   app.get("/dashboard/fs-skills/quarantine", async (_request, reply) => {
     try {
       const { withClient: wc } = await import("./pg_pool.js");

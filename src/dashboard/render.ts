@@ -946,6 +946,17 @@ export function renderDashboardHtml(): string {
     Loading chain integrity…
   </div>
 
+  <details class="skill-failures-details" open>
+    <summary><strong>Skill failures — what agents said was missing</strong>
+      <small>(the mutator's input: what_didnt + recommendation_for_skill)</small></summary>
+    <div id="skill-failures-list"
+         hx-get="/dashboard/skill-failures"
+         hx-trigger="load, every 60s"
+         hx-target="this" hx-swap="innerHTML">
+      Loading skill failures…
+    </div>
+  </details>
+
   <details class="fs-quarantine-details" open>
     <summary><strong>Quarantined skills</strong> <small>(scripts that failed AST scan or frontmatter validation)</small></summary>
     <div id="fs-quarantine-list"
