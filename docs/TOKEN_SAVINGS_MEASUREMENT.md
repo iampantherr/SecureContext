@@ -91,3 +91,50 @@ pricing and a 1M-token context window dominate the arithmetic — a smaller
 context or different cache economics could move the break-even. The per-read
 figures are exact; the end-to-end figures are means of small samples with
 consistent sign and large effect size.
+
+---
+
+# Follow-up: adaptive suppression (v0.55.1) — measured
+
+## What changed in the hook
+
+1. **Adaptive suppression** — a whole-file bypass (`offset≤2, limit≥5000`) is the
+   agent declaring "the summary was not enough for this file". Recorded durably
+   per project (`~/.claude/zc-ctx/redirect-bypass/<hash>.json`); that file is
+   never redirected again (`ZC_REDIRECT_BYPASS_THRESHOLD`, default 1). A genuine
+   range read does NOT count — that is the summary being used as intended.
+2. **Size gate** — files under `ZC_REDIRECT_MIN_BYTES` (default 2000B ≈ the
+   measured ~477-token break-even) are never redirected; their summary is bigger
+   than they are.
+
+Mechanics verified through the real hook protocol: 6/6 (serve → bypass →
+recorded → suppressed on next read, range reads exempt, project-relative keys).
+
+## Re-run of the comprehension A/B
+
+| run | billed input | turns | cost |
+|---|---|---|---|
+| adaptive 1 (cold) | 372,659 | 8 | $0.9397 |
+| adaptive 2 (warm) | 385,491 | 8 | $0.7188 |
+| adaptive 3 (warm) | 759,169 | 16 | $0.9790 |
+| old redirect (mean, n=2) | 397,982 | 10.5 | $0.8379 |
+| no redirect (mean, n=2) | 245,801 | 7.5 | $0.6168 |
+
+**Run 3 is model variance, not hook overhead:** its transcript shows ZERO
+summaries served — suppression and the size gate meant the redirect barely
+fired, and the agent simply explored more (10 Grep/Glob calls, 16 turns).
+Baseline runs are exposed to the same variance.
+
+## Honest verdict
+
+- Turn overhead is fixed: 10.5 → 8, matching the no-redirect baseline. The
+  learning works (three files recorded, then served without a summary detour).
+- Billed tokens in the non-outlier runs improved (398k → ~379k) but did NOT
+  close to baseline (246k). With n=3 against n=2 and a 2x-variance outlier in
+  the sample, the defensible claims are exactly two: adaptive suppression
+  removes the redirect's TURN penalty, and no measurement yet shows the redirect
+  arm beating the no-redirect baseline on billed tokens.
+- The remaining structural cost is the first-encounter summary for files that
+  end up read anyway. That is bounded (once per file, ever) and shrinks as the
+  bypass ledger grows — but on this evidence, "saves tokens end-to-end" remains
+  UNPROVEN. What is proven: it no longer costs 62% more.

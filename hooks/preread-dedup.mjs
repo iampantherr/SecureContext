@@ -31,8 +31,9 @@
  * Failure mode: any error → fail open, allow Read through.
  */
 
-import { readFileSync, statSync, existsSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { readFileSync, statSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolve, join, dirname } from "node:path";
+import * as nodeCrypto from "node:crypto";
 
 // ─── Read the hook payload from stdin (Claude Code's hook protocol) ─────────
 let raw = "";
@@ -97,6 +98,53 @@ function resolveProjectRoot(absPath, fallback) {
 const sessionCwd = input.cwd ?? process.cwd();
 const projectPath0 = resolveProjectRoot(rawPath, sessionCwd);
 const path = normalizeForLookup(rawPath, projectPath0);
+
+/**
+ * v0.55.1 — ADAPTIVE SUPPRESSION.
+ *
+ * Measured, not assumed: in an A/B on a comprehension task the redirect served
+ * one summary and the agent then bypassed and read the same file in full, every
+ * time. The summary prevented ZERO full reads and the run cost +62% billed
+ * tokens and +40% turns, because the session paid for the summary, the file, and
+ * the extra tool calls.
+ *
+ * The redirect only pays when the agent's need ENDS at the summary. When a file
+ * gets bypassed, that file has demonstrated it needs to be read in full — so
+ * stop charging for a summary nobody uses. Records the bypass durably (not just
+ * for the session) because the same file tends to be needed in full again.
+ *
+ * Plain JSON on disk, deliberately: this must work when the API is down, which
+ * is exactly when the hook still runs.
+ */
+const BYPASS_THRESHOLD = Number(process.env.ZC_REDIRECT_BYPASS_THRESHOLD ?? "1");
+
+function bypassStatsPath() {
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  const { createHash } = nodeCrypto;
+  const ph = createHash("sha256").update(projectPath0).digest("hex").slice(0, 16);
+  return join(home, ".claude", "zc-ctx", "redirect-bypass", `${ph}.json`);
+}
+
+function readBypassStats() {
+  try { return JSON.parse(readFileSync(bypassStatsPath(), "utf8")); }
+  catch { return {}; }
+}
+
+function recordBypass(rel) {
+  try {
+    const p = bypassStatsPath();
+    mkdirSync(dirname(p), { recursive: true });
+    const stats = readBypassStats();
+    stats[rel] = { n: (stats[rel]?.n ?? 0) + 1, last: new Date().toISOString() };
+    writeFileSync(p, JSON.stringify(stats), "utf8");
+  } catch { /* never break a read over bookkeeping */ }
+}
+
+/** True when this file has proven it gets read in full anyway. */
+function redirectSuppressed(rel) {
+  try { return (readBypassStats()[rel]?.n ?? 0) >= BYPASS_THRESHOLD; }
+  catch { return false; }
+}
 
 /**
  * Feed `reason` back to the model as the Read result, and let the turn CONTINUE.
@@ -253,6 +301,14 @@ try {
 
   // ─── Bypass: partial read (offset/limit) ────────────────────────────────
   if (partialRead) {
+    // v0.55.1 — a whole-file bypass (offset near 1, huge limit) is the agent
+    // declaring "the summary was not enough for this file". Record it durably so
+    // the NEXT read of this file skips the summary round-trip entirely.
+    // A genuine range read (offset 500, limit 40) is not that signal — the agent
+    // may be using the summary exactly as intended.
+    const off = Number(toolArgs.offset ?? 1);
+    const lim = Number(toolArgs.limit ?? 0);
+    if (off <= 2 && lim >= 5000) recordBypass(path);
     await emitPretoolEvent("bypass_partial_read", `offset=${toolArgs.offset} limit=${toolArgs.limit}`);
     if (dedupEnabled) {
       try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
@@ -304,6 +360,33 @@ try {
 
   // ─── STAGE 2 — SUMMARY REDIRECT ─────────────────────────────────────────
   if (summaryRedirectEnabled) {
+    // v0.55.1 ADAPTIVE SUPPRESSION — this file has been bypassed before, so the
+    // summary demonstrably was not enough for it. Serving it again charges for a
+    // summary AND the file AND an extra round-trip. Skip straight to the read.
+    if (redirectSuppressed(path)) {
+      await emitPretoolEvent("pass_bypass_learned", "file previously bypassed; summary suppressed");
+      if (dedupEnabled) {
+        try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
+      }
+      process.exit(0);
+    }
+
+    // v0.55.1 SIZE GATE — below the measured break-even (~477 tokens, ~24 lines)
+    // the summary is BIGGER than the file. Redirecting a tiny file can only lose.
+    try {
+      const isAbs = /^([a-zA-Z]:[\\/]|\/)/.test(rawPath);
+      const full = isAbs ? rawPath : join(projectPath, rawPath);
+      const bytes = statSync(full).size;
+      const minBytes = Number(process.env.ZC_REDIRECT_MIN_BYTES ?? "2000");   // ~500 tokens
+      if (bytes < minBytes) {
+        await emitPretoolEvent("pass_below_breakeven", `file ${bytes}B < ${minBytes}B`);
+        if (dedupEnabled) {
+          try { recordSessionRead(projectPath, sessionId, path); } catch { /* ignore */ }
+        }
+        process.exit(0);
+      }
+    } catch { /* stat failed — fall through to the normal path */ }
+
     let summary = null;
     try {
       // getFileSummary is async since v0.22.8 (PG-first); handle both shapes
