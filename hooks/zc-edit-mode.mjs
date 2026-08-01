@@ -41,7 +41,12 @@ function projectRoot(start) {
 const root = projectRoot(process.cwd());
 const ph = createHash("sha256").update(root).digest("hex").slice(0, 16);
 const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
-const modePath = join(home, ".claude", "zc-ctx", "edit-mode", `${ph}.json`);
+// v0.55.4 — PER-AGENT scope. Keyed by project hash alone, one agent engaging
+// edit mode suspended summaries for EVERY agent on the project. A2A agents
+// carry ZC_AGENT_ID; solo/desktop sessions fall back to "default", which keeps
+// single-agent behaviour unchanged.
+const agent = (process.env.ZC_AGENT_ID ?? "default").replace(/[^A-Za-z0-9_-]/g, "_");
+const modePath = join(home, ".claude", "zc-ctx", "edit-mode", `${ph}-${agent}.json`);
 
 const [cmd = "status", ...rest] = process.argv.slice(2);
 
@@ -52,7 +57,7 @@ if (cmd === "on") {
   writeFileSync(modePath, JSON.stringify({
     root, files, expires: new Date(Date.now() + minutes * 60_000).toISOString(),
   }), "utf8");
-  console.log(`edit mode ON for ${root}` +
+  console.log(`edit mode ON for ${root} [agent: ${agent}]` +
     (files.length ? ` (files: ${files.join(", ")})` : " (all files)") +
     `, expires in ${minutes} min. Summaries suspended; the write-hook blast radius still applies.`);
 } else if (cmd === "off") {

@@ -385,8 +385,10 @@ try {
     // sees cross-file callers before changing anything. The mode auto-expires,
     // so a forgotten one cannot disable the redirect forever.
     try {
+      // v0.55.4 — per-agent: the mode only applies to the agent that engaged it.
+      const emAgent = (process.env.ZC_AGENT_ID ?? "default").replace(/[^A-Za-z0-9_-]/g, "_");
       const modeFile = join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".claude", "zc-ctx", "edit-mode",
-        `${nodeCrypto.createHash("sha256").update(projectPath0).digest("hex").slice(0, 16)}.json`);
+        `${nodeCrypto.createHash("sha256").update(projectPath0).digest("hex").slice(0, 16)}-${emAgent}.json`);
       const m = JSON.parse(readFileSync(modeFile, "utf8"));
       const live = new Date(m.expires) > new Date();
       const covers = !m.files?.length || m.files.some((f) => path === f || path.endsWith("/" + f));
