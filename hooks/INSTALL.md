@@ -129,3 +129,43 @@ Remove-Item "$env:USERPROFILE\.claude\hooks\postbash-capture.mjs"
 ```
 
 Then remove the `hooks` entries from `~/.claude/settings.json`.
+
+## Edit mode — for multi-iteration edit sessions (v0.55.3)
+
+The summary redirect saves tokens on *orientation* reads, but an agent editing a
+file needs the literal bytes (`Edit` matches on `old_string`), and an
+edit→test→fix loop would otherwise pay a summary round-trip on every iteration.
+
+**Instruct your agents** (in your CLAUDE.md / system prompt) to engage edit mode
+*before* starting any multi-edit work, scoped to the files in their plan:
+
+```bash
+node ~/.claude/hooks/zc-edit-mode.mjs on 30 src/foo.ts src/bar.ts   # scoped (preferred)
+node ~/.claude/hooks/zc-edit-mode.mjs on 30                          # whole project
+node ~/.claude/hooks/zc-edit-mode.mjs off                            # when done
+node ~/.claude/hooks/zc-edit-mode.mjs status
+```
+
+While active, Reads of the scoped files return full bytes with no summary
+detour. Three properties keep it safe:
+
+- **Auto-expiry** (default 30 min): a forgotten mode cannot disable the redirect
+  forever — blocks return by themselves, against summaries that
+  `postedit-reindex` has already refreshed from the edited files.
+- **Blast radius is never suspended**: the `prewrite-impact` hook still fires on
+  the first Edit/Write of each file, so the agent sees the cross-file callers of
+  the function it is changing even with summaries off.
+- **Scoped beats global**: files outside the named set still get summaries.
+
+Suggested agent rule: *one-off edit → `zc_file_summary` then a ranged Read;
+two or more expected iterations on the same file(s) → edit mode first, before
+the first read.* Agents that skip the rule learn the command from the redirect's
+own block message — the cost of non-compliance is exactly one turn, once; the
+adaptive bypass ledger (per file+mtime) then suppresses further blocks for that
+file version anyway.
+
+Measured effect of the adaptive stack (real headless-agent A/B, comprehension
+task over 67k-token files): the old deny-always redirect cost **+61.9%** billed
+tokens versus no redirect; with the ledger warm the same task ran at **−0.9%** —
+the penalty is fully eliminated while the ~98% per-read saving on orientation
+reads is retained. See `docs/TOKEN_SAVINGS_MEASUREMENT.md`.
