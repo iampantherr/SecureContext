@@ -3860,6 +3860,59 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ── KB communities, PG-first (live E2E 2026-08-04) ───────────────────────
+  // Louvain over knowledge_entries; persisted to kb_communities_pg so the
+  // proxied zc_kb_community_for reads what the proxied zc_index wrote.
+  app.post("/api/v1/kb/cluster", async (request, reply) => {
+    try {
+      const { projectPath } = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      const ph = scopedProjectHash(pp);
+      const { withClient } = await import("./pg_pool.js");
+      const { detectCommunitiesFromRows } = await import("./indexing/community.js");
+      const rows = await withClient(async (c) =>
+        (await c.query(`SELECT source, content FROM knowledge_entries WHERE project_hash = $1`, [ph])).rows);
+      const result = detectCommunitiesFromRows(rows as Array<{ source: string; content: string }>);
+      if (result.totalSources > 0) {
+        await withClient(async (c) => {
+          await c.query(`DELETE FROM kb_communities_pg WHERE project_hash = $1`, [ph]);
+          for (const a of result.assignments) {
+            await c.query(
+              `INSERT INTO kb_communities_pg (project_hash, source, community_id) VALUES ($1, $2, $3)`,
+              [ph, a.source, a.communityId]);
+          }
+        });
+      }
+      return { ok: true, totalSources: result.totalSources, totalEdges: result.totalEdges,
+               communityCount: result.communityCount, modularity: result.modularity,
+               elapsedMs: result.elapsedMs, communities: result.communities.slice(0, 8) };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  app.get("/api/v1/kb/community-for", async (request, reply) => {
+    try {
+      const { projectPath, source } = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      if (typeof source !== "string" || !source) throw new ApiError(400, "source is required");
+      const ph = scopedProjectHash(pp);
+      const { withClient } = await import("./pg_pool.js");
+      const hit = await withClient(async (c) =>
+        (await c.query(`SELECT community_id FROM kb_communities_pg WHERE project_hash = $1 AND source = $2`, [ph, source])).rows[0]);
+      if (!hit) return { ok: true, source, communityId: null, communitySize: 0, mates: [] };
+      const mates = await withClient(async (c) =>
+        (await c.query(
+          `SELECT source FROM kb_communities_pg WHERE project_hash = $1 AND community_id = $2 AND source <> $3 ORDER BY source`,
+          [ph, hit.community_id, source])).rows.map((r: { source: string }) => r.source));
+      return { ok: true, source, communityId: hit.community_id, communitySize: mates.length + 1, mates };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
   // ── Function call graph: cascade impact (v0.55.0) ────────────────────────
   app.get("/api/v1/graph/impact", async (request, reply) => {
     try {

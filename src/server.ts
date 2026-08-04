@@ -1767,6 +1767,40 @@ ${sr["warning"]}` : "";
         return { content: [{ type: "text", text: `## Retrieval explanation\n${lines.join("\n\n")}` }] };
       }
 
+      case "zc_kb_cluster": {
+        const r = await apiCall("POST", "/api/v1/kb/cluster", { projectPath: PROJECT_PATH });
+        const lines = [
+          `## KB Community Detection (Louvain)`,
+          ``,
+          `Sources: ${r["totalSources"]}  Edges: ${r["totalEdges"]}  Communities: ${r["communityCount"]}  Modularity: ${Number(r["modularity"] ?? 0).toFixed(3)}`,
+          `Computed in ${r["elapsedMs"]}ms.`,
+          ``,
+          `### Top communities`,
+        ];
+        for (const c of (r["communities"] as Array<{ id: number; size: number; sampleSources: string[] }>) ?? []) {
+          lines.push(`- **community ${c.id}** (${c.size} sources): ${c.sampleSources.slice(0, 3).join(", ")}${c.sampleSources.length > 3 ? ", ..." : ""}`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "zc_kb_community_for": {
+        const src = String(body["source"] ?? "");
+        const r = await apiCall("GET", `/api/v1/kb/community-for?projectPath=${encodeURIComponent(PROJECT_PATH)}&source=${encodeURIComponent(src)}`);
+        if (r["communityId"] === null || r["communityId"] === undefined) {
+          return { content: [{ type: "text", text: `Source '${src}' not found in kb_communities. Run \`zc_kb_cluster\` first to compute community assignments.` }] };
+        }
+        const mates = (r["mates"] as string[]) ?? [];
+        const lines = [`## Community of: ${src}`, `Community ID: ${r["communityId"]}  |  Size: ${r["communitySize"]}`];
+        if (mates.length > 0) {
+          lines.push(``, `### Community-mates (${mates.length})`);
+          for (const m of mates.slice(0, 30)) lines.push(`- ${m}`);
+          if (mates.length > 30) lines.push(`... and ${mates.length - 30} more`);
+        } else {
+          lines.push(`This source is in a singleton community.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
       case "zc_issue_token":
         result = await apiCall("POST", "/api/v1/issue-token", { projectPath: PROJECT_PATH, agentId: body["agent_id"], role: body["role"] });
         return { content: [{ type: "text", text: `Token: ${result["token"]}` }] };
@@ -1812,6 +1846,9 @@ async function dispatchToolCall(
     "zc_compact_window",
     // v0.55.0 — call-graph impact is store-backed for the same reason.
     "zc_impact",
+    // Live E2E 2026-08-04 — proxy-mode zc_index writes PG, so clustering and
+    // community lookup must read PG too or fresh sources are invisible.
+    "zc_kb_cluster", "zc_kb_community_for",
     // D1 — program memory is PG-backed; must proxy to the API.
     "zc_program",
   ]);

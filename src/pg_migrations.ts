@@ -1166,6 +1166,25 @@ export const PG_MIGRATIONS: PgMigration[] = [
         `ALTER TABLE pretool_events_pg ADD CONSTRAINT chk_pte_outcome CHECK (outcome IN (${list}))`);
     },
   },
+  {
+    id: 46,
+    description:
+      "KB communities in PG (PG-first parity). zc_kb_cluster/zc_kb_community_for read " +
+      "local SQLite while proxy-mode zc_index writes PG, so a freshly indexed source was " +
+      "invisible to a cluster run seconds later (live E2E 2026-08-04, E2E_ANALYSIS group).",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS kb_communities_pg (
+          project_hash TEXT NOT NULL,
+          source       TEXT NOT NULL,
+          community_id INTEGER NOT NULL,
+          computed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (project_hash, source)
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS kb_communities_pg_cid_idx ON kb_communities_pg (project_hash, community_id)`);
+    },
+  },
 
 ];
 
