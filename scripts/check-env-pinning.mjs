@@ -166,31 +166,6 @@ function extractHeredoc(content, anchor) {
   return content.slice(startIdx, startIdx + endMatch.index);
 }
 
-function checkLauncher(heredoc, requiredVars, launcherName) {
-  const missing = [];
-  for (const v of requiredVars) {
-    // Accept either always-set (`$env:X = 'val'`) or conditionally-set inside an if block
-    // Pattern: `$env:V = 'something'`  or  `$env:V =`  anywhere in the heredoc
-    // Note the heredoc's $env needs backtick escape in PS syntax → `$env: will appear literally
-    const rx = new RegExp(`\`?\\$env:${v}\\s*=`);
-    if (!rx.test(heredoc)) missing.push(v);
-  }
-  return missing;
-}
-
-function checkLauncherConditional(bodyAroundHeredoc, vars) {
-  // Some SHARED_PROPAGATED vars are set via a conditional pattern outside the heredoc
-  // (e.g. `if ($zcApiUrl) { $orchEnvBlock += "..." }`). Return vars present in the outer
-  // launcher-building code.
-  const present = new Set();
-  for (const v of vars) {
-    // Look for `$env:V` either in the heredoc OR in the env-block builder
-    const rx = new RegExp(`\\$env:${v}\\s*=`);
-    if (rx.test(bodyAroundHeredoc)) present.add(v);
-  }
-  return present;
-}
-
 function classify(varName) {
   if (CRITICAL_PER_AGENT.has(varName)) return "CRITICAL";
   if (SHARED_PROPAGATED.has(varName))  return "SHARED";

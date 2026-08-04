@@ -25,7 +25,7 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { createHash } from "node:crypto";
+import { projectHash as sharedProjectHash } from "./_project-hash.mjs";
 
 function projectRoot(start) {
   let dir = resolve(start);
@@ -39,7 +39,7 @@ function projectRoot(start) {
 }
 
 const root = projectRoot(process.cwd());
-const ph = createHash("sha256").update(root).digest("hex").slice(0, 16);
+const ph = sharedProjectHash(root);
 const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
 // v0.55.4 — PER-AGENT scope. Keyed by project hash alone, one agent engaging
 // edit mode suspended summaries for EVERY agent on the project. A2A agents

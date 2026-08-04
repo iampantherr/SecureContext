@@ -92,10 +92,6 @@ async function ask(rl, prompt, def = "") {
   return (answer ?? "").trim() || def;
 }
 
-function fmtBytes(n) {
-  return n > 1e9 ? (n / 1e9).toFixed(2) + " GB" : (n / 1e6).toFixed(0) + " MB";
-}
-
 // ─── Step 1: verify docker + compose ────────────────────────────────────────
 
 step("1/7  Verifying Docker + Compose");

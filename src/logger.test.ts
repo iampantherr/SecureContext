@@ -51,16 +51,6 @@ afterEach(() => {
   } catch {}
 });
 
-function readLogFile(component: string): string[] {
-  // Note: pathForToday uses the env var ZC_LOG_DIR, but only at module load
-  // for the LOG_DIR const. The const is captured at import time. So tests
-  // need to compute the path explicitly using the same logic.
-  const date = new Date().toISOString().slice(0, 10);
-  const path = join(TEST_LOG_DIR, `${component}.${date}.log`);
-  if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").trim().split("\n").filter((l) => l.length > 0);
-}
-
 // NOTE: logger module captures LOG_DIR at import time. To make these tests
 // work, we need to set ZC_LOG_DIR BEFORE the import happens. We do this via
 // a module reset — the simpler workaround is to have the logger read LOG_DIR

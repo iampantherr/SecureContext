@@ -39,12 +39,6 @@ export interface QualityRankable {
   last_retrieved_at?: string | Date | null;
 }
 
-function toMs(v: string | Date | null | undefined): number | null {
-  if (v == null) return null;
-  const t = v instanceof Date ? v.getTime() : Date.parse(String(v));
-  return Number.isFinite(t) ? t : null;
-}
-
 // ─── 1. Pinned classes (constraints and anti-patterns) ───────────────────────
 /**
  * Facts that must NEVER be dropped by the recall budget.

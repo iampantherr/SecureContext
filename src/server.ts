@@ -3927,12 +3927,6 @@ function wasSkillBlockSent(sessionId: string, role: string): boolean {
 
 /** Classify an error for telemetry's error_class taxonomy. */
 /** v0.18.1 — bump the minor segment of a semver-ish string. Used by global skill promotion. */
-function bumpMinor(version: string): string {
-  const m = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
-  if (!m) return version + ".1";
-  return `${m[1]}.${Number(m[2]) + 1}.0`;
-}
-
 function classifyError(e: unknown): "transient" | "permission" | "logic" | "unknown" {
   const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
   if (msg.includes("timeout") || msg.includes("etimedout") || msg.includes("econnrefused")) return "transient";

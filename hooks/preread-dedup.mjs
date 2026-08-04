@@ -34,6 +34,11 @@
 import { readFileSync, statSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import * as nodeCrypto from "node:crypto";
+// Single source for the project hash — the drift guard caught this file
+// re-deriving it inline (bypass ledger + edit-mode gate), the exact
+// recurrence the guard exists to stop. Same normalisation as src/store.ts;
+// resolved roots are already canonical, so existing state files keep their hashes.
+import { projectHash as sharedProjectHash } from "./_project-hash.mjs";
 
 // ─── Read the hook payload from stdin (Claude Code's hook protocol) ─────────
 let raw = "";
@@ -120,9 +125,7 @@ const BYPASS_THRESHOLD = Number(process.env.ZC_REDIRECT_BYPASS_THRESHOLD ?? "1")
 
 function bypassStatsPath() {
   const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
-  const { createHash } = nodeCrypto;
-  const ph = createHash("sha256").update(projectPath0).digest("hex").slice(0, 16);
-  return join(home, ".claude", "zc-ctx", "redirect-bypass", `${ph}.json`);
+  return join(home, ".claude", "zc-ctx", "redirect-bypass", `${sharedProjectHash(projectPath0)}.json`);
 }
 
 function readBypassStats() {
@@ -388,7 +391,7 @@ try {
       // v0.55.4 — per-agent: the mode only applies to the agent that engaged it.
       const emAgent = (process.env.ZC_AGENT_ID ?? "default").replace(/[^A-Za-z0-9_-]/g, "_");
       const modeFile = join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".claude", "zc-ctx", "edit-mode",
-        `${nodeCrypto.createHash("sha256").update(projectPath0).digest("hex").slice(0, 16)}-${emAgent}.json`);
+        `${sharedProjectHash(projectPath0)}-${emAgent}.json`);
       const m = JSON.parse(readFileSync(modeFile, "utf8"));
       const live = new Date(m.expires) > new Date();
       const covers = !m.files?.length || m.files.some((f) => path === f || path.endsWith("/" + f));
