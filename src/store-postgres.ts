@@ -1617,7 +1617,10 @@ export class PostgresStore implements Store {
     try {
       await client.query("BEGIN");
       // v0.37.0 — preserve LLM-extracted entity edges across co-reference rebuilds.
-      await client.query("DELETE FROM kb_edges_pg     WHERE project_hash = $1 AND match_kind <> 'entity'", [projectHash]);
+      // Live E2E 2026-08-04 — preserve the call layer too: this DELETE and the one in
+      // backlinks.ts had diverged, so every API-side backlinks rebuild (including the
+      // enrichment cron) silently wiped call edges and zc_impact reverted to "NOT built".
+      await client.query("DELETE FROM kb_edges_pg     WHERE project_hash = $1 AND match_kind NOT IN ('entity', 'call')", [projectHash]);
       await client.query("DELETE FROM kb_backlinks_pg WHERE project_hash = $1", [projectHash]);
       const CHUNK = 100;
       for (let i = 0; i < typed.length; i += CHUNK) {
