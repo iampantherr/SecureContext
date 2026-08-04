@@ -27,6 +27,7 @@ import { join, relative } from "node:path";
 import { openDb } from "../knowledge.js";
 import { Config } from "../config.js";
 import { projectHash as scopedProjectHash } from "../store.js";
+import { makeDebounced } from "./debounce.js";
 import {
   extractFileCalls, resolveCallGraph, callGraphAvailable,
   type FileCalls, type CallEdge,
@@ -215,8 +216,10 @@ export async function rebuildCallGraph(projectPath: string): Promise<CallGraphRe
 
 // ─── Debounced trigger (mirrors rebuildBacklinksAsync) ─────────────────────
 
-const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const DEBOUNCE_MS = 5_000;
+const debouncedCallGraph = makeDebounced((projectPath) => {
+  rebuildCallGraph(projectPath).catch(() => undefined);
+}, DEBOUNCE_MS);
 
 /**
  * Schedule a rebuild 5s after the LAST call. This is the per-file trigger: an
@@ -224,14 +227,7 @@ const DEBOUNCE_MS = 5_000;
  * files rebuilds ONCE.
  */
 export function rebuildCallGraphAsync(projectPath: string): void {
-  const existing = debounceTimers.get(projectPath);
-  if (existing) clearTimeout(existing);
-  const t = setTimeout(() => {
-    debounceTimers.delete(projectPath);
-    rebuildCallGraph(projectPath).catch(() => undefined);
-  }, DEBOUNCE_MS);
-  if (typeof (t as { unref?: () => void }).unref === "function") (t as { unref: () => void }).unref();
-  debounceTimers.set(projectPath, t);
+  debouncedCallGraph.run(projectPath);
 }
 
 /**
@@ -240,8 +236,7 @@ export function rebuildCallGraphAsync(projectPath: string): void {
  * the trap flushBacklinkRebuild exists to avoid, same shape here.
  */
 export async function flushCallGraphRebuild(projectPath: string): Promise<CallGraphRebuildResult | null> {
-  const pending = debounceTimers.get(projectPath);
-  if (pending) { clearTimeout(pending); debounceTimers.delete(projectPath); }
+  debouncedCallGraph.cancel(projectPath);
   try {
     return await rebuildCallGraph(projectPath);
   } catch {

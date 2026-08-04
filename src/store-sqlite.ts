@@ -75,7 +75,7 @@ import type {
   FetchStats,
 } from "./store.js";
 import type { MemoryFact, BroadcastType, BroadcastMessage, BroadcastResult, KnowledgeEntry, CrossProjectEntry, RetentionTier, CallImpactResult } from "./store.js";
-import { projectHash as scopedProjectHash } from "./store.js";
+import { projectHash as scopedProjectHash, todayUtc } from "./store.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -107,9 +107,6 @@ function openGlobalDb(): DatabaseSync {
   return db;
 }
 
-function todayUtc(): string {
-  return new Date().toISOString().slice(0, 10);
-}
 
 function projectHashOf(projectPath: string): string {
   return scopedProjectHash(projectPath);

@@ -22,7 +22,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Config } from "./config.js";
 import type { BroadcastType } from "./memory.js";
 import { projectHash as scopedProjectHash } from "./store.js";
@@ -61,19 +61,6 @@ function b64urlEncode(data: Buffer | string): string {
 /** Base64url decode to a string */
 function b64urlDecode(s: string): string {
   return Buffer.from(s, "base64url").toString("utf8");
-}
-
-/** Generate a UUID v4 */
-function uuidV4(): string {
-  const bytes = randomBytes(16);
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40; // version 4
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80; // variant bits
-  const hex = bytes.toString("hex");
-  return [
-    hex.slice(0, 8), hex.slice(8, 12),
-    hex.slice(12, 16), hex.slice(16, 20),
-    hex.slice(20, 32),
-  ].join("-");
 }
 
 /**
@@ -132,7 +119,7 @@ export function issueToken(
 
   const signingKey = getOrCreateSigningKey(db);
   const nowSec     = Math.floor(Date.now() / 1000);
-  const tid        = uuidV4();
+  const tid        = randomUUID();
   const ph         = scopedProjectHash(projectPath);
 
   const payload: TokenPayload = {

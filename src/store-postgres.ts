@@ -72,7 +72,7 @@ import type {
   CallImpactResult,
   CallImpactTarget,
 } from "./store.js";
-import { projectHash as scopedProjectHash } from "./store.js";
+import { projectHash as scopedProjectHash, todayUtc } from "./store.js";
 
 const { Pool } = pg;
 
@@ -104,9 +104,6 @@ export function capEventEntries<T>(ranked: T[], limit: number, src: (x: T) => st
   return out;
 }
 
-function todayUtc(): string {
-  return new Date().toISOString().slice(0, 10);
-}
 
 function sanitize(s: string, max: number): string {
   return String(s).replace(/[\r\n\x00\x01-\x08\x0b\x0c\x0e-\x1f]/g, " ").trim().slice(0, max);

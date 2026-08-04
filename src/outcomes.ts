@@ -37,6 +37,9 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
+// One canonical-JSON replacer for every HMAC input (was duplicated here; two
+// copies of the function that feeds integrity hashing is a drift risk).
+import { sortedReplacer } from "./security/audit_log.js";
 import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -996,13 +999,3 @@ function readOutcome(db: DatabaseSync, outcomeId: string): OutcomeRecord | null 
 }
 
 /** Sorted JSON.stringify replacer — matches src/security/audit_log.ts pattern. */
-function sortedReplacer(_key: string, value: unknown): unknown {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    const sorted: Record<string, unknown> = {};
-    for (const k of Object.keys(value as object).sort()) {
-      sorted[k] = (value as Record<string, unknown>)[k];
-    }
-    return sorted;
-  }
-  return value;
-}

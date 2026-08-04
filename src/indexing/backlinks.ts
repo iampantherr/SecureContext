@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 import { openDb } from "../knowledge.js";
 import { extractCoReferences, classifyRelation } from "./community.js";
 import { projectHash as scopedProjectHash } from "../store.js";
+import { makeDebounced } from "./debounce.js";
 
 interface TypedEdge {
   from:      string;
@@ -144,8 +145,15 @@ export function rebuildBacklinks(db: DatabaseSync): BacklinkRebuildResult {
 
 // ─── Debounced fire-and-forget rebuild (mirrors storeEmbeddingAsync) ────────
 
-const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const DEBOUNCE_MS = 5_000;
+const debouncedRebuild = makeDebounced((projectPath) => {
+  try {
+    const db = openDb(projectPath);
+    let result: BacklinkRebuildResult;
+    try { result = rebuildBacklinks(db); } finally { db.close(); }
+    rebuildBacklinksPgAsync(projectPath, result.typedEdges).catch(() => undefined);
+  } catch { /* best-effort background work */ }
+}, DEBOUNCE_MS);
 
 /**
  * Schedule a backlink rebuild for a project, 5s after the LAST call (trailing
@@ -154,26 +162,7 @@ const DEBOUNCE_MS = 5_000;
  * the process open (timer is unref'd).
  */
 export function rebuildBacklinksAsync(projectPath: string): void {
-  const existing = debounceTimers.get(projectPath);
-  if (existing) clearTimeout(existing);
-  const t = setTimeout(() => {
-    debounceTimers.delete(projectPath);
-    try {
-      const db = openDb(projectPath);
-      let result: BacklinkRebuildResult;
-      try {
-        result = rebuildBacklinks(db);
-      } finally {
-        db.close();
-      }
-      // PG mirror — fire-and-forget, reuses the freshly built edges (no re-extraction).
-      rebuildBacklinksPgAsync(projectPath, result.typedEdges).catch(() => undefined);
-    } catch {
-      // best-effort background work — search degrades to baseScore if this never runs
-    }
-  }, DEBOUNCE_MS);
-  if (typeof (t as { unref?: () => void }).unref === "function") (t as { unref: () => void }).unref();
-  debounceTimers.set(projectPath, t);
+  debouncedRebuild.run(projectPath);
 }
 
 /**
@@ -188,8 +177,7 @@ export function rebuildBacklinksAsync(projectPath: string): void {
  * the result (or null on any error — never breaks indexing).
  */
 export async function flushBacklinkRebuild(projectPath: string): Promise<BacklinkRebuildResult | null> {
-  const pending = debounceTimers.get(projectPath);
-  if (pending) { clearTimeout(pending); debounceTimers.delete(projectPath); }
+  debouncedRebuild.cancel(projectPath);
   try {
     const db = openDb(projectPath);
     let result: BacklinkRebuildResult;

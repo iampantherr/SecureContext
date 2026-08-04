@@ -253,7 +253,7 @@ function initializeStateIfNeeded(): void {
  * JSON.stringify replacer that sorts object keys deterministically.
  * Critical for HMAC consistency — different key orders produce different hashes.
  */
-function sortedReplacer(_key: string, value: unknown): unknown {
+export function sortedReplacer(_key: string, value: unknown): unknown {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const sorted: Record<string, unknown> = {};
     for (const k of Object.keys(value as object).sort()) {
