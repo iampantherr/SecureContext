@@ -59,7 +59,8 @@ export interface CallGraphRebuildResult {
 
 // ─── File enumeration ──────────────────────────────────────────────────────
 
-const CALL_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+// v0.56.0 — .py included: extraction goes through py_call_graph (Python ast).
+const CALL_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py"];
 
 /**
  * Source files to parse, reusing the exclude list indexProject already applies
@@ -106,12 +107,24 @@ export async function buildProjectCallGraph(
   if (!(await callGraphAvailable())) return { edges: [], files: [], unavailable: true };
 
   const files: FileCalls[] = [];
+  const pyPaths: string[] = [];
   for (const abs of listSourceFiles(projectPath)) {
+    if (abs.endsWith(".py")) { pyPaths.push(abs); continue; }
     let content: string;
     try { content = readFileSync(abs, "utf8"); } catch { continue; }
     const rel = relative(projectPath, abs).split("\\").join("/");
     const parsed = await extractFileCalls(content, rel);
     if (parsed) files.push(parsed);
+  }
+
+  // v0.56.0 — Python files, one batch subprocess for the whole repo. If python
+  // is absent the batch reports errors rather than silently contributing zero
+  // edges; the TS side of the graph is unaffected either way.
+  if (pyPaths.length > 0) {
+    const { extractPythonBatch } = await import("./py_call_graph.js");
+    const rel = (abs: string) => relative(projectPath, abs).split("\\").join("/");
+    const py = extractPythonBatch(pyPaths, rel);
+    files.push(...py.files);
   }
 
   return { edges: resolveCallGraph(files).edges, files, unavailable: false };
