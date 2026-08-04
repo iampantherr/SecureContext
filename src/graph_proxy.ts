@@ -227,14 +227,15 @@ export interface GraphQueryResult {
  * Query the graph in natural language. Forwards to graphify's `query_graph`.
  * Returns matching nodes with relationships and confidence tags.
  */
+/** One hint for all three graphify tools — these diverged once already (live E2E 2026-08-04). */
+function missingGraphHint(projectPath: string): string {
+  return `No graphify graph found at ${join(projectPath, "graphify-out", "graph.json")}. ` +
+         `Run \`/graphify .\` in this project (requires the graphify CLI: \`pip install graphifyy && graphify install\`), then retry.`;
+}
+
 export async function graphQuery(projectPath: string, query: string): Promise<GraphQueryResult> {
   if (!findGraphifyOutput(projectPath)) {
-    return {
-      ok:   false,
-      hint: `No graphify graph found at ${join(projectPath, "graphify-out", "graph.json")}. ` +
-            `Run \`/graphify .\` in this project (requires the graphify CLI: \`pip install graphifyy && graphify install\`). ` +
-            `Then retry zc_graph_query.`,
-    };
+    return { ok: false, hint: missingGraphHint(projectPath) };
   }
   const result = await callGraphify(projectPath, "query_graph", { query });
   if (result === null) return { ok: false, error: "graphify call failed (see logs)" };
@@ -247,7 +248,7 @@ export async function graphQuery(projectPath: string, query: string): Promise<Gr
  */
 export async function graphPath(projectPath: string, from: string, to: string): Promise<GraphQueryResult> {
   if (!findGraphifyOutput(projectPath)) {
-    return { ok: false, hint: `No graphify graph found. Run \`/graphify .\` first.` };
+    return { ok: false, hint: missingGraphHint(projectPath) };
   }
   const result = await callGraphify(projectPath, "shortest_path", { from, to });
   if (result === null) return { ok: false, error: "graphify call failed" };
@@ -260,7 +261,7 @@ export async function graphPath(projectPath: string, from: string, to: string): 
  */
 export async function graphNeighbors(projectPath: string, node: string): Promise<GraphQueryResult> {
   if (!findGraphifyOutput(projectPath)) {
-    return { ok: false, hint: `No graphify graph found. Run \`/graphify .\` first.` };
+    return { ok: false, hint: missingGraphHint(projectPath) };
   }
   const result = await callGraphify(projectPath, "get_neighbors", { node });
   if (result === null) return { ok: false, error: "graphify call failed" };

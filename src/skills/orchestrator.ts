@@ -75,6 +75,20 @@ export async function runMutationCycle(
   options: MutationCycleOptions = {},
 ): Promise<MutationCycleResult> {
   const startedAt = Date.now();
+
+  // Candidates are scored ONLY by fixture replay (they have no run history).
+  // Without fixtures every candidate scores 0.000, which reads as "all the
+  // candidates were terrible" — a fabricated zero (live E2E 2026-08-04).
+  // Say the true thing and skip the mutator's LLM cost entirely.
+  if ((parent.frontmatter.fixtures ?? []).length === 0) {
+    return {
+      skill_id: parent.skill_id, baseline_score: 0, candidates_count: 0,
+      best_candidate_score: 0, promoted: false, total_cost_usd: 0,
+      duration_ms: Date.now() - startedAt,
+      reason: "no fixtures defined in frontmatter — candidates cannot be evaluated; add `fixtures:` to the skill before proposing mutations",
+    };
+  }
+
   const mutator   = options.mutator  ?? await getMutator();
   const executor  = options.executor ?? new LocalDeterministicExecutor();
 
