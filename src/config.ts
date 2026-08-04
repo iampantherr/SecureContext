@@ -230,6 +230,14 @@ export const Config = {
   PRETOOL_OUTCOMES: [
     "redirect", "block_unindexed", "block_dedup", "bypass_force_read",
     "bypass_partial_read", "pass_through", "pass_brief_exempt", "error",
+    // v0.55.x adaptive-suppression outcomes — emitted by preread-dedup.mjs since
+    // v0.55.1 but never added here, so the API 400-rejected them and the events
+    // silently vanished (found 2026-08-04 observing a live run). The emitter in
+    // the hook is a third copy of this list; keep them in sync.
+    "pass_edit_mode", "pass_bypass_learned", "pass_below_breakeven",
+    // Write-path impact hook (prewrite-impact.mjs) — deny that delivers the
+    // cascade block. Before this the write hook had zero observability.
+    "impact_write_deny",
   ] as const,
   EFFECT_VERIFY:          (env["ZC_EFFECT_VERIFY"] ?? "1") !== "0",
   // Hard-fail a write whose 'exact' fields did not round-trip, instead of

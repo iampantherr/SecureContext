@@ -1196,6 +1196,21 @@ export const PG_MIGRATIONS: PgMigration[] = [
       await client.query(`UPDATE broadcasts SET sender_agent_id = agent_id WHERE sender_agent_id IS NULL AND type <> 'ASSIGN'`);
     },
   },
+  {
+    id: 48,
+    description:
+      "Re-derive chk_pte_outcome from Config.PRETOOL_OUTCOMES (same body as migration 45). " +
+      "The v0.55.x hook outcomes (pass_edit_mode, pass_bypass_learned, pass_below_breakeven) " +
+      "were emitted but never listed, so the API rejected them and hook telemetry silently " +
+      "vanished — observed live 2026-08-04. Also adds impact_write_deny (write-hook telemetry).",
+    up: async (client) => {
+      const { Config: C } = await import("./config.js");
+      const list = C.PRETOOL_OUTCOMES.map((o: string) => `'${o}'`).join(", ");
+      await client.query(`ALTER TABLE pretool_events_pg DROP CONSTRAINT IF EXISTS chk_pte_outcome`);
+      await client.query(
+        `ALTER TABLE pretool_events_pg ADD CONSTRAINT chk_pte_outcome CHECK (outcome IN (${list}))`);
+    },
+  },
 
 ];
 

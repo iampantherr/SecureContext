@@ -124,6 +124,33 @@ try {
 
   try { harness.recordSessionRead?.(projectPath, sessionId, seenKey); } catch { /* best effort */ }
 
+  // Telemetry: without this the write hook was invisible — an operator watching
+  // pretool_events_pg could not tell "never fires" from "fires and helps"
+  // (found 2026-08-04 observing a live run). Mirrors preread-dedup's emitter:
+  // awaited with a short timeout, failures loud on stderr, never blocks the deny.
+  try {
+    const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
+    if (apiUrl) {
+      const resp = await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(process.env.ZC_API_KEY ? { Authorization: `Bearer ${process.env.ZC_API_KEY}` } : {}),
+        },
+        body: JSON.stringify({
+          projectPath, agentId: process.env.ZC_AGENT_ID || "default",
+          toolName: toolName, filePath: rawPath,
+          outcome: "impact_write_deny",
+          detail: `${crossFile.length} cross-file target(s): ${crossFile.map((t) => t.symbol).slice(0, 5).join(", ")}`,
+        }),
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!resp.ok) process.stderr.write(`[zc-ctx telemetry] impact_write_deny REJECTED ${resp.status}\n`);
+    }
+  } catch (e) {
+    process.stderr.write(`[zc-ctx telemetry] impact_write_deny failed: ${String(e).slice(0, 160)}\n`);
+  }
+
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
