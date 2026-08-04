@@ -141,10 +141,13 @@ services:
       # design: nothing the SC container ever writes back to the wiki.
       # Adjust the host path to match where YOUR personal-wiki lives.
       - ${USERPROFILE:-${HOME}}/AI_projects/personal-wiki:/personal-wiki:ro
-      # S6 (v0.45.0) — host machine secret, read-only, for replay chain
+      # S6 (v0.45.0) — extra verification key, read-only, for replay chain
       # verification (see ZC_VERIFY_SECRET_PATH above). The secret never leaves
       # the container process; endpoints only ever return verdict labels.
-      - ${USERPROFILE:-${HOME}}/.claude/zc-ctx/.machine_secret:/run/secrets/host_machine_secret:ro
+      # Since the 2026-08-04 secret unification the container's identity secret
+      # IS the host secret; this mount now carries the PRE-unification container
+      # secret so historical container-signed rows keep verifying.
+      - ${USERPROFILE:-${HOME}}/.claude/zc-ctx/.machine_secret_pre_unification:/run/secrets/host_machine_secret:ro
     ports:
       - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
     depends_on:
