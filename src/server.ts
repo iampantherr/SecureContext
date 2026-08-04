@@ -1405,7 +1405,12 @@ async function _handleRemoteTool(
 
       case "zc_graph_rebuild": {
         const r = await apiCall("POST", "/api/v1/graph/rebuild", { projectPath: PROJECT_PATH });
+        // Call layer builds client-side — the API container has no project files.
+        // rebuildCallGraph mirrors to PG, which is what the proxied zc_impact reads.
+        const { flushCallGraphRebuild } = await import("./indexing/call_edges.js");
+        const cg = await flushCallGraphRebuild(PROJECT_PATH);
         const lines = [`## Knowledge graph rebuilt`, `Edges: ${r["edges"]}  Nodes: ${r["nodes"]}`];
+        if (cg && !cg.unavailable) lines.push(`Call graph: ${cg.files} files, ${cg.edges} edges (${cg.ambiguous} ambiguous, ${cg.dynamicSites} dynamic sites)`);
         const hub = r["topHub"] as { source: string; weightedIn: number } | null;
         if (hub) lines.push(`Top hub: ${hub.source} (weighted_in=${hub.weightedIn})`);
         lines.push(``, `Backlink boost is ${Config.W_BACKLINK > 0 ? `ON (W_BACKLINK=${Config.W_BACKLINK})` : "OFF"} for zc_search.`);
@@ -2884,9 +2889,12 @@ async function dispatchToolCall(
         const ent = await runEntityExtractionOnDb(rdb).catch(() => ({ scanned: 0, edges: 0, ollamaDown: false }));
         rdb.close();
         rebuildBLRPg(PROJECT_PATH, res.typedEdges).catch(() => undefined);
+        const { flushCallGraphRebuild } = await import("./indexing/call_edges.js");
+        const cg = await flushCallGraphRebuild(PROJECT_PATH);
         const lines: string[] = [];
         lines.push(`## Knowledge graph rebuilt`);
         lines.push(`Edges: ${res.edges}  Nodes: ${res.nodes}  (${res.elapsedMs}ms)`);
+        if (cg && !cg.unavailable) lines.push(`Call graph: ${cg.files} files, ${cg.edges} edges (${cg.ambiguous} ambiguous, ${cg.dynamicSites} dynamic sites)`);
         if (res.topHub) lines.push(`Top hub: ${res.topHub.source} (weighted_in=${res.topHub.weightedIn})`);
         if (ent.scanned > 0 || ent.edges > 0) lines.push(`Entity extraction: ${ent.scanned} entries scanned → ${ent.edges} entity edges${ent.ollamaDown ? " (stopped — Ollama unavailable)" : ""}`);
         lines.push(``);
