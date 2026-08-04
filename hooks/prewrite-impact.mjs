@@ -35,6 +35,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { resolveProjectRoot } from "./_project-hash.mjs";
 import { resolve, join } from "node:path";
 
 let raw = "";
@@ -58,19 +59,6 @@ const MIN_CALLERS = Number(process.env.ZC_IMPACT_MIN_CALLERS ?? "3");
 const sessionId = input.session_id ?? input.sessionId ?? "default";
 
 /** Repo root for the FILE, not the session cwd (same lesson as the read hook). */
-function resolveProjectRoot(absPath, fallback) {
-  try {
-    if (!/^([a-zA-Z]:[\\/]|\/)/.test(absPath)) return fallback;
-    let dir = resolve(absPath, "..");
-    for (let i = 0; i < 40; i++) {
-      if (existsSync(join(dir, ".git"))) return dir;
-      const parent = resolve(dir, "..");
-      if (parent === dir) break;
-      dir = parent;
-    }
-  } catch { /* fall through */ }
-  return fallback;
-}
 
 const sessionCwd = input.cwd ?? process.cwd();
 const projectPath = resolveProjectRoot(rawPath, sessionCwd);

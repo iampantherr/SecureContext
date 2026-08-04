@@ -20,6 +20,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import { envInt } from "../config.js";
 import { getRecentSkillRuns, getRecentMutations } from "./storage.js";
 
 /**
@@ -50,12 +51,6 @@ export interface GuardrailDecision {
   };
 }
 
-function envInt(name: string, defaultVal: number): number {
-  const raw = process.env[name];
-  if (!raw) return defaultVal;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : defaultVal;
-}
 
 /**
  * Decide whether an L1 mutation should fire for `skill_id` in `project_path`.

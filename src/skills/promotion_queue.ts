@@ -15,6 +15,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import { getBackend } from "./storage_dual.js";
 import { withClient } from "../pg_pool.js";
 
 export type PromotionStatus = "pending" | "approved" | "rejected" | "superseded";
@@ -33,10 +34,6 @@ export interface PromotionEntry {
   decision_rationale:  string | null;
 }
 
-function getBackend(): "sqlite" | "postgres" | "dual" {
-  const raw = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
-  return (raw === "postgres" || raw === "dual") ? raw : "sqlite";
-}
 
 // ─── SQLite ──────────────────────────────────────────────────────────────────
 

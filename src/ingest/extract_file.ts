@@ -15,6 +15,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { ollamaBase } from "../config.js";
 import { inflateRawSync } from "node:zlib";
 import { extname } from "node:path";
 
@@ -102,10 +103,6 @@ export async function extractPdfText(path: string): Promise<string> {
 
 const VISION_HINTS = ["llava", "vision", "qwen2-vl", "qwen2.5vl", "qwen3-vl", "minicpm-v", "moondream", "bakllava", "gemma3"];
 
-function ollamaBase(): string {
-  const raw = process.env["ZC_OLLAMA_URL"] ?? "http://localhost:11435";
-  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
-}
 
 /** Find an installed local vision model, or null. */
 export async function findVisionModel(): Promise<string | null> {

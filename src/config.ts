@@ -463,3 +463,25 @@ export const Config = {
   SUMMARY_MODEL_ALLOWLIST: ((env["ZC_SUMMARY_MODEL_ALLOWLIST"] ?? "")
     .split(",").map((s) => s.trim()).filter(Boolean)) as string[],
 } as const;
+
+/**
+ * Base URL of the local Ollama server, derived from ZC_OLLAMA_URL.
+ * Was re-declared identically in SEVEN files; one drift there would have
+ * silently pointed part of the pipeline at a different server.
+ */
+export function ollamaBase(): string {
+  const raw = process.env.ZC_OLLAMA_URL ?? "http://localhost:11435";
+  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
+}
+
+/**
+ * Non-negative integer from the environment. Three copies existed and one had
+ * quietly diverged (Number() vs parseInt — different results for "5x"/"5.7").
+ * parseInt is canonical: these are integer knobs.
+ */
+export function envInt(name: string, dflt: number): number {
+  const raw = process.env[name];
+  if (!raw) return dflt;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : dflt;
+}

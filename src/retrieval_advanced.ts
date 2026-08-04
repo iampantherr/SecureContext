@@ -18,14 +18,10 @@
 
 import type { KnowledgeEntry } from "./knowledge.js";
 import { logger } from "./logger.js";
-import { Config } from "./config.js";
+import { Config, ollamaBase } from "./config.js";
 
 // v0.20.0 — strip any /api/* suffix from ZC_OLLAMA_URL so we can build
 // path-specific URLs. Reranker uses /api/embeddings; HyDE uses /api/generate.
-function ollamaBase(): string {
-  const raw = process.env.ZC_OLLAMA_URL ?? "http://localhost:11435";
-  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
-}
 const OLLAMA_URL     = ollamaBase();
 // Fallback (bi-encoder) reranker model. Defaults to the active embedding model so the
 // cosine fallback works out of the box; set ZC_RERANKER_MODEL to a dedicated reranker if pulled.

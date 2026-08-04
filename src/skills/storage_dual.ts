@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { withClient } from "../pg_pool.js";
 import { projectHash as scopedProjectHash } from "../store.js";
 
-function getBackend(): "sqlite" | "postgres" | "dual" {
+export function getBackend(): "sqlite" | "postgres" | "dual" {
   const raw = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
   if (raw === "postgres" || raw === "dual") return raw;
   return "sqlite";

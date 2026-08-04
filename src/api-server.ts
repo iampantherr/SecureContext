@@ -35,6 +35,9 @@
  */
 
 import Fastify from "fastify";
+// escapeHtml: single owner in dashboard/render.ts — its version also escapes
+// single quotes; the local copy here did not, a gap in single-quoted attributes.
+import { escapeHtml } from "./dashboard/render.js";
 import type { FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -1007,9 +1010,6 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
-  function escapeHtml(s: string): string {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  }
 
   // ─── v0.38.0 — A2A protocol compatibility (Tier-2 #8, experimental) ─────────
   // Minimal Google-A2A-shaped surface so EXTERNAL agents (LangGraph/CrewAI/etc.)

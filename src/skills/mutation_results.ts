@@ -42,6 +42,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { getBackend } from "./storage_dual.js";
 import type { DatabaseSync } from "node:sqlite";
 import { withClient } from "../pg_pool.js";
 
@@ -94,10 +95,6 @@ export interface MutationResultPointer {
   headline:     string | null;
 }
 
-function getBackend(): "sqlite" | "postgres" | "dual" {
-  const raw = (process.env.ZC_TELEMETRY_BACKEND || "sqlite").toLowerCase();
-  return (raw === "postgres" || raw === "dual") ? raw : "sqlite";
-}
 
 /**
  * Canonical bodies JSON for hashing. Stable key order so the hash is

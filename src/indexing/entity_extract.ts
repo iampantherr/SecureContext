@@ -17,7 +17,7 @@
  *   - Kill-switch: ZC_ENTITY_EXTRACT=0 disables the layer entirely.
  */
 
-import { Config } from "../config.js";
+import { Config, ollamaBase } from "../config.js";
 
 export interface EntityExtraction {
   /** entity slugs (lowercase, dash-separated), already deduped + capped */
@@ -38,10 +38,6 @@ export const ENTITY_EXTRACT_ENABLED = (process.env["ZC_ENTITY_EXTRACT"] ?? "1") 
 export const ENTITY_BUDGET = Math.max(1, parseInt(process.env["ZC_ENTITY_BUDGET"] ?? "15", 10) || 15);
 const ENTITY_MODEL = process.env["ZC_ENTITY_MODEL"] ?? process.env["ZC_HYDE_MODEL"] ?? "qwen2.5-coder:14b";
 
-function ollamaBase(): string {
-  const raw = process.env["ZC_OLLAMA_URL"] ?? "http://localhost:11435";
-  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
-}
 
 /** lowercase, alphanumeric+dash slug; empty string when nothing survives */
 export function slugifyEntity(name: string): string {

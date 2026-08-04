@@ -19,10 +19,6 @@ export interface CommunitySummaryRow {
 
 const SUMMARY_MODEL = process.env["ZC_ENTITY_MODEL"] ?? process.env["ZC_HYDE_MODEL"] ?? "qwen2.5-coder:14b";
 
-function ollamaBase(): string {
-  const raw = process.env["ZC_OLLAMA_URL"] ?? "http://localhost:11435";
-  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
-}
 
 async function ollamaGenerate(prompt: string, json: boolean, maxTokens: number): Promise<string | null> {
   try {
@@ -57,6 +53,7 @@ export async function summarizeCommunity(
 
 // ── SQLite variant (parity) ──────────────────────────────────────────────────
 import type { DatabaseSync } from "node:sqlite";
+import { ollamaBase } from "../config.js";
 import { detectCommunitiesFromRows } from "./community.js";
 
 /** Fetch → (generate on miss) → answer, all against one open project DB. */

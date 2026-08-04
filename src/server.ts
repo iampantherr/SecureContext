@@ -3560,13 +3560,7 @@ async function dispatchToolCall(
               note: "Approving mutation against currently-active version, not archived parent",
             });
           }
-          // bumpPatch helper inline (vs. bumpMinor for L2/global promotions)
-          const bumpPatch = (v: string): string => {
-            const parts = v.split(".");
-            if (parts.length !== 3) return v + ".1";
-            const patch = parseInt(parts[2], 10);
-            return `${parts[0]}.${parts[1]}.${Number.isFinite(patch) ? patch + 1 : 1}`;
-          };
+          const { bumpPatch } = await import("./skills/mutator.js");
           const newVersion = bumpPatch(current.frontmatter.version);
           const { buildSkill } = await import("./skills/loader.js");
           const newSkill = await buildSkill(

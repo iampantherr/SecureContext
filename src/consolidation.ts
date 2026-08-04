@@ -23,7 +23,7 @@
  * Kill-switch: ZC_CONSOLIDATE=0.
  */
 
-import { Config } from "./config.js";
+import { Config, ollamaBase } from "./config.js";
 import { detectConflict, numbersDiffer } from "./contradiction_heuristics.js";
 
 // R2 (v0.42.0): numbersDiffer moved to contradiction_heuristics (shared with the
@@ -43,10 +43,6 @@ export const CONSOLIDATE_MAX_PER_CYCLE = parseInt(process.env["ZC_CONSOLIDATE_MA
 
 const MERGE_MODEL = process.env["ZC_ENTITY_MODEL"] ?? process.env["ZC_HYDE_MODEL"] ?? "qwen2.5-coder:14b";
 
-function ollamaBase(): string {
-  const raw = process.env["ZC_OLLAMA_URL"] ?? "http://localhost:11435";
-  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
-}
 
 export interface ConsolidationCandidate {
   key: string;

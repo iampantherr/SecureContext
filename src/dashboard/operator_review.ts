@@ -14,6 +14,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { fetchByResultId, approveMutation, rejectMutation } from "../skills/mutation_results.js";
 import { getSkillById, getActiveSkill, archiveSkill, upsertSkill, recordMutationReview } from "../skills/storage_dual.js";
+import { bumpPatch } from "../skills/mutator.js";
 import { buildSkill } from "../skills/loader.js";
 import { enqueueTask } from "../task_queue.js";
 import { broadcastFact } from "../memory.js";
@@ -41,12 +42,6 @@ export interface RejectArgs {
   decided_by?: string;
 }
 
-function bumpPatch(version: string): string {
-  const parts = version.split(".");
-  if (parts.length !== 3) return version + ".1";
-  const patch = parseInt(parts[2], 10);
-  return `${parts[0]}.${parts[1]}.${Number.isFinite(patch) ? patch + 1 : 1}`;
-}
 
 /**
  * Resolve the project SQLite DB for a given project_hash. The dashboard

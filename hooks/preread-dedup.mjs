@@ -38,7 +38,7 @@ import * as nodeCrypto from "node:crypto";
 // re-deriving it inline (bypass ledger + edit-mode gate), the exact
 // recurrence the guard exists to stop. Same normalisation as src/store.ts;
 // resolved roots are already canonical, so existing state files keep their hashes.
-import { projectHash as sharedProjectHash } from "./_project-hash.mjs";
+import { projectHash as sharedProjectHash, resolveProjectRoot } from "./_project-hash.mjs";
 
 // ─── Read the hook payload from stdin (Claude Code's hook protocol) ─────────
 let raw = "";
@@ -86,19 +86,6 @@ function normalizeForLookup(p, projectRoot) {
  * read. First .git walking up is the repo root; sessions that work across repos
  * (the normal case here) then hit the right database.
  */
-function resolveProjectRoot(absPath, fallback) {
-  try {
-    if (!/^([a-zA-Z]:[\\/]|\/)/.test(absPath)) return fallback;   // relative → already project-local
-    let dir = resolve(absPath, "..");
-    for (let i = 0; i < 40; i++) {
-      if (existsSync(join(dir, ".git"))) return dir;
-      const parent = resolve(dir, "..");
-      if (parent === dir) break;
-      dir = parent;
-    }
-  } catch { /* fall through */ }
-  return fallback;
-}
 
 const sessionCwd = input.cwd ?? process.cwd();
 const projectPath0 = resolveProjectRoot(rawPath, sessionCwd);

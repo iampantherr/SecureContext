@@ -20,6 +20,7 @@
  */
 
 import { withClient } from "./pg_pool.js";
+import { ollamaBase } from "./config.js";
 import { logger } from "./logger.js";
 import { createHash } from "node:crypto";
 import { projectHash as scopedProjectHash } from "./store.js";
@@ -27,10 +28,6 @@ import { projectHash as scopedProjectHash } from "./store.js";
 // v0.20.0 — ZC_OLLAMA_URL might be set to the full embeddings endpoint
 // (e.g. "http://sc-ollama:11434/api/embeddings"). Strip any /api/* suffix
 // so we can construct path-specific URLs. Compaction needs /api/generate.
-function ollamaBase(): string {
-  const raw = process.env.ZC_OLLAMA_URL ?? "http://localhost:11435";
-  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
-}
 const OLLAMA_URL    = ollamaBase();
 const COMPACT_MODEL = process.env.ZC_COMPACT_MODEL ?? "qwen2.5-coder:14b";
 const DEFAULT_TURNS = parseInt(process.env.ZC_COMPACT_DEFAULT_TURNS ?? "30", 10);

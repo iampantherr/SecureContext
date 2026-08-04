@@ -21,6 +21,7 @@
  */
 
 import { withClient } from "./pg_pool.js";
+import { ollamaBase } from "./config.js";
 import { logger } from "./logger.js";
 
 // v0.20.0 — default to Anthropic/Sonnet for skill body generation.
@@ -34,10 +35,6 @@ function defaultBackend(): string {
 }
 const BACKEND       = defaultBackend();
 // v0.20.0 — strip /api/* suffix; we need the base to construct /api/generate
-function ollamaBase(): string {
-  const raw = process.env.ZC_OLLAMA_URL ?? "http://localhost:11435";
-  return raw.replace(/\/api\/[^/]+\/?$/, "").replace(/\/$/, "");
-}
 const OLLAMA_URL    = ollamaBase();
 const OLLAMA_MODEL  = process.env.ZC_OLLAMA_GEN_MODEL ?? "qwen2.5-coder:14b";
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY ?? "";

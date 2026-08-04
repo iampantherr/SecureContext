@@ -42,6 +42,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 import { getSkillById, archiveSkill, upsertSkill } from "../skills/storage_dual.js";
+import { bumpPatch } from "../skills/mutator.js";
 import { buildSkill } from "../skills/loader.js";
 import { broadcastFact } from "../memory.js";
 import { withClient } from "../pg_pool.js";
@@ -70,12 +71,6 @@ export interface EditFrontmatterResult {
   revision_id:     string;
 }
 
-function bumpPatch(version: string): string {
-  const parts = version.split(".");
-  if (parts.length !== 3) return version + ".1";
-  const patch = parseInt(parts[2], 10);
-  return `${parts[0]}.${parts[1]}.${Number.isFinite(patch) ? patch + 1 : 1}`;
-}
 
 /**
  * Validate + sanitize a patch before applying. Throws Error on invalid input.

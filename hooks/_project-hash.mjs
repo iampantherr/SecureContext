@@ -26,6 +26,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve, join } from "node:path";
 
 /** Canonical spelling of a project path. Keep in step with src/store.ts. */
 export function normalizeProjectPath(projectPath) {
@@ -38,4 +40,22 @@ export function normalizeProjectPath(projectPath) {
 /** 16-hex-char project discriminator. Keep in step with src/store.ts. */
 export function projectHash(projectPath) {
   return createHash("sha256").update(normalizeProjectPath(projectPath)).digest("hex").slice(0, 16);
+}
+
+/**
+ * Repo root for a FILE (first .git walking up), falling back to the session
+ * cwd. Was duplicated verbatim in preread-dedup.mjs and prewrite-impact.mjs.
+ */
+export function resolveProjectRoot(absPath, fallback) {
+  try {
+    if (!/^([a-zA-Z]:[\/]|\/)/.test(absPath)) return fallback;
+    let dir = resolve(absPath, "..");
+    for (let i = 0; i < 40; i++) {
+      if (existsSync(join(dir, ".git"))) return dir;
+      const parent = resolve(dir, "..");
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch { /* fall through */ }
+  return fallback;
 }

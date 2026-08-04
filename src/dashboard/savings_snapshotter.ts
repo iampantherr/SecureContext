@@ -12,16 +12,11 @@
  */
 
 import { withClient } from "../pg_pool.js";
-import { fetchToolUsage } from "./token_savings.js";
+import { envInt } from "../config.js";
+import { fetchToolUsage, avgCostPerToken } from "./token_savings.js";
 
 // ─── Constants (mirror token_savings.ts; tunable via env) ─────────────────
 
-function envInt(name: string, dflt: number): number {
-  const raw = process.env[name];
-  if (!raw) return dflt;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : dflt;
-}
 
 const BASELINE = {
   zc_recall_context: () => envInt("ZC_SAVINGS_RECALL_BASELINE", 30_000),
@@ -32,9 +27,6 @@ const BASELINE = {
   zc_fetch:          () => envInt("ZC_SAVINGS_FETCH_BASELINE",   8_000),
   zc_batch:          () => envInt("ZC_SAVINGS_SEARCH_BASELINE", 25_000),
 };
-function avgCostPerToken(): number {
-  return parseFloat(process.env.ZC_SAVINGS_AVG_COST_PER_TOKEN ?? "0.000003");
-}
 
 // ─── Snapshotter ──────────────────────────────────────────────────────────
 

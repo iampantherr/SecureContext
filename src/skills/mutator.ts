@@ -272,8 +272,13 @@ export async function candidateToSkill(parent: Skill, candidate: MutationCandida
   return buildSkill(newFm, candidate.candidate_body, { promoted_from: parent.skill_id });
 }
 
-function bumpPatch(version: string): string {
-  const m = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
-  if (!m) return version + ".1";
-  return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+// Single owner. Four copies existed and had QUIETLY DIVERGED: this file's regex
+// variant rejected any non-numeric patch while the three split-based copies
+// tolerated it — different outputs for the same malformed version string. The
+// majority (split-based) semantic wins; everyone imports from here.
+export function bumpPatch(version: string): string {
+  const parts = version.split(".");
+  if (parts.length !== 3) return version + ".1";
+  const patch = parseInt(parts[2], 10);
+  return `${parts[0]}.${parts[1]}.${Number.isFinite(patch) ? patch + 1 : 1}`;
 }

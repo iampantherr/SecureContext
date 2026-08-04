@@ -23,18 +23,13 @@
  */
 
 import { withClient } from "../pg_pool.js";
+import { envInt } from "../config.js";
 
 /**
  * Counterfactual baselines: tokens-per-call you would have spent in the
  * equivalent native flow if SC didn't exist. Conservative-leaning numbers
  * pulled from CLAUDE.md. Tunable via env.
  */
-function envInt(name: string, dflt: number): number {
-  const raw = process.env[name];
-  if (!raw) return dflt;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : dflt;
-}
 
 const BASELINE = {
   recall_context: () => envInt("ZC_SAVINGS_RECALL_BASELINE", 30_000),  // re-paste 5-20 files at session start
@@ -108,7 +103,7 @@ export interface SavingsSummary {
  * For "saved cost" we use the avg input price as the baseline (savings
  * are mostly input-side: avoided context-pasting). Tunable.
  */
-function avgCostPerToken(): number {
+export function avgCostPerToken(): number {
   return parseFloat(process.env.ZC_SAVINGS_AVG_COST_PER_TOKEN ?? "0.000003");  // $3/MTok input default
 }
 

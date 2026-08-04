@@ -31,6 +31,7 @@
  */
 
 import pg from "pg";
+import { hashChannelKeyScrypt, verifyScryptHash, SCRYPT_PREFIX } from "./security/scrypt.js";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { Config } from "./config.js";
 import { computeRowHash } from "./chain.js";
@@ -110,35 +111,7 @@ function sanitize(s: string, max: number): string {
 }
 
 // Scrypt helpers (identical parameters to SqliteStore / memory.ts)
-const SCRYPT_PREFIX = "scrypt:v1";
-function hashChannelKeyScrypt(key: string): string {
-  const { SCRYPT_N, SCRYPT_R, SCRYPT_P, SCRYPT_KEYLEN, SCRYPT_SALT_BYTES, SCRYPT_MAXMEM } = Config;
-  const saltBuf = randomBytes(SCRYPT_SALT_BYTES);
-  const hashBuf = scryptSync(key, saltBuf, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM });
-  return `${SCRYPT_PREFIX}:${SCRYPT_N}:${SCRYPT_R}:${SCRYPT_P}:${saltBuf.toString("hex")}:${hashBuf.toString("hex")}`;
-}
 
-function verifyScryptHash(key: string, stored: string): boolean {
-  try {
-    if (!stored.startsWith(`${SCRYPT_PREFIX}:`)) return false;
-    const parts = stored.split(":");
-    if (parts.length !== 7) return false;
-    const N = parseInt(parts[2]!, 10);
-    const r = parseInt(parts[3]!, 10);
-    const p = parseInt(parts[4]!, 10);
-    const saltHex = parts[5]!;
-    const hashHex = parts[6]!;
-    if (isNaN(N) || isNaN(r) || isNaN(p) || N < 1024 || r < 1 || p < 1) return false;
-    const saltBuf   = Buffer.from(saltHex, "hex");
-    const storedBuf = Buffer.from(hashHex, "hex");
-    const derivedBuf = scryptSync(key, saltBuf, storedBuf.length, {
-      N, r, p, maxmem: Config.SCRYPT_MAXMEM,
-    });
-    return timingSafeEqual(derivedBuf, storedBuf);
-  } catch {
-    return false;
-  }
-}
 
 // Token helpers (identical algorithm to access-control.ts)
 function getOrCreateSigningKey(pool: pg.Pool, projectHash: string): Promise<string> {
