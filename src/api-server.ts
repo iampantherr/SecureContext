@@ -4280,6 +4280,7 @@ function _recordResultCount(op: string, n: number): number[] {
         importance:    typeof body["importance"]    === "number" ? body["importance"]    : undefined,
         channel_key:   typeof body["channel_key"]   === "string" ? body["channel_key"]  : undefined,
         session_token: typeof body["session_token"] === "string" ? body["session_token"]: undefined,
+        sender:        typeof body["sender"]        === "string" ? body["sender"]       : undefined,
         files:         Array.isArray(body["files"])      ? body["files"]      as string[] : undefined,
         depends_on:    Array.isArray(body["depends_on"]) ? body["depends_on"] as string[] : undefined,
         // v0.16.0 §8.1 — structured ASSIGN forwarding (closes v0.15.0 known limitation

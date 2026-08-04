@@ -1028,6 +1028,8 @@ export interface BroadcastMessage {
   reason:     string;
   importance: number;
   created_at: string;
+  /** Who actually POSTED this (agent_id is the TARGET on ASSIGN). NULL = unknown (legacy ASSIGN). */
+  sender_agent_id?: string | null;
   // v0.15.0/v0.16.0 §8.1 — structured ASSIGN fields (NULLABLE for non-ASSIGN broadcasts)
   acceptance_criteria?:      string[];
   complexity_estimate?:      number | null;
@@ -1253,6 +1255,9 @@ export function broadcastFact(
     importance?:    number;
     channel_key?:   string;
     session_token?: string;
+    /** Who actually POSTED this broadcast. agent_id is the TARGET on ASSIGN, so it
+     *  cannot double as speaker; this column records the speaker explicitly. */
+    sender?:        string;
     // v0.15.0 §8.1 — structured ASSIGN fields (all OPTIONAL, all NULLABLE in DB)
     /** Testable assertions that define "task done". Up to 20, each up to 500 chars. */
     acceptance_criteria?: string[];
@@ -1403,22 +1408,27 @@ export function broadcastFact(
     rowHash  = computeRowHash(prevHash, type, safeAgent, safeTask, safeSummary, now, sessionTokenId);
   }
 
+  // Attribution: prefer the declared sender (MCP proxy passes its own ZC_AGENT_ID);
+  // for non-ASSIGN types agent_id IS the sender; ASSIGN with no declared sender
+  // stays NULL — unknown, never fabricated.
+  const safeSender = opts.sender ?? (type !== "ASSIGN" ? safeAgent : null);
+
   const result = db.prepare(`
     INSERT INTO broadcasts(
       type, agent_id, task, files, state, summary, depends_on, reason, importance,
       created_at, session_token_id, prev_hash, row_hash,
       acceptance_criteria, complexity_estimate,
       file_ownership_exclusive, file_ownership_read_only,
-      task_dependencies, required_skills, estimated_tokens
+      task_dependencies, required_skills, estimated_tokens, sender_agent_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     type, safeAgent, safeTask, safeFilesJson, safeState,
     safeSummary, safeDependsJson, safeReason, safeImp, now,
     sessionTokenId, prevHash, rowHash,
     safeAcceptanceJson, safeComplexity,
     safeFileOwnExclJson, safeFileOwnROJson,
-    safeTaskDepsJson, safeReqSkillsJson, safeEstTokens
+    safeTaskDepsJson, safeReqSkillsJson, safeEstTokens, safeSender
   ) as { lastInsertRowid: number };
 
   const id = Number(result.lastInsertRowid);
@@ -1461,7 +1471,7 @@ export function replayBroadcasts(
   const limit = Math.max(1, Math.min(500, opts.limit ?? 100));
 
   type RawRow = {
-    id: number; type: string; agent_id: string; task: string;
+    id: number; type: string; agent_id: string; sender_agent_id: string | null; task: string;
     files: string; state: string; summary: string; depends_on: string;
     reason: string; importance: number; created_at: string;
   };
@@ -1469,13 +1479,13 @@ export function replayBroadcasts(
   let rows: RawRow[];
   if (fromTimestamp) {
     rows = db.prepare(`
-      SELECT id, type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at
+      SELECT id, type, agent_id, sender_agent_id, task, files, state, summary, depends_on, reason, importance, created_at
       FROM broadcasts WHERE created_at >= ?
       ORDER BY created_at ASC, id ASC LIMIT ?
     `).all(fromTimestamp, limit) as RawRow[];
   } else {
     rows = db.prepare(`
-      SELECT id, type, agent_id, task, files, state, summary, depends_on, reason, importance, created_at
+      SELECT id, type, agent_id, sender_agent_id, task, files, state, summary, depends_on, reason, importance, created_at
       FROM broadcasts
       ORDER BY created_at ASC, id ASC LIMIT ?
     `).all(limit) as RawRow[];
@@ -1487,6 +1497,7 @@ export function replayBroadcasts(
     id:         r.id,
     type:       r.type as BroadcastType,
     agent_id:   r.agent_id,
+    sender_agent_id: r.sender_agent_id,
     task:       r.task,
     files:      tryParseJsonArray(r.files),
     state:      r.state,

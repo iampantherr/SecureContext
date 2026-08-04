@@ -1146,6 +1146,14 @@ export const MIGRATIONS: Migration[] = [
       try { db.exec(`ALTER TABLE working_memory ADD COLUMN invalid_from TEXT`); } catch { /* exists */ }
     },
   },
+  {
+    id: 42,
+    description: "Broadcast attribution fix: sender_agent_id — agent_id means TARGET on ASSIGN but SENDER elsewhere, so stored history misattributed who spoke (A2A #3070). Backfill copies agent_id where it truly was the sender; ASSIGN stays NULL (unknown, not fabricated). Mirrors PG migration 47.",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE broadcasts ADD COLUMN sender_agent_id TEXT`); } catch { /* exists */ }
+      db.exec(`UPDATE broadcasts SET sender_agent_id = agent_id WHERE sender_agent_id IS NULL AND type <> 'ASSIGN'`);
+    },
+  },
 
 ];
 

@@ -1185,6 +1185,17 @@ export const PG_MIGRATIONS: PgMigration[] = [
       await client.query(`CREATE INDEX IF NOT EXISTS kb_communities_pg_cid_idx ON kb_communities_pg (project_hash, community_id)`);
     },
   },
+  {
+    id: 47,
+    description:
+      "Broadcast attribution fix: sender_agent_id — agent_id means TARGET on ASSIGN but SENDER " +
+      "elsewhere, so stored history misattributed who spoke (A2A #3070 proof case). Backfill " +
+      "copies agent_id where it truly was the sender; ASSIGN rows stay NULL (unknown, not fabricated).",
+    up: async (client) => {
+      await client.query(`ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS sender_agent_id TEXT`);
+      await client.query(`UPDATE broadcasts SET sender_agent_id = agent_id WHERE sender_agent_id IS NULL AND type <> 'ASSIGN'`);
+    },
+  },
 
 ];
 

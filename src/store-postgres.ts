@@ -2465,6 +2465,11 @@ export class PostgresStore implements Store {
       const tokenId  = opts.session_token ? opts.session_token.split(".")[1] ?? "" : "";
       const rowHash  = computeRowHash(prevHash, type, safeAgent, safeTask, safeSummary, now, tokenId);
 
+      // Attribution: prefer the declared sender (MCP proxy passes its own ZC_AGENT_ID);
+      // for non-ASSIGN types agent_id IS the sender; ASSIGN with no declared sender
+      // stays NULL — unknown, never fabricated. Mirrors memory.ts broadcastFact.
+      const safeSender = (opts as { sender?: string }).sender ?? (type !== "ASSIGN" ? safeAgent : null);
+
       const insertRes = await client.query<{ id: number }>(`
         INSERT INTO broadcasts(
           project_hash, type, agent_id, task, summary, files, state,
@@ -2472,14 +2477,14 @@ export class PostgresStore implements Store {
           session_token_id, prev_hash, row_hash,
           acceptance_criteria, complexity_estimate,
           file_ownership_exclusive, file_ownership_read_only,
-          task_dependencies, required_skills, estimated_tokens
+          task_dependencies, required_skills, estimated_tokens, sender_agent_id
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-                  $15,$16,$17,$18,$19,$20,$21)
+                  $15,$16,$17,$18,$19,$20,$21,$22)
         RETURNING id, type, agent_id, task, summary, reason
       `, [projectHash, type, safeAgent, safeTask, safeSummary, files, safeState,
           dependsOn, safeReason, safeImp, now, tokenId, prevHash, rowHash,
           safeAccept, safeComplexity, safeFileExcl, safeFileRO,
-          safeTaskDeps, safeReqSkills, safeEstTokens]);
+          safeTaskDeps, safeReqSkills, safeEstTokens, safeSender]);
 
       await client.query("COMMIT");
 
@@ -2573,7 +2578,7 @@ export class PostgresStore implements Store {
   async replay(projectPath: string, fromId?: number): Promise<BroadcastResult[]> {
     const projectHash = ph(projectPath);
     const res = await this.pool.query<BroadcastResult & { files: string; depends_on: string }>(
-      `SELECT id, type, agent_id, task, summary, files, state, depends_on,
+      `SELECT id, type, agent_id, sender_agent_id, task, summary, files, state, depends_on,
               reason, importance, created_at
        FROM   broadcasts
        WHERE  project_hash = $1 ${fromId ? "AND id >= $2" : ""}

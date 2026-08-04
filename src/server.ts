@@ -1719,6 +1719,9 @@ ${sr["warning"]}` : "";
           projectPath:   PROJECT_PATH,
           type:          body["type"],
           agentId:       body["agent_id"],
+          // Attribution: the MCP process knows who it is — agent_id is the TARGET
+          // on ASSIGN, so it cannot double as the speaker (A2A #3070).
+          sender:        process.env["ZC_AGENT_ID"] || undefined,
           task:          body["task"],
           summary:       body["summary"],
           state:         body["state"],
@@ -1739,8 +1742,8 @@ ${sr["warning"]}` : "";
         const from  = body["from"] as string | undefined;
         const limit = Math.max(1, Math.min(500, Number(body["limit"] ?? 100)));
         let bs = (result["broadcasts"] as Array<{
-          id: number; type: string; agent_id: string; task?: string;
-          summary?: string; created_at: string;
+          id: number; type: string; agent_id: string; sender_agent_id?: string | null;
+          task?: string; summary?: string; created_at: string;
         }>) ?? [];
         if (from) bs = bs.filter((b) => b.created_at >= from);
         bs = bs.slice(0, limit);
@@ -1749,6 +1752,7 @@ ${sr["warning"]}` : "";
         for (const b of bs) {
           lines.push(
             `[#${b.id}] ${String(b.created_at).slice(0, 19)}Z ${b.type} agent=${b.agent_id}` +
+            (b.sender_agent_id && b.sender_agent_id !== b.agent_id ? ` from=${b.sender_agent_id}` : "") +
             (b.task    ? ` task="${b.task}"` : "") +
             (b.summary ? `\n  → ${b.summary}` : "")
           );
@@ -2253,7 +2257,8 @@ async function dispatchToolCall(
           PROJECT_PATH,
           type as BroadcastType,
           agent_id,
-          { task, files, state, summary, depends_on, reason, importance, channel_key, session_token }
+          { task, files, state, summary, depends_on, reason, importance, channel_key, session_token,
+            sender: process.env["ZC_AGENT_ID"] || undefined }
         );
 
         const fileStr  = msg.files.length   > 0 ? `\nFiles:      ${msg.files.join(", ")}` : "";
@@ -2515,6 +2520,7 @@ async function dispatchToolCall(
         for (const b of broadcasts) {
           lines.push(
             `[#${b.id}] ${b.created_at.slice(0, 19)}Z ${b.type} agent=${b.agent_id}` +
+            (b.sender_agent_id && b.sender_agent_id !== b.agent_id ? ` from=${b.sender_agent_id}` : "") +
             (b.task    ? ` task="${b.task}"` : "") +
             (b.summary ? `\n  → ${b.summary}` : "")
           );
