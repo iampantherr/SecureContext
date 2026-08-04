@@ -1726,13 +1726,34 @@ ${sr["warning"]}` : "";
         });
         return { content: [{ type: "text", text: `Broadcast #${(result["message"] as Record<string, unknown>)?.["id"]} posted.` }] };
 
-      case "zc_replay":
-        result = await apiCall("POST", "/api/v1/replay", { projectPath: PROJECT_PATH, fromId: body["from_id"] });
-        return { content: [{ type: "text", text: `Replay: ${(result["broadcasts"] as unknown[])?.length ?? 0} broadcasts returned.` }] };
+      case "zc_replay": {
+        // Mirror the local handler: schema exposes from (ISO timestamp) + limit,
+        // and the caller needs the bodies, not a count. The API route only knows
+        // fromId, so filter/trim client-side (bounded: route returns ≤500 rows).
+        result = await apiCall("POST", "/api/v1/replay", { projectPath: PROJECT_PATH });
+        const from  = body["from"] as string | undefined;
+        const limit = Math.max(1, Math.min(500, Number(body["limit"] ?? 100)));
+        let bs = (result["broadcasts"] as Array<{
+          id: number; type: string; agent_id: string; task?: string;
+          summary?: string; created_at: string;
+        }>) ?? [];
+        if (from) bs = bs.filter((b) => b.created_at >= from);
+        bs = bs.slice(0, limit);
+        if (bs.length === 0) return { content: [{ type: "text", text: "No broadcasts found in the requested range." }] };
+        const lines = [`## Broadcast Replay`, from ? `From: ${from}` : "From: beginning", `Total: ${bs.length}`, ``];
+        for (const b of bs) {
+          lines.push(
+            `[#${b.id}] ${String(b.created_at).slice(0, 19)}Z ${b.type} agent=${b.agent_id}` +
+            (b.task    ? ` task="${b.task}"` : "") +
+            (b.summary ? `\n  → ${b.summary}` : "")
+          );
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
 
       case "zc_ack":
-        await apiCall("POST", "/api/v1/ack", { projectPath: PROJECT_PATH, id: body["id"] });
-        return { content: [{ type: "text", text: `Broadcast #${body["id"]} acknowledged.` }] };
+        await apiCall("POST", "/api/v1/ack", { projectPath: PROJECT_PATH, id: body["broadcast_id"] });
+        return { content: [{ type: "text", text: `Broadcast #${body["broadcast_id"]} acknowledged by '${body["agent_id"]}'.` }] };
 
       case "zc_explain": {
         const er = await apiCall("GET", `/api/v1/explain?projectPath=${encodeURIComponent(PROJECT_PATH)}&query=${encodeURIComponent(String(body["query"] ?? ""))}&depth=${body["depth"] ?? "L1"}`);
