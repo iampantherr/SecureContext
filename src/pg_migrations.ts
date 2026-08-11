@@ -1211,6 +1211,32 @@ export const PG_MIGRATIONS: PgMigration[] = [
         `ALTER TABLE pretool_events_pg ADD CONSTRAINT chk_pte_outcome CHECK (outcome IN (${list}))`);
     },
   },
+  {
+    id: 49,
+    description:
+      "Executable evidence records (v0.57.0). A finding's evidence was prose plus a screenshot — " +
+      "neither re-runnable, and neither recording WHERE a probe ran. Live incident 2026-08-05: a QA " +
+      "sweep probed the HUB for a URL the CONSOLE serves, reported a 404 that was real at the wrong " +
+      "layer, and proposed a 'fix' that would have broken a working page. target_context is the field " +
+      "whose absence made that indistinguishable; probe_command + observed_output make it re-runnable.",
+    up: async (client) => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS evidence_pg (
+          id              BIGSERIAL PRIMARY KEY,
+          project_hash    TEXT NOT NULL,
+          agent_id        TEXT NOT NULL DEFAULT 'default',
+          claim           TEXT NOT NULL,
+          probe_command   TEXT NOT NULL,
+          observed_output TEXT NOT NULL,
+          target_context  TEXT NOT NULL DEFAULT '',
+          skill_run_id    TEXT,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS evidence_pg_proj_idx ON evidence_pg (project_hash, id DESC)`);
+      await client.query(`CREATE INDEX IF NOT EXISTS evidence_pg_run_idx ON evidence_pg (skill_run_id)`);
+    },
+  },
 
 ];
 

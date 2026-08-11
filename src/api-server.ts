@@ -3860,6 +3860,59 @@ export async function createApiServer(storeOverride?: Store) {
     }
   });
 
+  // ── Executable evidence records (v0.57.0) ────────────────────────────────
+  // Storage only. REPLAY deliberately runs client-side in the MCP process: the
+  // targets a probe names (localhost:3020, a dev console) exist on the agent's
+  // machine, not inside this container — re-issuing them here would probe the
+  // wrong host and answer confidently about a machine nobody asked about.
+  app.post("/api/v1/evidence", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(b["projectPath"]);
+      const need = (k: string) => {
+        const v = b[k];
+        if (typeof v !== "string" || !v.trim()) throw new ApiError(400, `${k} is required`);
+        return v.trim();
+      };
+      const rec = {
+        claim: need("claim"),
+        probe_command: need("probe_command"),
+        observed_output: need("observed_output"),
+        target_context: typeof b["target_context"] === "string" ? b["target_context"].trim() : "",
+        agent_id: typeof b["agent_id"] === "string" ? b["agent_id"] : "default",
+        skill_run_id: typeof b["skill_run_id"] === "string" ? b["skill_run_id"] : null,
+      };
+      if (!rec.target_context) {
+        throw new ApiError(400,
+          "target_context is required — it is the field whose absence let a hub-layer 404 be " +
+          "reported as a console-layer failure. Record WHERE the probe ran (e.g. 'console :3020').");
+      }
+      const { insertEvidence, contradictingEvidence } = await import("./evidence.js");
+      const conflicts = await contradictingEvidence(pp, rec);
+      const id = await insertEvidence(pp, rec);
+      return { ok: true, id, contradictions: conflicts };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  app.get("/api/v1/evidence", async (request, reply) => {
+    try {
+      const q = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(q["projectPath"]);
+      const { listEvidence } = await import("./evidence.js");
+      const rows = await listEvidence(pp, {
+        limit: q["limit"] ? Number(q["limit"]) : undefined,
+        skill_run_id: typeof q["skill_run_id"] === "string" ? q["skill_run_id"] : undefined,
+      });
+      return { ok: true, evidence: rows };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
   // ── KB communities, PG-first (live E2E 2026-08-04) ───────────────────────
   // Louvain over knowledge_entries; persisted to kb_communities_pg so the
   // proxied zc_kb_community_for reads what the proxied zc_index wrote.
@@ -3973,7 +4026,32 @@ export async function createApiServer(storeOverride?: Store) {
       let scan: { scanned: number; flagged: number; ollamaAvailable: boolean } | null = null;
       if (run) scan = await store.scanContradictions(pp, String(agentId));
       const open = await store.listContradictions(pp, String(agentId));
-      return { ok: true, scan, contradictions: open };
+      // v0.57.0 — evidence contradictions are first-class here. Two records that
+      // ran the SAME probe against the SAME target and observed different things
+      // is a contradiction in the strictest available sense: identical question,
+      // different answer, no interpretation required. Memory contradictions need
+      // an LLM to judge; these are decidable, so they should never be the ones
+      // that go unnoticed.
+      let evidenceConflicts: unknown[] = [];
+      try {
+        const { withClient } = await import("./pg_pool.js");
+        const r = await withClient(async (c) => c.query(
+          `SELECT a.id AS id_a, b.id AS id_b, a.probe_command, a.target_context,
+                  a.observed_output AS observed_a, b.observed_output AS observed_b,
+                  a.agent_id AS agent_a, b.agent_id AS agent_b, a.created_at AS at_a, b.created_at AS at_b
+             FROM evidence_pg a
+             JOIN evidence_pg b
+               ON a.project_hash = b.project_hash
+              AND a.probe_command = b.probe_command
+              AND a.target_context = b.target_context
+              AND a.observed_output <> b.observed_output
+              AND a.id < b.id
+            WHERE a.project_hash = $1
+            ORDER BY b.id DESC LIMIT 25`,
+          [scopedProjectHash(pp)]));
+        evidenceConflicts = r.rows;
+      } catch { /* evidence table absent (pre-migration install) — omit the section */ }
+      return { ok: true, scan, contradictions: open, evidenceContradictions: evidenceConflicts };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

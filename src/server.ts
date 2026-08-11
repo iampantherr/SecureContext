@@ -441,6 +441,30 @@ const TOOLS: Tool[] = [
         commit:       { type: "string", description: "Claimed commit sha; existence is checked." },
         files:        { type: "array", items: { type: "string" }, description: "Claimed files; each is checked as COMMITTED, not merely present." },
         evidenceFile: { type: "string", description: "Named evidence artefact; checked as committed." },
+        skill_run_id: { type: "string", description: "Replay every executable evidence record linked to this run and report whether each still reproduces." },
+      },
+    },
+  },
+  {
+    name: "zc_evidence",
+    description:
+      "Record an OBSERVATION so it can be re-run later, instead of describing it in prose. " +
+      "Use whenever you assert something observable — an endpoint status, a rendered value, a count. " +
+      "Stores {claim, probe_command, observed_output, target_context}; target_context (WHERE you probed: " +
+      "'hub :8001', 'console :3020') is required, because a real 404 at the wrong layer is exactly how a " +
+      "sweep once proposed a fix that would have broken a working page. action='replay' re-issues stored " +
+      "HTTP probes and reports match/mismatch; recording also warns when an identical probe previously " +
+      "returned something different.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action:          { type: "string", enum: ["record", "list", "replay"], description: "Default: record." },
+        claim:           { type: "string", description: "What you are asserting, e.g. 'compliance page loads controls'." },
+        probe_command:   { type: "string", description: "Exactly how you observed it, e.g. curl -s -o /dev/null -w '%{http_code}' http://localhost:3020/api/soc/compliance?framework=soc2" },
+        observed_output: { type: "string", description: "What came back, e.g. '200'." },
+        target_context:  { type: "string", description: "REQUIRED on record. WHERE the probe ran: 'console :3020', 'hub :8001', 'prod image'." },
+        skill_run_id:    { type: "string", description: "Link to a skill run so zc_record_skill_outcome can cite it." },
+        limit:           { type: "integer", description: "list/replay: how many recent records (default 20)." },
       },
     },
   },
@@ -1307,7 +1331,20 @@ async function _handleMemoryContradictions(
     const skipNote = args["run"] && scan && (scan.skipped ?? 0) > 0
       ? `\n⚠ ${scan.skipped} fact(s) skipped this scan (embedder busy) — coverage is incomplete; re-run zc_memory_contradictions {run:true} in ~1 minute.`
       : "";
-    return { content: [{ type: "text", text: _fmtContradictionsList((r["contradictions"] as ContraRow[]) ?? []) + skipNote }] };
+    // v0.57.0 — evidence contradictions ride alongside memory ones. Same probe,
+    // same target, different answer: decidable without a judgement call, so it
+    // must not be the finding that stays quiet.
+    const ec = (r["evidenceContradictions"] as Array<Record<string, unknown>>) ?? [];
+    let evNote = "";
+    if (ec.length > 0) {
+      evNote = `\n\n## Evidence contradictions (${ec.length}) — identical probe, different result\n` +
+        ec.map((c) =>
+          `#${c["id_a"]} vs #${c["id_b"]}  @ ${c["target_context"]}\n` +
+          `   probe: ${c["probe_command"]}\n` +
+          `   ${c["agent_a"]} observed '${c["observed_a"]}' → ${c["agent_b"]} observed '${c["observed_b"]}'\n` +
+          `   One is stale. Re-run before either justifies a change.`).join("\n");
+    }
+    return { content: [{ type: "text", text: _fmtContradictionsList((r["contradictions"] as ContraRow[]) ?? []) + skipNote + evNote }] };
   }
 
   // In-process mode → local SQLite.
@@ -2981,22 +3018,150 @@ async function dispatchToolCall(
           evidenceFile: typeof vcArgs["evidenceFile"] === "string" ? vcArgs["evidenceFile"] : undefined,
           files:        Array.isArray(vcArgs["files"]) ? (vcArgs["files"] as unknown[]).map(String).slice(0, 100) : undefined,
         }) as unknown as Record<string, unknown>;
-        const lines = [
-          `## Claim verification`,
-          `verified=${cv["verified"]}  refuted=${cv["refuted"]}  unverifiable=${cv["unverifiable"]}`,
-          ``,
-        ];
+        // Body first, header LAST: the counter has to include the behavioural
+        // results computed below. Built up-front (as it was until a live test
+        // caught it) it reported refuted=0 while the detail text below said
+        // REFUTED — a green number contradicting its own evidence, which is the
+        // precise failure this whole feature exists to stop.
+        const lines: string[] = [];
         for (const c of (cv["checks"] as Array<{ assertion: string; status: string; detail: string }> ?? [])) {
           lines.push(`[${c.status.toUpperCase()}] ${c.assertion}`);
           if (c.status !== "verified") lines.push(`    ${c.detail}`);
         }
-        if (cv["refuted"] && Number(cv["refuted"]) > 0) {
-          lines.push(``, `DO NOT present this as delivered: the repository refutes part of the claim.`);
-        } else if (cv["unverifiable"] && Number(cv["unverifiable"]) > 0) {
+
+        // ── Behavioural assertions (v0.57.0) ────────────────────────────────
+        // The repo can settle "is this file committed". It cannot settle "this
+        // endpoint 404s" — and that is precisely the class that produced a
+        // page-breaking fix proposal on 2026-08-05. Re-issue what we can, from
+        // HERE (the agent's host), because the claim's targets live here.
+        const behavioural = { verified: 0, refuted: 0, unverifiable: 0 };
+        try {
+          const { extractHttpAssertions, replayProbe } = await import("./evidence.js");
+          const asserted = extractHttpAssertions(String(vcArgs["summary"] ?? ""));
+          for (const a of asserted) {
+            const r = await replayProbe({
+              claim: a.raw, probe_command: `GET ${a.url}`,
+              observed_output: String(a.status), target_context: "re-issued by zc_verify_claim",
+            });
+            if (r.verdict === "match") { behavioural.verified++; lines.push(`[VERIFIED] ${a.raw}`, `    ${r.detail}`); }
+            else if (r.verdict === "mismatch") { behavioural.refuted++; lines.push(`[REFUTED] ${a.raw}`, `    ${r.detail}`); }
+            else { behavioural.unverifiable++; lines.push(`[UNVERIFIABLE] ${a.raw}`, `    ${r.detail}`); }
+          }
+          // Replay every executable evidence record linked to the run, if given.
+          const runId = typeof vcArgs["skill_run_id"] === "string" ? vcArgs["skill_run_id"] : undefined;
+          if (runId) {
+            // Via the API: this runs in the agent's MCP process, which in proxy
+            // mode has no Postgres credentials of its own.
+            const er = await apiCall("GET",
+              `/api/v1/evidence?projectPath=${encodeURIComponent(PROJECT_PATH)}&limit=50` +
+              `&skill_run_id=${encodeURIComponent(runId)}`);
+            const recs = ((er["evidence"] as unknown[]) ?? []) as import("./evidence.js").EvidenceRecord[];
+            if (recs.length === 0) {
+              behavioural.unverifiable++;
+              lines.push(`[UNVERIFIABLE] evidence linked to run ${runId}`,
+                         `    no executable evidence records are linked to this run — nothing to re-run.`);
+            }
+            for (const rec of recs) {
+              const r = await replayProbe(rec);
+              const tag = r.verdict === "match" ? "VERIFIED" : r.verdict === "mismatch" ? "REFUTED" : "UNVERIFIABLE";
+              if (r.verdict === "match") behavioural.verified++;
+              else if (r.verdict === "mismatch") behavioural.refuted++;
+              else behavioural.unverifiable++;
+              lines.push(`[${tag}] evidence #${rec.id}: ${rec.claim} @ ${rec.target_context}`, `    ${r.detail}`);
+            }
+          }
+        } catch (e) {
+          behavioural.unverifiable++;
+          lines.push(`[UNVERIFIABLE] behavioural assertions`, `    replay layer unavailable: ${String(e).slice(0, 120)}`);
+        }
+        if (behavioural.refuted > 0) {
+          lines.push(``, `${behavioural.refuted} behavioural assertion(s) DID NOT REPRODUCE. ` +
+                         `Re-observe before acting on this claim — including before "fixing" anything it names.`);
+        }
+
+        const totRefuted      = Number(cv["refuted"] ?? 0) + behavioural.refuted;
+        const totUnverifiable = Number(cv["unverifiable"] ?? 0) + behavioural.unverifiable;
+        if (totRefuted > 0) {
+          lines.push(``, `DO NOT present this as delivered: part of the claim is refuted.`);
+        } else if (totUnverifiable > 0) {
           // The distinction that matters: nothing refuted is not the same as verified.
-          lines.push(``, `Nothing was refuted, but ${cv["unverifiable"]} assertion(s) are UNCHECKED — not passed. ` +
+          lines.push(``, `Nothing was refuted, but ${totUnverifiable} assertion(s) are UNCHECKED — not passed. ` +
                          `Commit the program's own output if they need to count as evidence.`);
         }
+        const header = [
+          `## Claim verification`,
+          `verified=${Number(cv["verified"] ?? 0) + behavioural.verified}  ` +
+          `refuted=${totRefuted}  unverifiable=${totUnverifiable}`,
+          ``,
+        ];
+        return { content: [{ type: "text", text: header.concat(lines).join("\n") }] };
+      }
+
+      // Executable evidence (v0.57.0). Storage goes through the API (PG, shared
+      // across agents); REPLAY runs HERE, because the hosts a probe names live on
+      // the agent's machine, not inside the API container.
+      case "zc_evidence": {
+        const ev = (args ?? {}) as Record<string, unknown>;
+        const action = String(ev["action"] ?? "record");
+        const str = (k: string) => (typeof ev[k] === "string" ? (ev[k] as string).trim() : "");
+        const { replayProbe } = await import("./evidence.js");
+
+        if (action === "record") {
+          for (const k of ["claim", "probe_command", "observed_output", "target_context"]) {
+            if (!str(k)) {
+              return { content: [{ type: "text", text:
+                `'${k}' is required. An evidence record without it is prose again — and target_context ` +
+                `specifically is what distinguishes a hub 404 from a console 200.` }], isError: true };
+            }
+          }
+          const r = await apiCall("POST", "/api/v1/evidence", {
+            projectPath: PROJECT_PATH, claim: str("claim"), probe_command: str("probe_command"),
+            observed_output: str("observed_output"), target_context: str("target_context"),
+            agent_id: process.env["ZC_AGENT_ID"] || "default",
+            skill_run_id: str("skill_run_id") || undefined,
+          });
+          const conflicts = (r["contradictions"] as Array<Record<string, unknown>>) ?? [];
+          const out = [`Evidence #${r["id"]} recorded.`,
+            `  claim:  ${str("claim")}`, `  probe:  ${str("probe_command")}`,
+            `  observed: ${str("observed_output")}   @ ${str("target_context")}`];
+          if (conflicts.length > 0) {
+            out.push(``, `⚠ CONTRADICTION: the same probe against the same target previously observed something else:`);
+            for (const c of conflicts) out.push(`  #${c["id"]} observed '${c["observed_output"]}' (${c["created_at"]}) by ${c["agent_id"]}`);
+            out.push(`One of these is stale. Re-run before either is used to justify a change.`);
+          }
+          return { content: [{ type: "text", text: out.join("\n") }] };
+        }
+
+        const listed = await apiCall("GET",
+          `/api/v1/evidence?projectPath=${encodeURIComponent(PROJECT_PATH)}` +
+          `&limit=${Number(ev["limit"] ?? 20)}` +
+          (str("skill_run_id") ? `&skill_run_id=${encodeURIComponent(str("skill_run_id"))}` : ""));
+        const recs = (listed["evidence"] as Array<Record<string, unknown>>) ?? [];
+        if (recs.length === 0) return { content: [{ type: "text", text: "No evidence records found." }] };
+
+        if (action === "list") {
+          const lines = [`## Evidence records (${recs.length})`, ``];
+          for (const r of recs) {
+            lines.push(`#${r["id"]} ${r["claim"]}`,
+              `   probe: ${r["probe_command"]}`,
+              `   observed: ${r["observed_output"]}   @ ${r["target_context"]}   by ${r["agent_id"]}`);
+          }
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+
+        // replay
+        const lines = [`## Evidence replay (${recs.length} record(s))`, ``];
+        let match = 0, mismatch = 0, manual = 0;
+        for (const r of recs) {
+          const res = await replayProbe(r as unknown as import("./evidence.js").EvidenceRecord);
+          if (res.verdict === "match") match++;
+          else if (res.verdict === "mismatch") mismatch++;
+          else manual++;
+          lines.push(`[${res.verdict.toUpperCase()}] #${r["id"]} ${r["claim"]} @ ${r["target_context"]}`,
+                     `    ${res.detail}`);
+        }
+        lines.push(``, `match=${match}  mismatch=${mismatch}  manual/unreplayable=${manual}`);
+        if (mismatch > 0) lines.push(`${mismatch} record(s) NO LONGER REPRODUCE — any claim resting on them is unsafe to act on.`);
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 
@@ -3213,6 +3378,34 @@ async function dispatchToolCall(
             `Tell the system WHY the skill fell short (what guidance was wrong/missing) and ONE concrete change ` +
             `to the skill body — that's the signal the mutator uses to improve it. Re-call with both fields.` }], isError: true };
         }
+        // v0.57.0 — EXECUTABLE-evidence gate on the runs that drive promotion.
+        // The prose gate above catches bare LOW scores. It does not catch the
+        // opposite and more damaging case: a confident HIGH score on work whose
+        // findings were never re-checked. Measured 2026-08-05 — a sweep containing
+        // a page-breaking inverted finding was self-scored 0.85 "succeeded", and
+        // the mutation engine trains on exactly these numbers. So a high score now
+        // has to cite at least one re-runnable observation.
+        const claimsSuccess = status === "succeeded" && (typeof outcome_score !== "number" || outcome_score >= 0.6);
+        let evidenceLinkNote = "";
+        if (claimsSuccess) {
+          let linked = 0;
+          try {
+            const r = await apiCall("GET",
+              `/api/v1/evidence?projectPath=${encodeURIComponent(PROJECT_PATH)}&limit=50`);
+            const all = (r["evidence"] as Array<Record<string, unknown>>) ?? [];
+            const mine = process.env["ZC_AGENT_ID"] || "default";
+            // Any record this agent filed recently counts as citing its work.
+            linked = all.filter((e) => e["agent_id"] === mine).length;
+          } catch { /* evidence layer down — do not block the recording */ }
+          if (linked === 0) {
+            evidenceLinkNote =
+              `\n\n⚠ UNEVIDENCED: this run claims success but cites no executable evidence record. ` +
+              `A self-assigned score with nothing re-runnable behind it is what taught the mutator to ` +
+              `optimise for confidence. Record what you actually observed with zc_evidence ` +
+              `{claim, probe_command, observed_output, target_context} — then this score means something.`;
+          }
+        }
+
         let evidence: Record<string, unknown> | null =
           (what_worked || what_didnt || recommendation_for_skill)
             ? {
@@ -3364,6 +3557,7 @@ async function dispatchToolCall(
           lines.push("```json");
           lines.push(JSON.stringify(summary, null, 2));
           lines.push("```");
+          if (evidenceLinkNote) lines.push(evidenceLinkNote);
           return { content: [{ type: "text", text: lines.join("\n") }] };
         } catch (e) {
           try { rsoDb.close(); } catch { /* noop */ }
