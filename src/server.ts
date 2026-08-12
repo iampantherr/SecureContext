@@ -1615,7 +1615,7 @@ async function _handleRemoteTool(
             markSkillBlockSent(MCP_SESSION_ID, agentRole);
           } else {
             lines.push(`## Skills (${skills.length} available for role '${agentRole}' — unchanged from earlier in session)`);
-            lines.push("`zc_skill_show({name:\"<id>\"})` for any skill body. Set ZC_SKILLS_FORCE_FULL=1 to re-emit full inventory.");
+            lines.push("Read `~/.claude/skills/<id>/SKILL.md` for any skill body. Set ZC_SKILLS_FORCE_FULL=1 to re-emit full inventory.");
           }
         }
         // v0.31.0 — surface suspected contradictions returned by the API (PG-backed scan,
@@ -3433,19 +3433,15 @@ async function dispatchToolCall(
         const rsoDb = new RsoDb(rsoDbFile);
         rsoDb.exec("PRAGMA journal_mode = WAL");
         try {
-          // v0.22.0 — prefer the pending_run_id from currentSkillContext if it
-          // matches this skill (set by zc_skill_show). Falls back to fresh UUID
-          // when no tracking context exists (legacy / direct outcome path).
-          const ctxMatches = currentSkillContext &&
-            (currentSkillContext.skill_id === skill_id || currentSkillContext.skill_id.startsWith(skill_id + "@"));
-          const runId = ctxMatches && currentSkillContext
-            ? currentSkillContext.pending_run_id
-            : `run-${rsoUUID().slice(0, 12)}`;
-          const collectedCallIds = ctxMatches && currentSkillContext
-            ? [...currentSkillContext.tool_call_ids]
-            : [];
+          // v0.53.0 — always a fresh run id. The alternative branch read a
+          // pending_run_id from currentSkillContext, which zc_skill_show used to set;
+          // that tool was removed on 2026-07-30 (16dfd59) because it served skill
+          // bodies out of Postgres while skipping the HMAC verification its siblings
+          // enforce. Nothing has assigned that context since, so the branch had been
+          // unreachable — and with it the tool-call correlation below.
+          const runId = `run-${rsoUUID().slice(0, 12)}`;
           const ts = new Date().toISOString();
-          const { recordSkillRun, linkSkillRunToolCalls } = await import("./skills/storage_dual.js");
+          const { recordSkillRun } = await import("./skills/storage_dual.js");
           const projectHashOf16 = rsoProjectHash;
           await recordSkillRun(rsoDb, {
             run_id:        runId,
@@ -3465,16 +3461,6 @@ async function dispatchToolCall(
             project_hash:  projectHashOf16,
             evidence,
           }, PROJECT_PATH);
-
-          // v0.22.0 — link the tool_calls captured during this skill_run.
-          if (collectedCallIds.length > 0) {
-            await linkSkillRunToolCalls(rsoDb, runId, collectedCallIds, ts);
-            logger.info("skills", "skill_run_tool_calls_linked", {
-              run_id: runId, skill_id, agent_id: AGENT_ID, count: collectedCallIds.length,
-            });
-          }
-          // Clear the tracking window — the skill run is now committed.
-          if (ctxMatches) currentSkillContext = null;
 
           // Decide whether to record an outcome row (and thereby trigger L1).
           // Failures, timeouts, and low scores all signal the skill needs work.
@@ -3709,7 +3695,7 @@ async function dispatchToolCall(
               }
             }
             lines.push(``);
-            lines.push(`To use a skill: \`zc_skill_show({skill_id:"<id>"})\` to read; run fixtures + report via \`zc_record_skill_outcome\`.`);
+            lines.push(`To use a skill: Read \`~/.claude/skills/<id>/SKILL.md\` for the body; run fixtures + report via \`zc_record_skill_outcome\`.`);
           }
           return { content: [{ type: "text", text: lines.join("\n") }] };
         } catch (e) {
@@ -4148,23 +4134,6 @@ const AGENT_ID    = process.env.ZC_AGENT_ID    || "default";
 const AGENT_MODEL = process.env.ZC_AGENT_MODEL || "unknown";
 
 /**
- * v0.22.0 — Tracks the skill currently being exercised by this agent.
- * Set by zc_skill_show on successful resolution; tool_call_ids accumulate
- * via the recordToolCall wrapper; consumed and cleared by
- * zc_record_skill_outcome which writes the run + skill_run_tool_calls links.
- *
- * Stack-shaped (one element) by design — agents invoke one skill at a time.
- * If multiple skills nest, the outer is overwritten (rare in practice).
- */
-interface CurrentSkillContext {
-  skill_id:        string;
-  pending_run_id:  string;
-  started_at:      string;
-  tool_call_ids:   string[];
-}
-let currentSkillContext: CurrentSkillContext | null = null;
-
-/**
  * v0.22.2 — Per-session skill-block dedup. zc_recall_context appends a "##
  * Skills available for role 'X'" section every call. The skill block is
  * stable within a session (agent's role doesn't change mid-session). Emitting
@@ -4226,10 +4195,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // SQLite, env-not-propagated to MCP subprocess, etc.) for weeks. We still don't
     // re-throw — telemetry failure must not break the user's tool call — but we DO
     // surface the error in the structured logger so operators see it.
-    // v0.22.0 — capture skill_id from currentSkillContext (set by zc_skill_show)
-    // and accumulate call_id for skill_run_tool_calls correlation.
-    const errSkillId = currentSkillContext?.skill_id;
-    if (currentSkillContext) currentSkillContext.tool_call_ids.push(callId);
     recordToolCall({
       callId,
       sessionId:   MCP_SESSION_ID,
@@ -4237,7 +4202,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       projectPath: PROJECT_PATH,
       toolName:    name,
       model:       AGENT_MODEL,
-      skillId:     errSkillId,
       inputChars,
       outputChars: 0,
       latencyMs:   Date.now() - t0,
@@ -4279,13 +4243,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ── Record telemetry (fire-and-forget for return latency; logs on error) ──
   // v0.18.9 — fail-loud: errors no longer swallowed; surfaced in structured logs
-  // v0.22.0 — skillId from currentSkillContext + accumulate call_id for
-  // skill_run_tool_calls correlation. Skip the bookkeeping when the call IS
-  // zc_skill_show / zc_record_skill_outcome itself (those are the brackets).
-  const okSkillId = currentSkillContext?.skill_id;
-  if (currentSkillContext && name !== "zc_skill_show" && name !== "zc_record_skill_outcome") {
-    currentSkillContext.tool_call_ids.push(callId);
-  }
   recordToolCall({
     callId,
     sessionId:   MCP_SESSION_ID,
@@ -4293,7 +4250,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     projectPath: PROJECT_PATH,
     toolName:    name,
     model:       AGENT_MODEL,
-    skillId:     okSkillId,
     inputChars,
     outputChars,
     latencyMs:   Date.now() - t0,

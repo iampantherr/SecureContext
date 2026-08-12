@@ -71,6 +71,33 @@ export interface VerifyResult {
   brokenHash?: string;
   /** If ok=false, what kind of break: hash-mismatch | prev-mismatch. */
   brokenKind?: "hash-mismatch" | "prev-mismatch";
+  /**
+   * v0.53.0 — if ok=false, how many rows fail to recompute under their OWN stored
+   * prev_hash. Position-independent, so it survives the cascade that follows the
+   * first break — the old result stopped at the first bad row and so could say
+   * nothing about whether the rest of the log was fine.
+   */
+  hashMismatches?: number;
+  /**
+   * v0.53.0 — how many CONTIGUOUS runs those failures form. This is the field that
+   * actually tells the operator what happened, and the count alone does not:
+   *
+   *   few large blocks  → the key changed at those boundaries (re-key, restored
+   *                       volume, a secret mounted from a different path). Every row
+   *                       written under the old secret fails together, in order.
+   *   many small blocks → individual rows were altered; their neighbours still verify.
+   *
+   * Measured on the live admission log: 252 of 334 rows failing, but in exactly 2
+   * blocks (1–198 and 308–334) with 199–307 verifying, the first boundary landing on
+   * the machine-secret unification. Read as a count that is "252 bad rows, alarming";
+   * read as a shape it is one key change, and benign. The banner had shown a flat red
+   * CHAIN TAMPERED for months because it could not draw that distinction.
+   *
+   * ponytail: block SHAPE is a triage aid, not an authentication boundary — an
+   * attacker editing a long adjacent span looks key-shaped. Ground truth stays the
+   * audit.log JSONL anchors; upgrade path is anchoring each key epoch explicitly.
+   */
+  mismatchBlocks?: number;
 }
 
 // ─── Core API ──────────────────────────────────────────────────────────────
@@ -147,36 +174,33 @@ export function verifyHmacChain<T extends ChainableRow>(
 
   let expectedPrev = GENESIS;
 
+  // Count every row that fails under its OWN stored prev_hash, so the verdict below
+  // can distinguish a wrong key (all fail) from edited rows (some fail). Done in the
+  // same walk; on an intact chain it stays 0 and costs nothing extra.
+  let hashMismatches = 0;
+  let mismatchBlocks = 0;
+  let prevFailed = false;
+  let first: VerifyResult | null = null;
+
   for (const row of chained) {
-    // Verify prev_hash points to the previous row's row_hash
-    if (row.prev_hash !== expectedPrev) {
-      return {
-        ok:         false,
-        totalRows:  chained.length,
-        brokenAt:   row.id,
-        brokenHash: expectedPrev,
-        brokenKind: "prev-mismatch",
-      };
+    const expected = hmacRowHash(secret, row.prev_hash, getCanonical(row));
+    const hashOk   = constantTimeStringEq(expected, row.row_hash);
+    if (!hashOk) {
+      hashMismatches++;
+      if (!prevFailed) mismatchBlocks++;
     }
+    prevFailed = !hashOk;
 
-    // Recompute the HMAC and compare
-    const canonical = getCanonical(row);
-    const expected  = hmacRowHash(secret, row.prev_hash, canonical);
-
-    if (!constantTimeStringEq(expected, row.row_hash)) {
-      return {
-        ok:         false,
-        totalRows:  chained.length,
-        brokenAt:   row.id,
-        brokenHash: expected,
-        brokenKind: "hash-mismatch",
-      };
+    if (!first && row.prev_hash !== expectedPrev) {
+      first = { ok: false, totalRows: chained.length, brokenAt: row.id, brokenHash: expectedPrev, brokenKind: "prev-mismatch" };
+    } else if (!first && !hashOk) {
+      first = { ok: false, totalRows: chained.length, brokenAt: row.id, brokenHash: expected, brokenKind: "hash-mismatch" };
     }
 
     expectedPrev = row.row_hash;
   }
 
-  return { ok: true, totalRows: chained.length };
+  return first ? { ...first, hashMismatches, mismatchBlocks } : { ok: true, totalRows: chained.length };
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

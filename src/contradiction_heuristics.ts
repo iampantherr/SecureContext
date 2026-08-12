@@ -75,10 +75,30 @@ const OPERATIONAL_VALUE_SIGNATURE =
   /^\s*(last attempt at\b.*\bwas (rejected|abandoned|superseded)\b|task[\w-]*\b.*\b(rejected|reassigned) by\b)/i;
 const SKIP_OPERATIONAL_VALUES = process.env["ZC_CONTRADICTION_SKIP_OPERATIONAL_VALUES"] !== "0";
 
+/**
+ * v0.53.0 — TEST-RUN REPORTS. A value carrying a pass/fail TALLY ("8 PASS / 0 FAIL",
+ * "3/12 passed") is a measurement of one run at one moment, not a claim about the
+ * world. Two runs never contradict each other: a different suite measures something
+ * else, and the same suite later simply supersedes. But they share a rigid report
+ * template, so they collide on every existing signal at once — the tally trips
+ * numeric_conflict (identical template, one number changed, followed by the unit
+ * word "PASS"), and a [FAIL] line next to a clean run trips semantic_conflict.
+ *
+ * Measured on the live A2A corpus: 130 of 155 open contradictions (84%) had a run
+ * report on at least one side — by a wide margin the largest remaining false-positive
+ * source after the v0.49.x filters. Recognised by the TALLY, which is what makes it a
+ * run record, rather than by key spelling (see v0.49.2 — key-shape chasing never ends).
+ * Kill-switch: ZC_CONTRADICTION_SKIP_RUN_REPORTS=0.
+ */
+const RUN_REPORT_TALLY = /\b\d+\s*(?:PASS(?:ED)?|FAIL(?:ED|URES?)?)\b|\b\d+\s*\/\s*\d+\s+(?:pass|fail)/i;
+const SKIP_RUN_REPORTS = process.env["ZC_CONTRADICTION_SKIP_RUN_REPORTS"] !== "0";
+
 export function isCoordinationMarker(key: string, value?: string): boolean {
   if (NON_CHECKABLE_KEY.test(key)) return true;
   if (SKIP_DATED_CAPS_MARKERS && DATE_STAMPED_CAPS_MARKER.test(key)) return true;
-  if (SKIP_OPERATIONAL_VALUES && value !== undefined && OPERATIONAL_VALUE_SIGNATURE.test(value)) return true;
+  if (value === undefined) return false;
+  if (SKIP_OPERATIONAL_VALUES && OPERATIONAL_VALUE_SIGNATURE.test(value)) return true;
+  if (SKIP_RUN_REPORTS && RUN_REPORT_TALLY.test(value)) return true;
   return false;
 }
 export function isCheckableClaim(f: FactLite): boolean { return !isCoordinationMarker(f.key, f.value); }

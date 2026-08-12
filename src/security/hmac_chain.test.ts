@@ -230,3 +230,44 @@ describe("hmac_chain", () => {
     expect(result.brokenKind).toBe("hash-mismatch");
   });
 });
+
+describe("re-key vs tampering (v0.53.0)", () => {
+  it("wrong secret: EVERY row mismatches — a key event, not edited rows", () => {
+    const rows = buildChain(SECRET, 5);
+    const r = verifyHmacChain(SECRET2, rows, getCanonicalTest);
+    expect(r.ok).toBe(false);
+    expect(r.brokenAt).toBe(1);                 // still reports the first break…
+    expect(r.hashMismatches).toBe(r.totalRows); // …and now says all 5 fail
+    expect(r.mismatchBlocks).toBe(1);           // one contiguous block = one key epoch
+  });
+
+  it("one edited row: the rest still verify — tampering", () => {
+    const rows = buildChain(SECRET, 5);
+    rows[2]!.event = "tampered";
+    const r = verifyHmacChain(SECRET, rows, getCanonicalTest);
+    expect(r.ok).toBe(false);
+    expect(r.hashMismatches).toBe(1);
+    expect(r.hashMismatches).toBeLessThan(r.totalRows);
+    expect(r.mismatchBlocks).toBe(1);
+  });
+
+  it("scattered edits produce MANY blocks; a key epoch produces few", () => {
+    const scattered = buildChain(SECRET, 7);
+    scattered[1]!.event = "x"; scattered[3]!.event = "y"; scattered[5]!.event = "z";
+    const s = verifyHmacChain(SECRET, scattered, getCanonicalTest);
+    expect(s.hashMismatches).toBe(3);
+    expect(s.mismatchBlocks).toBe(3);          // isolated → blocks == failures
+
+    const epoch = buildChain(SECRET, 7);
+    for (const i of [0, 1, 2]) epoch[i]!.event = "old-key-era";
+    const e = verifyHmacChain(SECRET, epoch, getCanonicalTest);
+    expect(e.hashMismatches).toBe(3);
+    expect(e.mismatchBlocks).toBe(1);          // contiguous → one block
+  });
+
+  it("intact chain reports no mismatches", () => {
+    const r = verifyHmacChain(SECRET, buildChain(SECRET, 5), getCanonicalTest);
+    expect(r.ok).toBe(true);
+    expect(r.hashMismatches).toBeUndefined();
+  });
+});

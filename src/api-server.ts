@@ -506,8 +506,14 @@ export async function createApiServer(storeOverride?: Store) {
         html += `<p class="empty">No questions waiting. Orchestrator questions that match no worker land here.</p>`;
       }
       for (const q of pending) {
+        // Age is shown because the panel's whole value is "what still needs me", and a
+        // question nobody can close drifts to the top of that list and stays there.
+        const days = Math.floor((Date.now() - Date.parse(String(q.created_at))) / 86_400_000);
+        const age = days >= 1
+          ? ` · <strong style="color:var(--alert,#ff5d6c)">waiting ${days}d</strong>`
+          : "";
         html += `<details open class="inbox-q" style="margin-bottom:10px;border:1px solid var(--border,#333);border-radius:6px;padding:8px">
-  <summary><strong>#${Number(q.id)}</strong> · ${projName(String(q.project_path))} · from <code>${escapeHtml(String(q.from_agent))}</code> · ${escapeHtml(new Date(String(q.created_at)).toLocaleString())}</summary>
+  <summary><strong>#${Number(q.id)}</strong> · ${projName(String(q.project_path))} · from <code>${escapeHtml(String(q.from_agent))}</code> · ${escapeHtml(new Date(String(q.created_at)).toLocaleString())}${age}</summary>
   <p style="white-space:pre-wrap;margin:8px 0">${escapeHtml(String(q.question))}</p>
   <form hx-post="/dashboard/operator-inbox/answer" hx-target="find .inbox-result" hx-swap="innerHTML">
     <input type="hidden" name="id" value="${Number(q.id)}">
@@ -515,6 +521,10 @@ export async function createApiServer(storeOverride?: Store) {
     <button type="submit" style="margin-top:6px">Send answer to orchestrator</button>
     <span class="inbox-result"></span>
   </form>
+  <button hx-post="/dashboard/operator-inbox/dismiss" hx-vals='{"id":${Number(q.id)}}'
+          hx-target="closest .inbox-q" hx-swap="outerHTML"
+          title="Closes the question without sending anything. Use when you already answered in the agent's own terminal."
+          style="margin-top:6px;opacity:.75">Dismiss — already answered in the terminal</button>
 </details>`;
       }
       if (recent.length > 0) {
@@ -541,6 +551,20 @@ export async function createApiServer(storeOverride?: Store) {
       const moved = await answerInboxEntry(id, answer, "dashboard-operator");
       if (!moved) { reply.type("text/html").send(`<span class="error">❌ not found or already answered</span>`); return; }
       reply.type("text/html").send(`<span class="ok">✓ answered — the dispatcher will deliver it to the orchestrator terminal within ~10s</span>`);
+    } catch (e) {
+      reply.type("text/html").send(`<span class="error">❌ ${escapeHtml((e as Error).message)}</span>`);
+    }
+  });
+
+  app.post("/dashboard/operator-inbox/dismiss", async (request, reply) => {
+    try {
+      const id = Number((request.body as Record<string, unknown>).id);
+      if (!Number.isFinite(id) || id <= 0) { reply.type("text/html").send(`<span class="error">❌ bad id</span>`); return; }
+      const { dismissInboxEntry } = await import("./operator_inbox.js");
+      const moved = await dismissInboxEntry(id);
+      reply.type("text/html").send(moved
+        ? `<p class="sub">#${id} dismissed — nothing was sent to the agent.</p>`
+        : `<span class="error">❌ #${id} not found or no longer pending</span>`);
     } catch (e) {
       reply.type("text/html").send(`<span class="error">❌ ${escapeHtml((e as Error).message)}</span>`);
     }
@@ -839,7 +863,6 @@ export async function createApiServer(storeOverride?: Store) {
         project_hash: string;
         broadcasts_24h: string;
         skill_runs_24h: string;
-        skill_show_calls_24h: string;
         outcome_calls_24h: string;
         unique_agents: string;
         last_broadcast_at: string;
@@ -870,27 +893,23 @@ export async function createApiServer(storeOverride?: Store) {
               GROUP BY project_hash
            ),
            skill_show_counts AS (
-             -- v0.23.3: zc_skill_show window widened to 7 days. Window-boundary
-             -- artifact: a single agent session that loads a skill at hour 0
-             -- and records 5 outcomes over the next 30h would, with a 24h
-             -- window, show "0 skill_show, N outcomes" once the show drops
-             -- out of the 24h count. zc_skill_show is one-per-skill-load
-             -- (not one-per-task) so the load signal is multi-day. Outcomes
-             -- still measure recent (24h) activity.
+             -- v0.53.0: the zc_skill_show half of this CTE was removed. That tool
+             -- was deleted on 2026-07-30 (16dfd59) — skills moved to the folder and
+             -- agents Read SKILL.md directly — so the counter had been pinned at 0,
+             -- and the panel built on it accused every project of "scoring skills
+             -- they never read". SC cannot observe a native file Read, so the load
+             -- signal is not stale, it is unobtainable. Count what is real.
              SELECT project_hash,
-                    COUNT(*) FILTER (WHERE tool_name = 'zc_skill_show'
-                                     AND ts > NOW() - INTERVAL '7 days') AS skill_show_calls_24h,
                     COUNT(*) FILTER (WHERE tool_name = 'zc_record_skill_outcome'
                                      AND ts > NOW() - INTERVAL '24 hours') AS outcome_calls_24h
                FROM tool_calls_pg
               WHERE ts > NOW() - INTERVAL '7 days'
-                AND tool_name IN ('zc_skill_show', 'zc_record_skill_outcome')
+                AND tool_name = 'zc_record_skill_outcome'
               GROUP BY project_hash
            )
            SELECT b.project_hash,
                   b.broadcasts_24h::text,
                   COALESCE(s.skill_runs_24h, 0)::text       AS skill_runs_24h,
-                  COALESCE(c.skill_show_calls_24h, 0)::text AS skill_show_calls_24h,
                   COALESCE(c.outcome_calls_24h, 0)::text    AS outcome_calls_24h,
                   b.unique_agents::text,
                   b.last_broadcast_at
@@ -908,7 +927,6 @@ export async function createApiServer(storeOverride?: Store) {
         project_name:         nameMap.get(r.project_hash) ?? null,
         broadcasts_24h:       Number(r.broadcasts_24h),
         skill_runs_24h:       Number(r.skill_runs_24h),
-        skill_show_calls_24h: Number(r.skill_show_calls_24h),
         outcome_calls_24h:    Number(r.outcome_calls_24h),
         unique_agents:        Number(r.unique_agents),
         last_broadcast_at:    String(r.last_broadcast_at ?? ""),
@@ -1139,7 +1157,7 @@ export async function createApiServer(storeOverride?: Store) {
     const { renderContradictionsFragment, loadProjectNameMap } = await import("./dashboard/render.js");
     const { withClient } = await import("./pg_pool.js");
     try {
-      const rows = await withClient(async (c) => {
+      let rows = await withClient(async (c) => {
         // Join each flagged key to its fact value for context (prefer the agent's own
         // value, else the shared 'default' pool). Correlated subqueries avoid row fan-out.
         const res = await c.query<Record<string, unknown>>(
@@ -1156,6 +1174,27 @@ export async function createApiServer(storeOverride?: Store) {
         );
         return res.rows;
       });
+      // v0.53.0 — retire rows the CURRENT rules would never have flagged. Each filter
+      // added to contradiction_heuristics stops new false positives but leaves the ones
+      // already in the table, so the queue only ever grows and the operator stops
+      // reading it (live: 155 open, 84% run reports). Re-checking on read drains the
+      // backlog against the one shared rule — no migration, no duplicated predicate in
+      // SQL, and 'dismissed' is reversible from the panel like any other review.
+      const { isCoordinationMarker } = await import("./contradiction_heuristics.js");
+      const stale = rows.filter((r) =>
+        isCoordinationMarker(String(r.key_a), String(r.value_a ?? "")) ||
+        isCoordinationMarker(String(r.key_b), String(r.value_b ?? "")));
+      if (stale.length > 0) {
+        await withClient(async (c) => {
+          await c.query(
+            `UPDATE memory_contradictions_pg SET status = 'dismissed', reviewed_at = NOW(), resolution_mode = 'not_conflict'
+              WHERE status = 'open' AND (project_hash, key_a, key_b) IN (
+                SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[]))`,
+            [stale.map((r) => String(r.project_hash)), stale.map((r) => String(r.key_a)), stale.map((r) => String(r.key_b))],
+          );
+        }).catch(() => {});
+        rows = rows.filter((r) => !stale.includes(r));
+      }
       // v0.37.0 — recently auto-resolved conflicts (retired stale side), each with an Undo.
       const autoRows = await withClient(async (c) => {
         const res = await c.query<Record<string, unknown>>(
@@ -1303,14 +1342,31 @@ export async function createApiServer(storeOverride?: Store) {
     try {
       const { verifyAdmissionChain } = await import("./skills/admission_log.js");
       const r = await verifyAdmissionChain();
+      // v0.53.0 — classify the break by the SHAPE of the failures, not their count.
+      // Failures that arrive in a few contiguous blocks are what a key change looks
+      // like: every row written under the old secret fails together, in write order.
+      // Failures scattered as isolated rows are what an edit looks like. Conflating
+      // the two is why this banner sat flat red for months while the actual cause was
+      // a machine-secret change the operator had made deliberately.
+      // ponytail: MAX_KEY_EPOCHS is a triage threshold, not a security boundary — see
+      // the note on mismatchBlocks. Raise it if a host legitimately re-keys more often.
+      const MAX_KEY_EPOCHS = 3;
+      const blocks = r.mismatchBlocks ?? 0;
+      const keyShaped = !r.ok && r.hashMismatches !== undefined && blocks > 0 && blocks <= MAX_KEY_EPOCHS;
+      const verified = (r.totalRows ?? 0) - (r.hashMismatches ?? 0);
       const html = r.ok
         ? `<div class="chain-banner chain-ok">
              <span class="chain-status">🟢 CHAIN OK</span>
              <span class="chain-detail">${r.totalRows} HMAC-chained admission event${r.totalRows === 1 ? "" : "s"} verified · machine_secret-keyed</span>
            </div>`
+        : keyShaped
+        ? `<div class="chain-banner chain-error">
+             <span class="chain-status">🟡 KEY CHANGE — ${r.hashMismatches} ROW${r.hashMismatches === 1 ? "" : "S"} UNVERIFIABLE</span>
+             <span class="chain-detail">${r.hashMismatches} of ${r.totalRows} rows don't verify under the current machine_secret, but they fall in ${blocks === 1 ? "a single contiguous block" : `${blocks} contiguous blocks`} while the other ${verified} verify — that is the signature of the signing key changing, not of rows being edited (an edit leaves its neighbours failing too). Those rows are unverifiable, not proven altered. Recover the earlier secret to re-verify them, or re-anchor from the audit.log JSONL.</span>
+           </div>`
         : `<div class="chain-banner chain-broken">
              <span class="chain-status">🔴 CHAIN TAMPERED</span>
-             <span class="chain-detail">Break at row #${r.brokenAt ?? "?"} (${escapeHtml(r.brokenKind ?? "unknown")}); ${r.totalRows} total rows. Investigate audit.log JSONL anchors for ground truth.</span>
+             <span class="chain-detail">${r.hashMismatches ?? "?"} of ${r.totalRows} rows fail to verify, scattered across ${blocks} separate places, while ${verified} hold — first break at row #${r.brokenAt ?? "?"} (${escapeHtml(r.brokenKind ?? "unknown")}). Isolated failures are the signature of edited rows, not of a key change. Investigate audit.log JSONL anchors for ground truth.</span>
            </div>`;
       reply.type("text/html").send(html);
     } catch (e) {
@@ -2842,51 +2898,33 @@ export async function createApiServer(storeOverride?: Store) {
     try {
       const { withClient } = await import("./pg_pool.js");
       const { renderProjectSkillsUsed } = await import("./dashboard/render.js");
-      // Combine tool_calls (zc_skill_show / zc_record_skill_outcome counts +
-      // agents) with skill_runs (avg + latest score) per skill_id.
+      // v0.53.0 — driven by skill_runs_pg alone. The tool_calls side keyed on
+      // tool_calls_pg.skill_id, which was only ever populated from the tracking
+      // context zc_skill_show set; with that tool gone (16dfd59) the column is
+      // always NULL, so the `skill_id IS NOT NULL` filter matched nothing and this
+      // panel returned an empty table on every project. skill_runs_pg has the real
+      // rows, and carries the agent that recorded each one.
       const rows = await withClient(async (c) => {
         const r = await c.query<Record<string, unknown>>(
-          `WITH tc AS (
-             SELECT skill_id,
-                    COUNT(*) FILTER (WHERE tool_name = 'zc_skill_show') AS shows,
-                    COUNT(*) FILTER (WHERE tool_name = 'zc_record_skill_outcome') AS outcomes,
-                    STRING_AGG(DISTINCT agent_id, ', ' ORDER BY agent_id) AS agents,
-                    MAX(ts) AS last_used
-               FROM tool_calls_pg
-              WHERE project_hash = $1
-                AND tool_name IN ('zc_skill_show', 'zc_record_skill_outcome')
-                AND skill_id IS NOT NULL
-                AND ts > NOW() - INTERVAL '24 hours'
-              GROUP BY skill_id
-           ),
-           sr AS (
-             SELECT skill_id,
-                    COUNT(*) AS runs_24h,
-                    AVG(outcome_score)::numeric(6,3) AS avg_score,
-                    (ARRAY_AGG(outcome_score ORDER BY ts DESC))[1] AS latest_score
-               FROM skill_runs_pg
-              WHERE project_hash = $1
-                AND ts > NOW() - INTERVAL '24 hours'
-                AND outcome_score IS NOT NULL
-              GROUP BY skill_id
-           )
-           SELECT COALESCE(tc.skill_id, sr.skill_id) AS skill_id,
-                  COALESCE(tc.shows, 0)::text AS shows,
-                  COALESCE(tc.outcomes, 0)::text AS outcomes,
-                  COALESCE(sr.runs_24h, 0)::text AS runs_24h,
-                  sr.avg_score::text AS avg_score,
-                  sr.latest_score::text AS latest_score,
-                  COALESCE(tc.agents, '') AS agents,
-                  COALESCE(tc.last_used::text, '') AS last_used
-             FROM tc FULL OUTER JOIN sr ON tc.skill_id = sr.skill_id
-            ORDER BY tc.last_used DESC NULLS LAST`,
+          `SELECT skill_id,
+                  COUNT(*)::text                                   AS runs_24h,
+                  COUNT(*)::text                                   AS outcomes,
+                  AVG(outcome_score)::numeric(6,3)::text           AS avg_score,
+                  (ARRAY_AGG(outcome_score ORDER BY ts DESC))[1]::text AS latest_score,
+                  STRING_AGG(DISTINCT agent_id, ', ' ORDER BY agent_id) AS agents,
+                  MAX(ts)::text                                    AS last_used
+             FROM skill_runs_pg
+            WHERE project_hash = $1
+              AND ts > NOW() - INTERVAL '24 hours'
+              AND outcome_score IS NOT NULL
+            GROUP BY skill_id
+            ORDER BY MAX(ts) DESC`,
           [projectHash],
         );
         return r.rows;
       });
       reply.type("text/html").send(renderProjectSkillsUsed(projectHash, rows.map((r) => ({
         skill_id:     String(r.skill_id),
-        shows:        Number(r.shows),
         outcomes:     Number(r.outcomes),
         runs_24h:     Number(r.runs_24h),
         avg_score:    r.avg_score === null ? null : Number(r.avg_score),
@@ -3445,7 +3483,20 @@ export async function createApiServer(storeOverride?: Store) {
         );
         return r.rows;
       });
-      reply.type("text/html").send(renderCompletedMutations(rows.map((r) => ({
+      // v0.53.0 — name the proposer backend. ZC_MUTATOR_MODEL unset silently resolves
+      // to `local-mock`, and a table of mock candidates that were all correctly
+      // rejected is visually identical to a real engine doing quality control. The
+      // operator reads "mutations proposed, all rejected" and concludes the loop is
+      // working, when in fact nothing real has ever been proposed.
+      const { resolveMutatorId } = await import("./skills/mutator.js");
+      const mutatorId = resolveMutatorId();
+      const banner = mutatorId === "local-mock"
+        ? `<div class="chain-banner chain-error">
+             <span class="chain-status">🟡 MOCK PROPOSER</span>
+             <span class="chain-detail">Mutations below were generated by <code>local-mock</code>, not a model — <code>ZC_MUTATOR_MODEL</code> is unset. Their rejections say nothing about skill quality. Set <code>ZC_MUTATOR_MODEL</code> to run the engine for real.</span>
+           </div>`
+        : `<p class="sub">Proposer: <code>${escapeHtml(mutatorId)}</code></p>`;
+      reply.type("text/html").send(banner + renderCompletedMutations(rows.map((r) => ({
         mutation_id:     String(r.mutation_id),
         parent_skill_id: String(r.parent_skill_id),
         promoted_to:     r.promoted_to_skill_id === null ? null : String(r.promoted_to_skill_id),

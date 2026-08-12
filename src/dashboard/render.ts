@@ -1884,7 +1884,6 @@ export interface SkillHealthRow {
   project_name: string | null;
   broadcasts_24h: number;
   skill_runs_24h: number;
-  skill_show_calls_24h: number;
   outcome_calls_24h: number;
   unique_agents: number;
   last_broadcast_at: string;
@@ -1898,44 +1897,38 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
     </div>`;
   }
 
-  // v0.25.2: 4-state classification (was 3). Distinguishing "in-progress"
-  // from "broken" matters: a freshly-started session may have skill_show
-  // calls (agents loaded skills) but no outcomes yet (MERGE hasn't fired).
-  // Calling that "BROKEN" panicked the operator during real-project use.
+  // v0.53.0: two states, because only two are observable.
   //
-  //   broken    — broadcasts but no skill_show: agents not loading skills
-  //   partial   — outcomes but no skill_show in 7d: scoring without loading
-  //   inProgress— skill_show but no outcomes in 24h: agents loaded, working
-  //   healthy   — skill_runs + skill_show both > 0
-  const broken     = rows.filter((r) => r.skill_show_calls_24h === 0 && r.skill_runs_24h === 0);
-  const partial    = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h === 0);
-  const inProgress = rows.filter((r) => r.skill_runs_24h === 0 && r.skill_show_calls_24h > 0);
-  const healthy    = rows.filter((r) => r.skill_runs_24h > 0 && r.skill_show_calls_24h > 0);
+  // The previous four leaned on a skill_show count to say whether agents had LOADED
+  // a skill before scoring it. zc_skill_show was removed on 2026-07-30 (16dfd59):
+  // skills live in ~/.claude/skills and agents Read SKILL.md directly, which SC
+  // cannot see. So that counter was pinned at 0 — the two states requiring it
+  // (inProgress, healthy) became unreachable, every project sorted into "broken" or
+  // "partial", and the panel spent two weeks telling the operator that agents were
+  // "scoring skills they never read" on the basis of a tool that no longer exists.
+  // A detector that cannot observe its subject is deleted, not re-worded.
+  //
+  //   silent    — broadcasting but no outcomes recorded in 24h (real, actionable)
+  //   recording — outcomes landing (working as intended)
+  const silent    = rows.filter((r) => r.skill_runs_24h === 0);
+  const recording = rows.filter((r) => r.skill_runs_24h > 0);
 
-  const renderProjectRow = (r: SkillHealthRow, severity: "bad" | "warn" | "info" | "ok"): string => {
+  const renderProjectRow = (r: SkillHealthRow, severity: "warn" | "ok"): string => {
     const name = r.project_name ?? r.project_hash.slice(0, 12);
-    const icon = severity === "bad" ? "✗" : severity === "warn" ? "⚠" : severity === "info" ? "⏳" : "✓";
-    const detail = severity === "bad"
-      ? `${r.broadcasts_24h} broadcasts, 0 zc_skill_show calls — agents aren't loading skills (skill enforcement lever may not be in their system prompts)`
-      : severity === "warn"
-        ? `${r.skill_runs_24h} outcomes recorded but 0 zc_skill_show calls in last 7d — scoring without loading`
-        : severity === "info"
-          ? `${r.broadcasts_24h} broadcasts · ${r.skill_show_calls_24h} skill_show — task in progress, MERGE pending (outcome will land at MERGE)`
-          : `${r.skill_runs_24h} skill_runs · ${r.skill_show_calls_24h} skill_show · ${r.unique_agents} agent(s)`;
-    // v0.25.3: per-project "which skills did agents use today" rollup
-    // (operator-asked feature — was only available by drilling into each
-    // skill's Recent runs button). Inline expand reveals a table showing
-    // skill_id × calls × outcomes × agents × latest score for the project.
-    const showSkillsBtn = (severity === "info" || severity === "ok")
+    const detail = severity === "warn"
+      ? `${r.broadcasts_24h} broadcasts, no skill outcomes recorded in 24h — agents are working but not reporting at MERGE`
+      : `${r.skill_runs_24h} skill outcome${r.skill_runs_24h === 1 ? "" : "s"} · ${r.unique_agents} agent(s)`;
+    // v0.25.3: per-project "which skills did agents use today" rollup.
+    const showSkillsBtn = severity === "ok"
       ? `<button class="proj-skills-btn"
-                title="Show which skills agents on this project used in the last 24h"
+                title="Show which skills agents on this project recorded outcomes for in the last 24h"
                 hx-get="/dashboard/projects/${encodeURIComponent(r.project_hash)}/skills-used"
                 hx-target="next .proj-skills-zone" hx-swap="innerHTML">
           📋 Skills used
         </button>`
       : "";
     return `<div class="skill-health-row skill-health-${severity}">
-      <span class="skill-health-icon">${icon}</span>
+      <span class="skill-health-icon">${severity === "warn" ? "⚠" : "✓"}</span>
       <span class="skill-health-name" title="project_hash=${r.project_hash}">${escapeHtml(name)}</span>
       <span class="skill-health-detail">${escapeHtml(detail)}</span>
       ${showSkillsBtn}
@@ -1945,44 +1938,20 @@ export function renderSkillHealthFragment(rows: SkillHealthRow[]): string {
 
   const lines: string[] = [];
 
-  // Banner header — pick the most-severe applicable state.
-  if (broken.length > 0) {
-    lines.push(`<div class="skill-health-banner skill-health-banner-bad">
-      <strong>${broken.length} project${broken.length === 1 ? "" : "s"} broadcasting without loading skills</strong>
-      — agents aren't calling <code>zc_skill_show</code>. Likely fix: respawn
-      agents so they pick up the latest spawn-agent.ps1 with the skill
-      enforcement levers in their system prompts. See SecureContext v0.22.5+.
-    </div>`);
-  } else if (partial.length > 0) {
+  if (silent.length > 0) {
     lines.push(`<div class="skill-health-banner skill-health-banner-warn">
-      <strong>${partial.length} project${partial.length === 1 ? "" : "s"} recording outcomes without loading skill bodies</strong>
-      — agents are scoring skills they never read. The pre-task
-      <code>zc_skill_show</code> mandate may not be firing.
+      <strong>${silent.length} active project${silent.length === 1 ? "" : "s"} recorded no skill outcomes in 24h</strong>
+      — agents are broadcasting but not calling <code>zc_record_skill_outcome</code>
+      at MERGE, so skill scoring gets no signal from their work.
     </div>`);
-  } else if (inProgress.length > 0 && healthy.length === 0) {
-    lines.push(`<div class="skill-health-banner skill-health-banner-info">
-      <strong>${inProgress.length} project${inProgress.length === 1 ? "" : "s"} with task in progress</strong>
-      — agents have loaded skills, MERGE pending. Outcomes will land when the
-      developer broadcasts MERGE.
-    </div>`);
-  } else if (healthy.length > 0 && inProgress.length === 0) {
+  } else {
     lines.push(`<div class="skill-health-banner skill-health-banner-ok">
-      <strong>All ${healthy.length} active project${healthy.length === 1 ? " is" : "s are"} healthy.</strong>
-      Each is loading skills before work and recording outcomes at MERGE.
-    </div>`);
-  } else if (healthy.length > 0 || inProgress.length > 0) {
-    const total = healthy.length + inProgress.length;
-    lines.push(`<div class="skill-health-banner skill-health-banner-ok">
-      <strong>All ${total} active project${total === 1 ? " is" : "s are"} healthy.</strong>
-      ${healthy.length} have completed task cycles; ${inProgress.length} have a task in progress.
+      <strong>All ${recording.length} active project${recording.length === 1 ? " is" : "s are"} recording skill outcomes.</strong>
     </div>`);
   }
 
-  // Per-project detail rows — most severe first.
-  for (const r of broken)     lines.push(renderProjectRow(r, "bad"));
-  for (const r of partial)    lines.push(renderProjectRow(r, "warn"));
-  for (const r of inProgress) lines.push(renderProjectRow(r, "info"));
-  for (const r of healthy)    lines.push(renderProjectRow(r, "ok"));
+  for (const r of silent)    lines.push(renderProjectRow(r, "warn"));
+  for (const r of recording) lines.push(renderProjectRow(r, "ok"));
 
   return lines.join("\n");
 }
@@ -2391,7 +2360,6 @@ export function renderNewSkillForm(
 
 export interface ProjectSkillUsageRow {
   skill_id:    string;
-  shows:       number;
   outcomes:    number;
   runs_24h:    number;
   avg_score:   number | null;
@@ -2415,7 +2383,6 @@ export function renderProjectSkillsUsed(projectHash: string, rows: ProjectSkillU
     return `
       <tr>
         <td class="mono small"><code>${escapeHtml(r.skill_id)}</code></td>
-        <td>${r.shows}</td>
         <td>${r.outcomes}</td>
         <td>${score}</td>
         <td>${avg}</td>
@@ -2424,17 +2391,16 @@ export function renderProjectSkillsUsed(projectHash: string, rows: ProjectSkillU
       </tr>
     `;
   }).join("");
-  const totalShows = rows.reduce((s, r) => s + r.shows, 0);
   const totalOutcomes = rows.reduce((s, r) => s + r.outcomes, 0);
   return `
     <div class="proj-skills-table">
       <div class="proj-skills-header">
         <strong>Skills used in last 24h</strong>
-        <span class="proj-skills-meta">${rows.length} distinct skill${rows.length === 1 ? "" : "s"} · ${totalShows} loads · ${totalOutcomes} outcomes</span>
+        <span class="proj-skills-meta">${rows.length} distinct skill${rows.length === 1 ? "" : "s"} · ${totalOutcomes} outcome${totalOutcomes === 1 ? "" : "s"}</span>
       </div>
       <table class="runs-table">
         <thead><tr>
-          <th>Skill</th><th>Loads</th><th>Outcomes</th><th>Latest score</th><th>Avg score</th><th>Used by</th><th>Last call</th>
+          <th>Skill</th><th>Outcomes</th><th>Latest score</th><th>Avg score</th><th>Used by</th><th>Last call</th>
         </tr></thead>
         <tbody>${trs}</tbody>
       </table>

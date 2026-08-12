@@ -282,3 +282,30 @@ describe("per-branch numeric floors (S1 calibrated)", () => {
     expect(detectConflict(a, b, 0.90)?.reason).toBe("numeric_conflict");
   });
 });
+
+describe("run-report tally filter (v0.53.0)", () => {
+  // The exact live pair that flooded triage: two DIFFERENT suites, same report template.
+  const memRun = { key: "e2e_result_MEMORY", kind: "fact", created_at: daysAgo(8),
+    value: 'E2E_MEMORY RESULT (developer, 2026-08-04) — 8 PASS / 0 FAIL. [PASS] zc_remember — "Remembered under agent_id=developer"' };
+  const secRun = { key: "e2e_result_SECURITY", kind: "fact", created_at: daysAgo(8),
+    value: "E2E_SECURITY RESULT (developer, 2026-08-04) — 3 PASS / 0 FAIL. [PASS] zc_issue_token — token issued, prefix=zcst." };
+
+  it("two run reports never conflict, at any similarity", () => {
+    expect(detectConflict(memRun, secRun, 0.99)).toBeNull();
+  });
+  it("a run report does not conflict with a defect note it merely resembles", () => {
+    const defect = { key: "R4_RECALL_MISSING_SECTIONS", kind: "fact", created_at: daysAgo(14),
+      value: "ROUND-4 DEFECT (confirmed 2026-07-29): zc_recall_context dropped its Session Events section" };
+    expect(detectConflict(defect, memRun, 0.83)).toBeNull();
+  });
+  it("recognises the tally, not the key spelling", () => {
+    expect(isCoordinationMarker("anything", "suite finished: 12 passed")).toBe(true);
+    expect(isCoordinationMarker("anything", "nightly run had 4 failures")).toBe(true);
+  });
+  it("does NOT swallow ordinary numeric claims", () => {
+    expect(isCoordinationMarker("k", "Gateway request timeout is 30 seconds")).toBe(false);
+    const a = { key: "r1", value: "Order webhook retry limit is 3 attempts", kind: "fact", created_at: daysAgo(9) };
+    const b = { key: "r2", value: "Order webhook retry limit is 8 attempts", kind: "fact", created_at: daysAgo(1) };
+    expect(detectConflict(a, b, 0.90)?.reason).toBe("numeric_conflict");
+  });
+});

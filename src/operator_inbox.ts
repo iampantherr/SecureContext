@@ -89,6 +89,25 @@ export async function answerInboxEntry(id: number, answer: string, answeredBy = 
   });
 }
 
+/**
+ * pending → dismissed. The `dismiss` transition was in the state machine above from
+ * the start but had no implementation, so the only way out of `pending` was to type an
+ * answer here. Every question answered in the agent's terminal instead — which is how
+ * an operator watching the run actually answers — therefore stayed `pending` forever.
+ * Observed live: two questions from 2026-08-05 still listed as "awaiting YOUR answer"
+ * a week after both were answered, which is enough to make the panel unreadable.
+ */
+export async function dismissInboxEntry(id: number, note = "answered elsewhere"): Promise<boolean> {
+  return await withClient(async (c) => {
+    const r = await c.query(
+      `UPDATE operator_inbox_pg SET status = 'dismissed', answer = $2, answered_at = now(), answered_by = 'operator-dismissed'
+       WHERE id = $1 AND status = 'pending' RETURNING id`,
+      [id, note],
+    );
+    return r.rows.length > 0;
+  });
+}
+
 /** answered → delivered. Returns false if the entry is missing or not answered. */
 export async function markInboxDelivered(id: number): Promise<boolean> {
   return await withClient(async (c) => {
