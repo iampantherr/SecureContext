@@ -198,8 +198,15 @@ export class PostgresStore implements Store {
     // lit…"). A constraint truncated before it says what to DO is decoration.
     // Non-pinned facts keep the 500-char clamp byte-for-byte, and the kind is
     // still classified from the 500-char text so classification is unchanged.
+    // The pinned path must clamp WITH THE MARKER, exactly as the 500 path does.
+    // Found by a live agent test 2026-08-12: a 2504-char constraint lost 505
+    // characters with no TRUNCATED marker, so effect-verification reported the
+    // write as FAILED — correctly, because silent loss is indistinguishable from
+    // a broken write. v0.51.2 raised the pinned budget and dropped this path off
+    // clampWithMarker at the same time; the longer budget was the point, losing
+    // the marker was not.
     const safeValue = isPinnedKind({ key: safeKey, importance: safeImp, kind: safeKind })
-      ? sanitize(value, Math.max(500, Config.PINNED_VALUE_MAX))
+      ? clampWithMarker(sanitize(value, 100_000), Math.max(500, Config.PINNED_VALUE_MAX), "fact value")
       : clamped500;
     const safeConf = (typeof epi.confidence === "number" && isFinite(epi.confidence)) ? Math.max(0, Math.min(1, epi.confidence)) : null;
     const safeRes  = epi.resolution && RES.includes(epi.resolution) ? epi.resolution : null;
