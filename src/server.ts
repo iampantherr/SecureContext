@@ -319,7 +319,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         key:        { type: "string", description: "Short identifier (max 100 chars)" },
-        value:      { type: "string", description: "The fact to remember. Max 500 chars for ordinary facts; kind:'constraint' and kind:'antipattern' may use up to 1200, so a standing rule can carry its 'how to apply' clause instead of being cut mid-sentence." },
+        value:      { type: "string", description: "The fact to remember. LIMITS, and note that oversize values are TRUNCATED, never rejected — the overflow is lost: 500 chars for ordinary facts; 2000 for the pinned kinds (kind:'constraint', kind:'antipattern'), so a standing rule can carry its 'how to apply' clause instead of being cut mid-sentence. Writing a long fact WITHOUT a pinned kind silently costs you everything past 500. If the fact genuinely needs more room, either use a pinned kind or split it across linked keys (foo, foo_pt2) and reference them with [[foo_pt2]]." },
         scope:      { type: "string", enum: ["project", "global"], description: "'global' shares a constraint/antipattern with EVERY project. Use for lessons about how code fails ('a stub returning a benign default hides a missing implementation'), not for anything repo-specific. Ignored for non-pinned kinds." },
         importance: { type: "integer", minimum: 1, maximum: 5, description: "1=ephemeral, 3=normal, 5=critical" },
         agent_id:   { type: "string", description: "Agent namespace for parallel use (default: 'default')" },
