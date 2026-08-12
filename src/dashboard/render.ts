@@ -776,19 +776,36 @@ export function renderDashboardHtml(): string {
      is typing an answer (focus guard — same pattern as the mutations panel). -->
 <div class="panel">
   <h2>Operator inbox <span class="sub">orchestrator questions awaiting YOUR answer — delivered back to the agent terminal</span></h2>
-  <!-- Poll guard (v0.50.0, hardened after a live wipe): pause the refresh not
-       only while an inbox field has FOCUS but also while ANY answer textarea
-       has TEXT — focus alone leaves a wipe window between typing and clicking
-       Send (the innerHTML swap resets the form and the re-rendered button
-       shifts position under the click). Same failure class the mutations
-       panel fixed in v0.20.1; value-guard instead of details[open] because
-       inbox entries render expanded by default. -->
+  <!-- Poll guard. The refresh must not replace the panel while an answer is being
+       written: the innerHTML swap resets the form and moves the Send button out from
+       under the click.
+
+       v0.50.0 expressed this as an event filter on the polling trigger
+       ("every 10s[ ...no field focused and no textarea has text... ]"). htmx does not
+       apply event filters to polling triggers, so that condition was never consulted
+       and the panel was replaced on schedule regardless — a guard that reads correctly
+       and does nothing. Measured live 2026-08-12: text sat in an answer box, in view,
+       and was gone 26 seconds later. That loses a long answer with no recovery, and is
+       the likely reason answers were being given in the agent's terminal instead.
+
+       v0.53.0 moves it to htmx:beforeSwap, which is also the right hook rather than
+       merely a working filter: it decides at the moment of replacement, so a request
+       already in flight when the operator starts typing can no longer land on them. -->
   <div id="operator-inbox"
        hx-get="/dashboard/operator-inbox"
-       hx-trigger="load, every 10s[!document.querySelector('#operator-inbox textarea:focus, #operator-inbox input:focus, #operator-inbox button:focus') && ![...document.querySelectorAll('#operator-inbox textarea')].some(t => t.value.trim())]"
+       hx-trigger="load, every 10s"
        hx-target="this" hx-swap="innerHTML">
     Loading operator inbox…
   </div>
+  <script>
+    document.body.addEventListener("htmx:beforeSwap", function (e) {
+      var box = document.getElementById("operator-inbox");
+      if (!box || e.target !== box) return;
+      var busy = Array.prototype.some.call(box.querySelectorAll("textarea"),
+        function (t) { return t.value.trim() !== "" || t === document.activeElement; });
+      if (busy) e.detail.shouldSwap = false;
+    });
+  </script>
 </div>
 </section>
 

@@ -1167,23 +1167,47 @@ export async function createApiServer(storeOverride?: Store) {
               ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS value_a,
              (SELECT value FROM working_memory w WHERE w.project_hash = mc.project_hash AND w.key = mc.key_b
                 AND (w.agent_id = mc.agent_id OR w.agent_id = 'default')
-              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS value_b
+              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS value_b,
+             -- v0.53.0: kind feeds the re-check below (a prescriptive rule never conflicts)
+             (SELECT kind FROM working_memory w WHERE w.project_hash = mc.project_hash AND w.key = mc.key_a
+                AND (w.agent_id = mc.agent_id OR w.agent_id = 'default')
+              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS kind_a,
+             (SELECT kind FROM working_memory w WHERE w.project_hash = mc.project_hash AND w.key = mc.key_b
+                AND (w.agent_id = mc.agent_id OR w.agent_id = 'default')
+              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS kind_b,
+             -- resolution_status too: without it the resolution_conflict branch is
+             -- unreachable in the re-check, and a falsified-vs-live clash — the one
+             -- reason that is always a human judgment call — gets dismissed as stale.
+             (SELECT resolution_status FROM working_memory w WHERE w.project_hash = mc.project_hash AND w.key = mc.key_a
+                AND (w.agent_id = mc.agent_id OR w.agent_id = 'default')
+              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS res_a,
+             (SELECT resolution_status FROM working_memory w WHERE w.project_hash = mc.project_hash AND w.key = mc.key_b
+                AND (w.agent_id = mc.agent_id OR w.agent_id = 'default')
+              ORDER BY (w.agent_id = mc.agent_id) DESC LIMIT 1) AS res_b
            FROM memory_contradictions_pg mc
            WHERE mc.status = 'open'
            ORDER BY mc.surfaced_at DESC LIMIT 100`,
         );
         return res.rows;
       });
-      // v0.53.0 — retire rows the CURRENT rules would never have flagged. Each filter
+      // v0.53.0 — retire rows the CURRENT detector would no longer flag. Each filter
       // added to contradiction_heuristics stops new false positives but leaves the ones
       // already in the table, so the queue only ever grows and the operator stops
       // reading it (live: 155 open, 84% run reports). Re-checking on read drains the
-      // backlog against the one shared rule — no migration, no duplicated predicate in
-      // SQL, and 'dismissed' is reversible from the panel like any other review.
-      const { isCoordinationMarker } = await import("./contradiction_heuristics.js");
-      const stale = rows.filter((r) =>
-        isCoordinationMarker(String(r.key_a), String(r.value_a ?? "")) ||
-        isCoordinationMarker(String(r.key_b), String(r.value_b ?? "")));
+      // backlog; 'dismissed' is reversible from the panel like any other review.
+      //
+      // It re-runs detectConflict itself rather than re-testing a chosen subset of its
+      // filters — the first cut of this checked only the coordination-marker half and
+      // silently kept flagging the pairs the rule-vs-rule guard had just excluded. The
+      // stored similarity is the same number the scan used, so this asks exactly the
+      // right question: would today's detector still flag this pair?
+      const { detectConflict } = await import("./contradiction_heuristics.js");
+      const side = (r: Record<string, unknown>, s: "a" | "b") => ({
+        key: String(r[`key_${s}`]), value: String(r[`value_${s}`] ?? ""),
+        kind: r[`kind_${s}`] == null ? null : String(r[`kind_${s}`]),
+        resolution_status: r[`res_${s}`] == null ? null : String(r[`res_${s}`]),
+      });
+      const stale = rows.filter((r) => !detectConflict(side(r, "a"), side(r, "b"), Number(r.similarity)));
       if (stale.length > 0) {
         await withClient(async (c) => {
           await c.query(

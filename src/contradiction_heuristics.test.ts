@@ -309,3 +309,30 @@ describe("run-report tally filter (v0.53.0)", () => {
     expect(detectConflict(a, b, 0.90)?.reason).toBe("numeric_conflict");
   });
 });
+
+describe("prescriptive rules never conflict or supersede (v0.53.0)", () => {
+  // The exact live burst: one antipattern retired five ★5 facts at sim 0.70-0.75.
+  const antipattern = { key: "AP_SILENT_TRUNCATION_ON_THE_PRIVILEGED_PATH", kind: "antipattern", created_at: daysAgo(0),
+    value: "ANTIPATTERN — when you give one code path a BIGGER budget, check it still runs through the SAME wrapper. The pinned path dropped the marker, so an over-budget fact lost its tail silently." };
+  const observation = { key: "FinanceAI_v11_live_switch_2026_08_12", kind: "fact", created_at: daysAgo(3),
+    value: "2026-08-12 SWITCH EXECUTED (operator-approved): v8 auto-execution killed, 8 orphaned trades reconciled, v11 live layer built." };
+
+  it("a rule never conflicts with an unrelated observation", () => {
+    expect(detectConflict(antipattern, observation, 0.75)).toBeNull();
+    expect(detectConflict(observation, antipattern, 0.99)).toBeNull();
+  });
+  it("and therefore can never auto-retire it", () => {
+    // autoResolveVictim only runs on a flagged pair; with no flag there is no victim.
+    expect(detectConflict(antipattern, observation, 0.75)).toBeNull();
+  });
+  it("two distinct named rules are not a contradiction", () => {
+    const other = { key: "AP_TRUNCATION_WARNING_WITHOUT_REMEDY", kind: "antipattern", created_at: daysAgo(0),
+      value: "ANTIPATTERN — a warning that reports damage but not remedy gets ignored and the mistake repeats." };
+    expect(detectConflict(antipattern, other, 0.82)).toBeNull();
+  });
+  it("ordinary facts still conflict normally", () => {
+    const a = { key: "r1", value: "Order webhook retry limit is 3 attempts", kind: "fact", created_at: daysAgo(9) };
+    const b = { key: "r2", value: "Order webhook retry limit is 8 attempts", kind: "fact", created_at: daysAgo(1) };
+    expect(detectConflict(a, b, 0.90)?.reason).toBe("numeric_conflict");
+  });
+});

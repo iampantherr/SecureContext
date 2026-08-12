@@ -222,11 +222,37 @@ export function preferLatestAdjust<F extends FactLite>(
   return adjusted;
 }
 
+/**
+ * v0.53.0 — PRESCRIPTIVE RULES are not state claims, and must never take part in a
+ * conflict. A `constraint`/`antipattern` says what one SHOULD DO; an ordinary fact says
+ * what IS. The polarity heuristic cannot tell them apart, and a rule's body is made of
+ * exactly the vocabulary it keys on — an antipattern about deletion necessarily says
+ * "removed", "dropped", "silently discarded". So every long rule looked like a fresh
+ * negation of whatever it embedded near.
+ *
+ * Detection noise was the small half. The damaging half: auto-supersession only runs on
+ * a flagged pair, and it retires the side WITHOUT the reversal verb — always the plain
+ * fact. Measured on the live console 2026-08-12: ONE antipattern write retired FIVE ★5
+ * facts in a single burst at sim 0.70–0.75, among them a live trading-system switch
+ * record belonging to an unrelated project. A rule does not supersede an observation;
+ * it generalises from one. The more rules the system encourages you to write, the more
+ * memory it was quietly destroying.
+ *
+ * Kill-switch: ZC_CONTRADICTION_RULES_ARE_CLAIMS=1 restores pre-v0.53.0 behaviour.
+ */
+const PRESCRIPTIVE_KINDS = new Set(["constraint", "antipattern"]);
+const RULES_ARE_CLAIMS = process.env["ZC_CONTRADICTION_RULES_ARE_CLAIMS"] === "1";
+export function isPrescriptiveRule(f: FactLite): boolean {
+  return !RULES_ARE_CLAIMS && PRESCRIPTIVE_KINDS.has(String(f.kind ?? ""));
+}
+
 /** Returns the conflict signal for a (already-similar) pair, or null if there's no conflict.
  *  `sim` (optional): the pair's cosine similarity — enables the numeric_conflict signal. */
 export function detectConflict(a: FactLite, b: FactLite, sim?: number): { reason: string; detail: string } | null {
   // v0.49.0 — operational/coordination markers are STATE, not claims: never a conflict.
   if (!isCheckableClaim(a) || !isCheckableClaim(b)) return null;
+  // v0.53.0 — a prescription is not a claim about the world. See above.
+  if (isPrescriptiveRule(a) || isPrescriptiveRule(b)) return null;
   const aFalsified = a.resolution_status === "resolved_incorrect";
   const bFalsified = b.resolution_status === "resolved_incorrect";
   const aLive = !a.resolution_status || a.resolution_status === "open";
