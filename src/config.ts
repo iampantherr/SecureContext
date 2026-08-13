@@ -274,9 +274,24 @@ export const Config = {
   // Temporal fact retirement + contradiction auto-resolution. When the scan flags a
   // pair where one fact CLEARLY supersedes the other (strictly newer + carries an
   // action-reversal verb the older lacks), the older fact is retired (valid_to set,
-  // archived to the KB, dropped from recall) automatically — with a dashboard Undo.
-  // Ambiguous pairs still go to operator triage. AUTO_RESOLVE=0 ⇒ flag-only (v0.36 behaviour).
-  AUTO_RESOLVE:        (env["ZC_AUTO_RESOLVE"] ?? "1") !== "0",
+  // archived to the KB, dropped from recall). Ambiguous pairs go to operator triage.
+  //
+  // v0.53.0 — DEFAULT FLIPPED TO OFF, on measurement. Every auto-retirement on the
+  // live corpus was audited by hand: 50 of 50 were wrong. Not "noisy" — wrong. A note
+  // recording where a file lives (`DECISIONS_LOG_location`) retired SIX unrelated ★5
+  // facts, including `P0_supabase_service_role_leak`, the live-credential finding that
+  // was the project's most important open item. Others retired a standing operator
+  // directive and three confirmed security findings, each "superseded by" a fact about
+  // an unrelated subject.
+  //
+  // The heuristic — newer + an update-marker word + cosine ≥ 0.70 — cannot establish
+  // that two facts are ABOUT THE SAME THING, and agent-written notes share enough
+  // boilerplate to clear that bar constantly. An Undo button does not redeem it: the
+  // loss is silent, so nobody knows to press Undo. Precision has to be demonstrated
+  // before a feature is allowed to delete a ★5 fact unattended; on this corpus it is
+  // zero. Flags still surface for operator triage, which is the part that works.
+  // ZC_AUTO_RESOLVE=1 re-enables it for anyone who has measured it on their own data.
+  AUTO_RESOLVE:        (env["ZC_AUTO_RESOLVE"] ?? "0") !== "0",
   RETIRE_PURGE_DAYS:   parseInt(env["ZC_RETIRE_PURGE_DAYS"] ?? "30", 10),
   CONTRA_PRUNE_DAYS:   parseInt(env["ZC_CONTRA_PRUNE_DAYS"] ?? "30", 10),
 
