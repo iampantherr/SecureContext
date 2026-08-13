@@ -515,7 +515,8 @@ export async function createApiServer(storeOverride?: Store) {
         html += `<details open class="inbox-q" style="margin-bottom:10px;border:1px solid var(--border,#333);border-radius:6px;padding:8px">
   <summary><strong>#${Number(q.id)}</strong> · ${projName(String(q.project_path))} · from <code>${escapeHtml(String(q.from_agent))}</code> · ${escapeHtml(new Date(String(q.created_at)).toLocaleString())}${age}</summary>
   <p style="white-space:pre-wrap;margin:8px 0">${escapeHtml(String(q.question))}</p>
-  <form hx-post="/dashboard/operator-inbox/answer" hx-target="find .inbox-result" hx-swap="innerHTML">
+  <form hx-post="/dashboard/operator-inbox/answer" hx-target="find .inbox-result" hx-swap="innerHTML"
+        hx-on:htmx:after-request="if (event.detail.successful) this.reset()">
     <input type="hidden" name="id" value="${Number(q.id)}">
     <textarea name="answer" rows="3" style="width:100%" placeholder="Type your answer — it will be delivered into the orchestrator's terminal by the dispatcher" required></textarea>
     <button type="submit" style="margin-top:6px">Send answer to orchestrator</button>
