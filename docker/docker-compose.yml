@@ -2,7 +2,10 @@ name: securecontext
 
 # ─── Networks ────────────────────────────────────────────────────────────────
 # All services communicate on the internal 'sc-net' bridge.
-# Only sc-api and sc-nginx expose ports to the host.
+# Host-published ports bind to 127.0.0.1 by default (issue #4: Docker's default
+# publish is 0.0.0.0, which put the memory DB, the memory API, and an
+# unauthenticated inference endpoint on every network the host joins).
+# Override SC_BIND_HOST=0.0.0.0 only for deliberate LAN exposure.
 networks:
   sc-net:
     name: securecontext-net
@@ -40,7 +43,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"  # exposed for admin access — bind to 127.0.0.1 in production
+      - "${SC_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"  # admin access, loopback by default
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scuser} -d ${POSTGRES_DB:-securecontext}"]
       interval: 10s
@@ -149,7 +152,7 @@ services:
       # secret so historical container-signed rows keep verifying.
       - ${USERPROFILE:-${HOME}}/.claude/zc-ctx/.machine_secret_pre_unification:/run/secrets/host_machine_secret:ro
     ports:
-      - "${SC_API_PORT:-3099}:3099"  # Direct access (dev) — use sc-nginx in production
+      - "${SC_BIND_HOST:-127.0.0.1}:${SC_API_PORT:-3099}:3099"  # direct access (dev), loopback by default — use sc-nginx in production
     depends_on:
       sc-postgres:
         condition: service_healthy
@@ -180,7 +183,7 @@ services:
     container_name: securecontext-ollama
     networks: [sc-net]
     ports:
-      - "${OLLAMA_PORT:-11434}:11434"
+      - "${SC_BIND_HOST:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"  # unauthenticated inference — loopback by default
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped   # auto-restarts when Docker daemon starts (on system reboot)

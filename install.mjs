@@ -19,7 +19,7 @@
  *      reading local SQLite files directly.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir, platform } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -143,13 +143,51 @@ if (MODE_CLI || UNINSTALL) {
     const modeLabel = REMOTE_URL ? ` (remote: ${REMOTE_URL})` : " (local SQLite)";
     log(`Claude Code CLI: added zc-ctx to ${settingsPath}${modeLabel}`);
   } else {
+    let changed = false;
     if (settings.mcpServers?.["zc-ctx"]) {
       delete settings.mcpServers["zc-ctx"];
-      writeJson(settingsPath, settings);
+      changed = true;
       log(`Removed zc-ctx from ${settingsPath}`);
     } else {
       info(`zc-ctx not found in ${settingsPath} — nothing to remove`);
     }
+
+    // Issue #3 — uninstall must undo EVERYTHING init.mjs wired, not just the MCP
+    // entry. Before this, 18 hook scripts stayed in ~/.claude/hooks and their 5
+    // settings.hooks registrations kept executing on every Read/Edit/Bash after
+    // the user believed SecureContext was gone. The removal is scoped to OUR
+    // scripts by exact filename (drawn from this repo's hooks/ directory), so a
+    // user's own hooks and other tools' hooks are untouched.
+    const ourHookFiles = new Set();
+    try {
+      for (const f of readdirSync(join(__dirname, "hooks")).filter((f) => f.endsWith(".mjs"))) ourHookFiles.add(f);
+    } catch { /* hooks dir absent in this checkout — fall through with empty set */ }
+
+    if (settings.hooks && ourHookFiles.size > 0) {
+      for (const event of Object.keys(settings.hooks)) {
+        const before = settings.hooks[event].length;
+        settings.hooks[event] = settings.hooks[event].filter((entry) => {
+          const cmds = (entry?.hooks ?? []).map((h) => h?.command ?? "");
+          return !cmds.some((c) => [...ourHookFiles].some((f) => c.includes(f)));
+        });
+        const removed = before - settings.hooks[event].length;
+        if (removed > 0) { changed = true; log(`Deregistered ${removed} SecureContext hook(s) from ${event}`); }
+        if (settings.hooks[event].length === 0) delete settings.hooks[event];
+      }
+      if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
+    }
+    if (changed) writeJson(settingsPath, settings);
+
+    // Delete the copied hook scripts themselves — ours only, by exact name.
+    const hooksDst = join(homedir(), ".claude", "hooks");
+    let deleted = 0;
+    for (const f of ourHookFiles) {
+      try {
+        const p = join(hooksDst, f);
+        if (existsSync(p)) { unlinkSync(p); deleted++; }
+      } catch (e) { info(`Could not delete ${f}: ${e.message}`); }
+    }
+    if (deleted > 0) log(`Deleted ${deleted} SecureContext hook script(s) from ${hooksDst}`);
   }
 }
 
