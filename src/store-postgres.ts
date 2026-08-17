@@ -2559,7 +2559,13 @@ export class PostgresStore implements Store {
       required_skills: string | null;
       acceptance_criteria: string | null;
     }>(
-      `SELECT id, type, agent_id, task, summary, files, state, depends_on, reason,
+      // v0.53.0 — sender_agent_id joins the poll payload. The column existed since
+      // migration 47 and replay() already returned it, but the dispatcher's poll goes
+      // through HERE — so consumers kept disambiguating direction from agent_id alone,
+      // which is the sender on STATUS and the target on ASSIGN. Cost, measured live: a
+      // worker's STATUS(answer) was routed back to the worker and the orchestrator
+      // deadlocked ~2h waiting for an answer that had already been delivered.
+      `SELECT id, type, agent_id, sender_agent_id, task, summary, files, state, depends_on, reason,
               importance, created_at,
               file_ownership_exclusive, file_ownership_read_only,
               task_dependencies, required_skills, acceptance_criteria,
