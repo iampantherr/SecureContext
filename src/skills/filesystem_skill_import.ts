@@ -702,10 +702,15 @@ export async function importFilesystemSkills(opts: {
         // After upsertSkill writes the row, patch in skill_dir + script_hmacs
         // (these are Step-2-specific columns not handled by upsertSkill yet)
         await withClient(async (c) => {
+          // Passing the scan IS the re-admission: clear any stale quarantine
+          // flag, or a skill restored from quarantine stays blocked by the
+          // HMAC verify hook forever even though this import just admitted it.
           await c.query(
             `UPDATE skills_pg
                 SET skill_dir = $1,
-                    script_hmacs = $2::jsonb
+                    script_hmacs = $2::jsonb,
+                    quarantined = FALSE,
+                    quarantine_reason = NULL
               WHERE skill_id = $3`,
             [skillDir, scriptHmacsJson, skillId],
           );
