@@ -79,7 +79,12 @@ function scanPython(scriptPath: string): ScriptScanResult {
       errors: ["py_ast_walker.py bundled helper not found on disk"],
     };
   }
-  const r = spawnSync("python3", [walker, scriptPath], { encoding: "utf8", timeout: 30_000 });
+  // On Windows "python3" is the Microsoft Store stub (exits 49 without running
+  // anything), which made every walker call fail and quarantined all 25
+  // script-bearing skills on 2026-08-04. Same platform switch as
+  // preview-admission.py uses.
+  const python = process.platform === "win32" ? "python" : "python3";
+  const r = spawnSync(python, [walker, scriptPath], { encoding: "utf8", timeout: 30_000 });
   if (r.status !== 0 && r.status !== null) {
     return {
       passed: false,
