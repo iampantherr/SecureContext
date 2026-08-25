@@ -9,6 +9,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-green)](package.json)
 
+> **Note for security scanners:** `security-tests/` intentionally contains prompt-injection and tool-abuse payloads — they are red-team fixtures that verify SecureContext blocks those attacks, not live threats.
+
 ---
 
 ## What is SecureContext?
