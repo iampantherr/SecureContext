@@ -799,8 +799,8 @@ export function retireFact(
   ensureAgentIdColumn(db);
   ensureEpistemologyColumns(db);
   const row = db.prepare(
-    "SELECT value, kind FROM working_memory WHERE key = ? AND agent_id = ? AND valid_to IS NULL"
-  ).get(safeKey, safeAgent) as { value: string; kind: string | null } | undefined;
+    "SELECT value, kind, importance FROM working_memory WHERE key = ? AND agent_id = ? AND valid_to IS NULL"
+  ).get(safeKey, safeAgent) as { value: string; kind: string | null; importance: number } | undefined;
   if (!row) { db.close(); return false; }
 
   // v0.51.2 — automatic retirement can never remove a pinned kind. Mirrors the PG
@@ -809,6 +809,12 @@ export function retireFact(
   // `last_session_summary`, because the adjudicator picks survivors by recency).
   const AUTOMATIC_REASONS = new Set(["superseded", "consolidated", "expired"]);
   if (AUTOMATIC_REASONS.has(reason) && isPinnedKind({ key: safeKey, importance: 0, kind: row.kind })) {
+    db.close();
+    return false;
+  }
+  // v0.53.1 — ★5 immunity, mirroring the PG guard (parity rule: no behaviour may
+  // differ between backends). See store-postgres.ts for the incident record.
+  if (AUTOMATIC_REASONS.has(reason) && (row.importance ?? 0) >= 5 && process.env["ZC_STAR5_RETIRE"] !== "1") {
     db.close();
     return false;
   }

@@ -116,6 +116,17 @@ export function isCheckableClaim(f: FactLite): boolean { return !isCoordinationM
  * makes auto-application acceptable here at all.
  */
 export function autoResolveVictim(a: FactLite, b: FactLite, reason: string): string | null {
+  // v0.53.1 — the victim-picker enforces its own preconditions rather than
+  // trusting every caller to have flagged correctly: a prescriptive rule is
+  // never a party to supersession (its body is made of reversal vocabulary),
+  // and a polarity flip without subject overlap is two unrelated facts.
+  // Defense in depth for a function whose output deletes data.
+  if (isPrescriptiveRule(a) || isPrescriptiveRule(b)) return null;
+  if (reason === "semantic_conflict" && tokenJaccard(a.value, b.value) < SEMANTIC_MIN_OVERLAP) return null;
+  // decision_reversal is only meaningful between two DECISIONS (the detector's own
+  // precondition) — a caller passing that reason for ordinary facts gets a refusal,
+  // not a victim.
+  if (reason === "decision_reversal" && !(a.kind === "decision" && b.kind === "decision")) return null;
   const numericOk = reason === "numeric_conflict" && AUTO_RESOLVE_NUMERIC;
   if (reason !== "semantic_conflict" && reason !== "decision_reversal" && !numericOk) return null;
   const ts = (f: FactLite): number => {
@@ -149,6 +160,11 @@ export const AUTO_RESOLVE_NUMERIC = process.env["ZC_AUTO_RESOLVE_NUMERIC"] !== "
 // undo-verbs keeps the real cases ("Keep X" vs "Removed X") while killing the noise.
 const ACTION_REVERSAL = /\b(removed|deleted|dropped|disabled|deprecated|reverted|archived|abandoned|killed|undone|rolled back|backed out|scrapped|got rid of|turned off)\b/;
 export function hasNegation(s: string): boolean { return ACTION_REVERSAL.test(s.toLowerCase()); }
+
+/** v0.53.1 — minimum lexical overlap for a polarity flip to count as a conflict.
+ *  Genuine reversals measured 0.35-0.75 on the corpus; the wrong-kill pairs
+ *  (unrelated facts joined by a reversal verb) measured 0.02-0.10. */
+export const SEMANTIC_MIN_OVERLAP = parseFloat(process.env["ZC_SEMANTIC_MIN_OVERLAP"] ?? "0.15");
 
 export function tokenJaccard(a: string, b: string): number {
   const ta = new Set(a.toLowerCase().split(/\W+/).filter((w) => w.length > 2));
@@ -263,7 +279,16 @@ export function detectConflict(a: FactLite, b: FactLite, sim?: number): { reason
   if (a.kind === "decision" && b.kind === "decision" && tokenJaccard(a.value, b.value) < 0.5) {
     return { reason: "decision_reversal", detail: "Two decisions about the same topic appear to disagree (high semantic overlap, low textual overlap)." };
   }
-  if (hasNegation(a.value) !== hasNegation(b.value)) {
+  if (hasNegation(a.value) !== hasNegation(b.value) && tokenJaccard(a.value, b.value) >= SEMANTIC_MIN_OVERLAP) {
+    // v0.53.1 — SUBJECT BINDING. A reversal verb is only a conflict when the two
+    // facts are about the same thing, and cosine similarity cannot establish that:
+    // the 2026-08 corpus audit showed "Removed the old scattered notes" (a note
+    // about a FILE'S LOCATION) killing the P0 credential finding, and "Single VM
+    // path dropped" killing a standing lean-code directive — reversal vocabulary
+    // about topic X victimising an unrelated fact Y that merely embeds nearby.
+    // Token overlap is the cheap proxy for "same subject": genuine reversals
+    // ("Keep the legacy /export endpoint" vs "Removed the legacy /export
+    // endpoint") share their subject's tokens; embedding-neighbours do not.
     return { reason: "semantic_conflict", detail: "Highly similar claims with opposite polarity (one negates what the other asserts)." };
   }
   // R2/S1 — numeric conflict, TIGHTENED to two principled shapes (cosine alone

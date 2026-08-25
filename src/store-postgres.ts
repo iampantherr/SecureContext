@@ -401,8 +401,8 @@ export class PostgresStore implements Store {
   private async _retireFactByHash(projectHash: string, key: string, agentId: string, supersededBy: string | null, reason: string): Promise<boolean> {
     const safeKey   = sanitize(key,     100);
     const safeAgent = sanitize(agentId,  64);
-    const row = (await this.pool.query<{ value: string; kind: string | null }>(
-      "SELECT value, kind FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3 AND valid_to IS NULL",
+    const row = (await this.pool.query<{ value: string; kind: string | null; importance: number }>(
+      "SELECT value, kind, importance FROM working_memory WHERE project_hash = $1 AND key = $2 AND agent_id = $3 AND valid_to IS NULL",
       [projectHash, safeKey, safeAgent])).rows[0];
     if (!row) return false;
 
@@ -428,6 +428,28 @@ export class PostgresStore implements Store {
       logger.info("memory", "pinned_retire_refused", {
         project_hash: projectHash, agent_id: safeAgent, key: safeKey,
         kind: row.kind, reason, superseded_by: supersededBy,
+      });
+      return false;
+    }
+    // v0.53.1 — AUTOMATIC retirement can never remove a five-star fact, of ANY kind.
+    //
+    // The pinned-kind guard above closed one door; the 2026-08 audits showed the
+    // house had more. Fifty of fifty audited auto-retirements were wrong, and the
+    // victims that hurt were plain ★5 FACTS: shipped-commit records, a live
+    // trading-system switch, the P0 credential finding (eaten four separate times),
+    // and — at the very moment of a shutdown checkpoint — the release-completion
+    // record, invalidated by the LLM adjudicator in favour of a summary that merely
+    // mentioned it. ★5 is defined as "loss breaks future sessions"; no autonomous
+    // process gets to make that call. Operator-explicit paths (zc_forget, the
+    // dashboard, TTL the writer set themselves via expireFacts) are unaffected —
+    // note "expired" stays automatic-refusable ONLY for importance 5, because a
+    // writer who marks a fact both ★5 and TTL'd has stated two intents and the
+    // safer one wins. ZC_STAR5_RETIRE=1 restores the old behaviour.
+    if (AUTOMATIC_REASONS.has(reason) && (row.importance ?? 0) >= 5 && process.env["ZC_STAR5_RETIRE"] !== "1") {
+      const { logger } = await import("./logger.js");
+      logger.info("memory", "star5_retire_refused", {
+        project_hash: projectHash, agent_id: safeAgent, key: safeKey,
+        importance: row.importance, reason, superseded_by: supersededBy,
       });
       return false;
     }
@@ -1917,8 +1939,20 @@ export class PostgresStore implements Store {
             // Recency picks the survivor (bakeoff: no model reliably picks sides).
             const older = new Date(fa.created_at) <= new Date(fb.created_at) ? fa : fb;
             const newer = older === fa ? fb : fa;
-            f.victim = older.key;
-            f.detail = `LLM adjudicated update; recency invalidated '${older.key}' in favor of '${newer.key}'. ${f.detail}`;
+            if (Config.AUTO_RESOLVE) {
+              f.victim = older.key;
+              f.detail = `LLM adjudicated update; recency invalidated '${older.key}' in favor of '${newer.key}'. ${f.detail}`;
+            } else {
+              // v0.53.1 — ADVISORY, not destructive. This branch used to install a
+              // victim directly, bypassing the AUTO_RESOLVE gate that only wrapped
+              // the heuristic path — the hole through which the adjudicator retired
+              // the release-completion record at the moment of a shutdown checkpoint
+              // (its "superseding" fact was a summary that merely mentioned it).
+              // With auto-resolve off, the adjudicator's opinion now travels WITH the
+              // open flag so the operator gets the triage head-start and keeps the
+              // decision: informing is autonomous, destroying is not.
+              f.detail = `LLM advisory: likely update — '${newer.key}' appears to supersede '${older.key}' (auto-resolve disabled; operator decides). ${f.detail}`;
+            }
           }
           // "contradiction" or null → fall through to the open-triage path below.
         }

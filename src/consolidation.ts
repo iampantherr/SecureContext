@@ -24,7 +24,7 @@
  */
 
 import { Config, ollamaBase } from "./config.js";
-import { detectConflict, numbersDiffer } from "./contradiction_heuristics.js";
+import { detectConflict, numbersDiffer, hasNegation } from "./contradiction_heuristics.js";
 
 // R2 (v0.42.0): numbersDiffer moved to contradiction_heuristics (shared with the
 // contradiction detector's numeric_conflict signal); re-exported for existing users.
@@ -106,6 +106,14 @@ export function selectMergePairs(
       // score 0.947 — ABOVE paraphrase range). Deterministic, LLM-independent.
       if (numbersDiffer(A.value, B.value)) continue;
       // A conflict is NOT a duplicate — leave those to the contradiction triage.
+      // v0.53.1 — ALSO veto on raw polarity difference, independent of detectConflict.
+      // The detector now requires subject overlap before calling a polarity flip a
+      // conflict (correct for triage: unrelated facts are not in conflict), but for
+      // MERGING the old, looser test is the safe one — two texts of opposite polarity
+      // should never be fused into one fact even if they are about different things.
+      // Graph-checked change: this call site is consolidation's merge veto; keeping
+      // its pre-tightening behaviour means the detector fix cannot widen merges.
+      if (hasNegation(A.value) !== hasNegation(B.value)) continue;
       if (detectConflict(
         { key: A.key, value: A.value, kind: A.kind, resolution_status: null, created_at: A.created_at },
         { key: B.key, value: B.value, kind: B.kind, resolution_status: null, created_at: B.created_at },
