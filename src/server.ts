@@ -327,6 +327,7 @@ const TOOLS: Tool[] = [
         confidence: { type: "number", minimum: 0, maximum: 1, description: "0.0–1.0 subjective probability for predictions/hypotheses. Omit for plain facts." },
         resolution: { type: "string", enum: ["open", "resolved_correct", "resolved_incorrect", "resolved_partial"], description: "Set 'open' when recording a prediction; later re-remember the same key with a resolved_* value to close it." },
         ttl_days:   { type: "number", minimum: 0.01, description: "R1 (v0.42.0) — auto-expire this fact after N days (e.g. 7 for a sprint-scoped note, 0.5 for a same-day reminder). Expired facts leave recall and are retired (revivable for 30 days). Omit for permanent facts." },
+        run_id:     { type: "string", description: "v0.58.0 B1 — run correlation id. If your task brief carries a RUN_ID, echo it here so the fact joins the task's queryable trail." },
       },
       required: ["key", "value"],
     },
@@ -578,6 +579,10 @@ const TOOLS: Tool[] = [
         session_token: {
           type: "string",
           description: "Session token from zc_issue_token — required when RBAC sessions are active.",
+        },
+        run_id: {
+          type: "string",
+          description: "v0.58.0 B1 — run correlation id. If your task brief carries a RUN_ID, echo it on EVERY broadcast for that task so the whole trail is queryable as one object.",
         },
       },
       required: ["type", "agent_id"],
@@ -1402,6 +1407,7 @@ async function _handleRemoteTool(
           scope:       body["scope"],
           confidence:  body["confidence"],
           resolution:  body["resolution"],
+          run_id:      body["run_id"],
           // R1 (v0.42.0) — TTL: ttl_days → absolute expiry timestamp.
           ...(typeof body["ttl_days"] === "number" && (body["ttl_days"] as number) > 0
             ? { expiresAt: new Date(Date.now() + (body["ttl_days"] as number) * 86_400_000).toISOString() }
@@ -1768,6 +1774,7 @@ ${sr["warning"]}` : "";
           depends_on:    body["depends_on"],
           channel_key:   body["channel_key"],
           session_token: body["session_token"],
+          run_id:        body["run_id"],
         });
         return { content: [{ type: "text", text: `Broadcast #${(result["message"] as Record<string, unknown>)?.["id"]} posted.` }] };
 

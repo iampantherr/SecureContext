@@ -317,6 +317,9 @@ export interface EpistemicOpts {
   /** S3 (v0.46.0) — team attribution: the USER (api-key owner) who wrote the fact.
    *  Set by the API layer from the authenticated identity; absent for single-user use. */
   createdBy?:  string | null;
+  /** v0.58.0 B1 — run correlation id: ties the fact to one dispatcher-minted task run
+   *  so the whole trail (broadcasts + facts) is queryable as one object. */
+  runId?:      string | null;
 }
 
 /**
@@ -422,8 +425,8 @@ export function rememberFact(
   })();
 
   db.prepare(`
-    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at, origin, expires_at, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO working_memory(key, value, importance, agent_id, created_at, provenance, kind, confidence, resolution_status, resolved_at, origin, expires_at, created_by, run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(key, agent_id) DO UPDATE SET
       value             = excluded.value,
       importance        = excluded.importance,
@@ -436,10 +439,11 @@ export function rememberFact(
       origin            = excluded.origin,
       expires_at        = excluded.expires_at,
       created_by        = COALESCE(excluded.created_by, working_memory.created_by),
+      run_id            = COALESCE(excluded.run_id, working_memory.run_id),
       valid_to          = NULL,
       superseded_by     = NULL,
       retired_reason    = NULL
-  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires, epi.createdBy ? sanitize(epi.createdBy, 64) : null);
+  `).run(safeKey, safeValue, safeImp, safeAgent, now, safeProv, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires, epi.createdBy ? sanitize(epi.createdBy, 64) : null, epi.runId ? sanitize(epi.runId, 64) : null);
   // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
   // v0.36.0 — memory facts are co-reference sources (memory-aware edge extraction), so a
@@ -1419,22 +1423,26 @@ export function broadcastFact(
   // stays NULL — unknown, never fabricated.
   const safeSender = opts.sender ?? (type !== "ASSIGN" ? safeAgent : null);
 
+  // v0.58.0 B1 — run correlation id passthrough (parity with PG broadcast()).
+  const safeRunId = typeof (opts as { run_id?: unknown }).run_id === "string" && String((opts as { run_id?: string }).run_id).trim()
+    ? sanitize(String((opts as { run_id?: string }).run_id), 64) : null;
+
   const result = db.prepare(`
     INSERT INTO broadcasts(
       type, agent_id, task, files, state, summary, depends_on, reason, importance,
       created_at, session_token_id, prev_hash, row_hash,
       acceptance_criteria, complexity_estimate,
       file_ownership_exclusive, file_ownership_read_only,
-      task_dependencies, required_skills, estimated_tokens, sender_agent_id
+      task_dependencies, required_skills, estimated_tokens, sender_agent_id, run_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     type, safeAgent, safeTask, safeFilesJson, safeState,
     safeSummary, safeDependsJson, safeReason, safeImp, now,
     sessionTokenId, prevHash, rowHash,
     safeAcceptanceJson, safeComplexity,
     safeFileOwnExclJson, safeFileOwnROJson,
-    safeTaskDepsJson, safeReqSkillsJson, safeEstTokens, safeSender
+    safeTaskDepsJson, safeReqSkillsJson, safeEstTokens, safeSender, safeRunId
   ) as { lastInsertRowid: number };
 
   const id = Number(result.lastInsertRowid);

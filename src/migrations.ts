@@ -1154,6 +1154,16 @@ export const MIGRATIONS: Migration[] = [
       db.exec(`UPDATE broadcasts SET sender_agent_id = agent_id WHERE sender_agent_id IS NULL AND type <> 'ASSIGN'`);
     },
   },
+  {
+    id: 43,
+    description: "Run-scoped correlation ids (v0.58.0 B1): run_id on broadcasts + working_memory ties a task's whole trail to one queryable id. Mirrors PG migration 50; outside row_hash so backfill never breaks the chain.",
+    up: (db) => {
+      try { db.exec(`ALTER TABLE broadcasts ADD COLUMN run_id TEXT`); } catch { /* exists */ }
+      try { db.exec(`ALTER TABLE working_memory ADD COLUMN run_id TEXT`); } catch { /* exists */ }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_broadcasts_run ON broadcasts(run_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_wm_run ON working_memory(run_id)`);
+    },
+  },
 
 ];
 

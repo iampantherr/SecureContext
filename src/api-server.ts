@@ -3658,6 +3658,9 @@ export async function createApiServer(storeOverride?: Store) {
       else if (typeof ttl_days === "number" && ttl_days > 0) {
         epi.expiresAt = new Date(Date.now() + ttl_days * 86_400_000).toISOString();
       }
+      // v0.58.0 B1 — run correlation id passthrough.
+      const runIdBody = (request.body as Record<string, unknown>)["run_id"];
+      if (typeof runIdBody === "string" && runIdBody.trim()) epi.runId = runIdBody;
       // S3 (v0.46.0) — attribution. A user key's identity ALWAYS wins (a member
       // can't write as someone else); operator-key callers may attribute via the
       // x-zc-user header (how MCP agents pass ZC_USER_ID through).
@@ -4448,6 +4451,8 @@ function _recordResultCount(op: string, n: number): number[] {
           task_dependencies:        Array.isArray(body["task_dependencies"])        ? body["task_dependencies"]        as number[] : undefined,
           required_skills:          Array.isArray(body["required_skills"])          ? body["required_skills"]          as string[] : undefined,
           estimated_tokens:         typeof body["estimated_tokens"]         === "number" ? body["estimated_tokens"]       : undefined,
+          // v0.58.0 B1 — run correlation id passthrough.
+          run_id:                   typeof body["run_id"]                   === "string" ? body["run_id"]                 : undefined,
         } as Record<string, unknown>),
       } as never);
 
@@ -4498,6 +4503,45 @@ function _recordResultCount(op: string, n: number): number[] {
         agentId: agentId as string | undefined,
       });
       return { ok: true, broadcasts: results };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  // ─── v0.58.0 B1: run correlation ────────────────────────────────────────────
+  // Backfill a run_id onto a broadcast whose author omitted it. The dispatcher
+  // knows each agent's active run; backfill-only (a declared run_id is never
+  // overwritten), and run_id sits outside row_hash so the chain is untouched.
+  app.post("/api/v1/broadcast/run", async (request, reply) => {
+    try {
+      const b = request.body as Record<string, unknown>;
+      const pp = validateProjectPath(b["projectPath"]);
+      const id = Number(b["id"]);
+      const runId = b["run_id"];
+      if (!Number.isInteger(id) || id <= 0)  throw new ApiError(400, "id must be a positive integer");
+      if (typeof runId !== "string" || !runId.trim()) throw new ApiError(400, "run_id is required");
+      const pgStore = store as unknown as { setBroadcastRun?: (pp: string, id: number, runId: string) => Promise<boolean> };
+      if (typeof pgStore.setBroadcastRun !== "function") throw new ApiError(501, "run backfill requires the Postgres store");
+      const updated = await pgStore.setBroadcastRun(pp, id, runId);
+      return { ok: true, updated };
+    } catch (e) {
+      if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
+      return reply.status(500).send({ error: "Internal error" });
+    }
+  });
+
+  // The whole task trail — broadcasts + facts stamped with this run_id — as one
+  // object. Replaces the N time-window queries a trail reconstruction used to take.
+  app.get("/api/v1/run/:runId", async (request, reply) => {
+    try {
+      const { runId } = request.params as { runId: string };
+      const { projectPath } = request.query as Record<string, unknown>;
+      const pp = validateProjectPath(projectPath);
+      const pgStore = store as unknown as { runTrail?: (pp: string, runId: string) => Promise<unknown> };
+      if (typeof pgStore.runTrail !== "function") throw new ApiError(501, "run trail requires the Postgres store");
+      const trail = await pgStore.runTrail(pp, runId);
+      return { ok: true, ...(trail as Record<string, unknown>) };
     } catch (e) {
       if (e instanceof ApiError) return reply.status(e.statusCode).send({ error: e.message });
       return reply.status(500).send({ error: "Internal error" });

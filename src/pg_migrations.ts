@@ -1237,6 +1237,21 @@ export const PG_MIGRATIONS: PgMigration[] = [
       await client.query(`CREATE INDEX IF NOT EXISTS evidence_pg_run_idx ON evidence_pg (skill_run_id)`);
     },
   },
+  {
+    id: 50,
+    description:
+      "Run-scoped correlation ids (v0.58.0, graph-engineering B1). A task's trail was spread " +
+      "across broadcasts, facts, and logs correlated only by time-window queries — reconstructing " +
+      "one task took N manual queries. run_id (minted by the dispatcher at ASSIGN, echoed by " +
+      "workers, backfilled by the dispatcher when omitted) makes the trail one queryable object. " +
+      "Deliberately NOT part of row_hash, so backfill never breaks the broadcast HMAC chain.",
+    up: async (client) => {
+      await client.query(`ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS run_id TEXT`);
+      await client.query(`ALTER TABLE working_memory ADD COLUMN IF NOT EXISTS run_id TEXT`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_broadcasts_run ON broadcasts(run_id) WHERE run_id IS NOT NULL`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_wm_run ON working_memory(run_id) WHERE run_id IS NOT NULL`);
+    },
+  },
 
 ];
 

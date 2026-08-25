@@ -238,8 +238,8 @@ export class PostgresStore implements Store {
     })();
 
     const _ins = await this.pool.query(`
-      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin, expires_at, created_by)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      INSERT INTO working_memory(project_hash, key, value, importance, agent_id, created_at, kind, confidence, resolution_status, resolved_at, origin, expires_at, created_by, run_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       ON CONFLICT(project_hash, key, agent_id) DO UPDATE SET
         value             = EXCLUDED.value,
         importance        = EXCLUDED.importance,
@@ -251,11 +251,12 @@ export class PostgresStore implements Store {
         origin            = EXCLUDED.origin,
         expires_at        = EXCLUDED.expires_at,
         created_by        = COALESCE(EXCLUDED.created_by, working_memory.created_by),
+        run_id            = COALESCE(EXCLUDED.run_id, working_memory.run_id),
         valid_to          = NULL,
         superseded_by     = NULL,
         retired_reason    = NULL
       RETURNING key, value, importance, kind, agent_id
-    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires, epi.createdBy ? sanitize(epi.createdBy, 64) : null]);
+    `, [projectHash, safeKey, safeValue, safeImp, safeAgent, now, safeKind, safeConf, safeRes, resolvedAt, epi.origin ? sanitize(epi.origin, 120) : "zc_remember", safeExpires, epi.createdBy ? sanitize(epi.createdBy, 64) : null, epi.runId ? sanitize(epi.runId, 64) : null]);
     // (valid_to reset: re-asserting a RETIRED key REVIVES it — the agent explicitly said it again.)
 
     // v0.52.0 — EFFECT VERIFICATION. Compare what the database actually stored
@@ -2462,6 +2463,8 @@ export class PostgresStore implements Store {
     if (typeof o.estimated_tokens === "number" && Number.isFinite(o.estimated_tokens) && o.estimated_tokens >= 0) {
       safeEstTokens = Math.floor(Math.min(o.estimated_tokens, 1_000_000_000));
     }
+    // v0.58.0 B1 — run correlation id (dispatcher-minted, worker-echoed). Not hashed.
+    const safeRunId = typeof o.run_id === "string" && o.run_id.trim() ? sanitize(o.run_id, 64) : null;
 
     // RBAC enforcement — if sessions exist, verify token and role permissions
     if (opts.session_token) {
@@ -2526,14 +2529,14 @@ export class PostgresStore implements Store {
           session_token_id, prev_hash, row_hash,
           acceptance_criteria, complexity_estimate,
           file_ownership_exclusive, file_ownership_read_only,
-          task_dependencies, required_skills, estimated_tokens, sender_agent_id
+          task_dependencies, required_skills, estimated_tokens, sender_agent_id, run_id
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-                  $15,$16,$17,$18,$19,$20,$21,$22)
+                  $15,$16,$17,$18,$19,$20,$21,$22,$23)
         RETURNING id, type, agent_id, task, summary, reason
       `, [projectHash, type, safeAgent, safeTask, safeSummary, files, safeState,
           dependsOn, safeReason, safeImp, now, tokenId, prevHash, rowHash,
           safeAccept, safeComplexity, safeFileExcl, safeFileRO,
-          safeTaskDeps, safeReqSkills, safeEstTokens, safeSender]);
+          safeTaskDeps, safeReqSkills, safeEstTokens, safeSender, safeRunId]);
 
       await client.query("COMMIT");
 
@@ -2607,7 +2610,7 @@ export class PostgresStore implements Store {
       // which is the sender on STATUS and the target on ASSIGN. Cost, measured live: a
       // worker's STATUS(answer) was routed back to the worker and the orchestrator
       // deadlocked ~2h waiting for an answer that had already been delivered.
-      `SELECT id, type, agent_id, sender_agent_id, task, summary, files, state, depends_on, reason,
+      `SELECT id, type, agent_id, sender_agent_id, run_id, task, summary, files, state, depends_on, reason,
               importance, created_at,
               file_ownership_exclusive, file_ownership_read_only,
               task_dependencies, required_skills, acceptance_criteria,
@@ -2654,6 +2657,40 @@ export class PostgresStore implements Store {
       "UPDATE broadcasts SET acked_at = $1 WHERE project_hash = $2 AND id = $3 AND acked_at IS NULL",
       [new Date().toISOString(), projectHash, id]
     );
+  }
+
+  // v0.58.0 B1 — dispatcher backfill: stamp run_id on a broadcast whose author
+  // omitted it. Backfill-only (never overwrites a worker-declared run_id), and
+  // run_id is outside row_hash, so this cannot break the HMAC chain.
+  async setBroadcastRun(projectPath: string, id: number, runId: string): Promise<boolean> {
+    const projectHash = ph(projectPath);
+    const res = await this.pool.query(
+      "UPDATE broadcasts SET run_id = $1 WHERE project_hash = $2 AND id = $3 AND run_id IS NULL",
+      [sanitize(runId, 64), projectHash, id]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  // v0.58.0 B1 — the whole task trail as one object: every broadcast and every
+  // fact stamped with this run_id, ordered. Replaces N time-window queries.
+  async runTrail(projectPath: string, runId: string): Promise<{
+    run_id: string;
+    broadcasts: Array<Record<string, unknown>>;
+    facts: Array<Record<string, unknown>>;
+  }> {
+    const projectHash = ph(projectPath);
+    const safeRun = sanitize(runId, 64);
+    const b = await this.pool.query(
+      `SELECT id, type, agent_id, sender_agent_id, task, summary, state, reason, importance, created_at
+       FROM broadcasts WHERE project_hash = $1 AND run_id = $2 ORDER BY id ASC`,
+      [projectHash, safeRun]
+    );
+    const f = await this.pool.query(
+      `SELECT key, agent_id, value, importance, kind, created_at, retired_reason
+       FROM working_memory WHERE project_hash = $1 AND run_id = $2 ORDER BY created_at ASC`,
+      [projectHash, safeRun]
+    );
+    return { run_id: safeRun, broadcasts: b.rows, facts: f.rows };
   }
 
   async chainStatus(projectPath: string): Promise<ChainStatus> {
