@@ -38,7 +38,7 @@ import { computeRowHash } from "./chain.js";
 import { scheduleEventExtraction, supersedeEventEntries } from "./event_extractor.js";
 import { getEmbedding, getEmbeddingQueued, cosineSimilarity, ACTIVE_MODEL } from "./embedder.js";
 import { classifyFactKind, clampBroadcastSummary, clampWithMarker, MEMORY_KINDS, type EpistemicOpts } from "./memory.js";
-import { isPinnedKind } from "./memory_quality.js";
+import { isPinnedKind, PINNED_KINDS } from "./memory_quality.js";
 import { verifyWrite, type VerifyResult } from "./effect_verify.js";
 import { computeSalience, salienceEnabled } from "./salience.js";
 import { budgetFacts, effectiveImportance } from "./recall_budget.js";
@@ -2084,10 +2084,18 @@ export class PostgresStore implements Store {
     // R1 (v0.42.0) — TTL sweep: formally retire facts past their expires_at
     // ('expired', revivable for RETIRE_PURGE_DAYS like any retirement). Recall
     // already excludes them; the sweep keeps the table + dashboard honest.
+    // The sweep bypasses _retireFactByHash, so it must repeat that choke-point's
+    // ★5 and pinned-kind refusals inline — caught live 2026-08-25 when the sweep
+    // expired a ★5 fact the guard would have refused.
     try {
+      const sweepGuards =
+        (process.env["ZC_STAR5_RETIRE"] === "1" ? "" : " AND COALESCE(importance, 0) < 5") +
+        (Config.PIN_CONSTRAINTS
+          ? ` AND LOWER(TRIM(COALESCE(kind, ''))) NOT IN (${[...PINNED_KINDS].map(k => `'${k}'`).join(", ")})`
+          : "");
       await this.pool.query(
         `UPDATE working_memory SET valid_to = NOW(), retired_reason = 'expired'
-          WHERE expires_at IS NOT NULL AND expires_at <= NOW() AND valid_to IS NULL`);
+          WHERE expires_at IS NOT NULL AND expires_at <= NOW() AND valid_to IS NULL${sweepGuards}`);
     } catch { /* pre-migration — next cycle */ }
     return { projects: projects.length, flagged, backfilledProjects, ollamaDown, entities };
   }

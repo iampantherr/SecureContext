@@ -200,8 +200,13 @@ if (!NO_HOOKS) {
     settings.hooks[w.event] = settings.hooks[w.event] ?? [];
     // Dedup per (matcher, script) pair — not per script alone, or the same
     // hook could never be registered under a second matcher.
+    // Matcher comparison normalizes absent-vs-empty: entries registered by older
+    // versions (and by hand) omit the matcher key entirely for match-all hooks,
+    // while the manifest writes "". `undefined === ""` is false — the live
+    // verification pass caught this creating double registrations (each Stop /
+    // UserPromptSubmit hook firing twice) on its very first run.
     const already = settings.hooks[w.event].some(
-      (e) => e?.matcher === w.matcher && JSON.stringify(e).includes(w.script));
+      (e) => (e?.matcher ?? "") === (w.matcher ?? "") && JSON.stringify(e).includes(w.script));
     if (already) { info(`${w.script} (${w.matcher}) already registered — skipped`); continue; }
     settings.hooks[w.event].push({ matcher: w.matcher, hooks: [{ type: "command", command: hookCmd(w) }] });
     ok(`Registered ${w.script} (${w.event} → ${w.matcher})`);

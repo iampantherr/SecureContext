@@ -25,7 +25,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -97,9 +97,30 @@ function extractChatText(raw) {
 
 async function main() {
   if (process.env.ZC_AUTO_EXTRACT === "0") return;
-  const apiUrl = (process.env.ZC_API_URL || "").replace(/\/+$/, "");
-  const apiKey = process.env.ZC_API_KEY || "";
-  if (!apiUrl || !apiKey) return; // API mode required — nothing to write to otherwise
+  // Resolve API config: shell env first, then the MCP server's env block in
+  // ~/.claude/settings.json. The env-only contract made extraction SILENTLY
+  // inert for every session not launched from a shell that exports these —
+  // ordinary user sessions and fresh installs alike. The live pass measured it:
+  // 935KB of buffered prompts, zero facts extracted, no error anywhere
+  // (registered-but-inert, one layer deeper than issue #5). Sessions launched
+  // by the A2A dispatcher worked only because start-agents exports the vars.
+  let apiUrl = (process.env.ZC_API_URL || "").replace(/\/+$/, "");
+  let apiKey = process.env.ZC_API_KEY || "";
+  if (!apiUrl || !apiKey) {
+    try {
+      const st = JSON.parse(readFileSync(join(homedir(), ".claude", "settings.json"), "utf8"));
+      const env = st?.mcpServers?.["zc-ctx"]?.env ?? {};
+      apiUrl = apiUrl || String(env.ZC_API_URL ?? "").replace(/\/+$/, "");
+      apiKey = apiKey || String(env.ZC_API_KEY ?? "");
+    } catch { /* fall through to the loud skip below */ }
+  }
+  if (!apiUrl || !apiKey) {
+    // Loud skip, not silent: one line in the hook log names the missing config.
+    try { appendFileSync(join(homedir(), ".claude", "zc-ctx", "autoextract", "_skipped.log"),
+      `${new Date().toISOString()} extraction skipped: ZC_API_URL/ZC_API_KEY not in env or settings.json mcpServers.zc-ctx.env
+`); } catch { /* best effort */ }
+    return;
+  }
 
   // --- Stop-event payload ---
   const lines = [];
