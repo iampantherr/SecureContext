@@ -1,0 +1,26 @@
+{
+  "$comment": "SINGLE SOURCE OF TRUTH for harness hook registration (issue #5). init.mjs reads cliHooks and registers exactly these; hook_manifest.test.ts asserts plugin.json matches pluginHooks and that init.mjs carries no hardcoded list. Change hooks HERE — a change anywhere else breaks CI. The cliHooks set is the battle-tested configuration that evolved on the reference machine through 2026-08 (the original hardcoded list installed only 5 of these; fresh installs were missing auto-extract, impact advisories, learnings indexing and outcome capture — issue #5's 'installed-but-inert' finding).",
+  "cliHooks": [
+    { "event": "PreToolUse",       "matcher": "Read",                                  "script": "preread-dedup.mjs" },
+    { "event": "PreToolUse",       "matcher": "Bash",                                  "script": "skill-script-hmac-verify.mjs" },
+    { "event": "PreToolUse",       "matcher": "PowerShell",                            "script": "skill-script-hmac-verify.mjs" },
+    { "event": "PreToolUse",       "matcher": "Edit|Write|MultiEdit",                  "script": "prewrite-impact.mjs" },
+    { "event": "PostToolUse",      "matcher": "Edit|Write|MultiEdit",                  "script": "postedit-reindex.mjs" },
+    { "event": "PostToolUse",      "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash","script": "learnings-indexer.mjs" },
+    { "event": "PostToolUse",      "matcher": "Bash",                                  "script": "postbash-capture.mjs" },
+    { "event": "PostToolUse",      "matcher": "Bash|Read",                             "script": "posttool-outcomes.mjs" },
+    { "event": "Stop",             "matcher": "",                                      "script": "stop-autoextract.mjs" },
+    { "event": "UserPromptSubmit", "matcher": "",                                      "script": "userprompt-autoextract.mjs" },
+    { "event": "UserPromptSubmit", "matcher": "",                                      "script": "userpromptsubmit-outcome.mjs" },
+    { "event": "SessionStart",     "matcher": "startup",                               "script": "session-start-index-check.ps1", "platform": "win32", "runner": "powershell" },
+    { "event": "SessionStart",     "matcher": "resume",                                "script": "session-start-index-check.ps1", "platform": "win32", "runner": "powershell" },
+    { "event": "SessionStart",     "matcher": "compact",                               "script": "session-start-index-check.ps1", "platform": "win32", "runner": "powershell" }
+  ],
+  "pluginHooks": {
+    "$comment": "The marketplace-plugin path as it exists TODAY: combined router scripts that are a LEGACY GENERATION (posttooluse.mjs writes directly to SQLite working_memory, predating the PG store). Recorded as-is so CI catches any drift; migrating the plugin runtime to the granular cliHooks scripts is tracked follow-up work, not silent tonight-work.",
+    "PreToolUse":       ["hooks/pretooluse.mjs"],
+    "PostToolUse":      ["hooks/posttooluse.mjs"],
+    "Stop":             ["hooks/stop.mjs", "hooks/stop-autoextract.mjs"],
+    "UserPromptSubmit": ["hooks/userprompt-autoextract.mjs"]
+  }
+}

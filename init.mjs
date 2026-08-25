@@ -177,7 +177,7 @@ if (!NO_HOOKS) {
   const hooksSrc = join(ROOT, "hooks");
   const hooksDst = join(homedir(), ".claude", "hooks");
   mkdirSync(hooksDst, { recursive: true });
-  for (const f of readdirSync(hooksSrc).filter((f) => f.endsWith(".mjs"))) {
+  for (const f of readdirSync(hooksSrc).filter((f) => f.endsWith(".mjs") || f.endsWith(".ps1"))) {
     copyFileSync(join(hooksSrc, f), join(hooksDst, f));
   }
   ok(`Hook scripts copied to ${hooksDst}`);
@@ -186,18 +186,16 @@ if (!NO_HOOKS) {
   let settings = {};
   try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { /* fresh */ }
   settings.hooks = settings.hooks ?? {};
-  const hookCmd = (f) => `node "${join(hooksDst, f)}"`;
-  const wanted = [
-    { event: "PreToolUse",  matcher: "Read",                  script: "preread-dedup.mjs" },
-    { event: "PostToolUse", matcher: "Edit|Write|MultiEdit",  script: "postedit-reindex.mjs" },
-    { event: "PostToolUse", matcher: "Bash",                  script: "postbash-capture.mjs" },
-    // v0.50.1 — HMAC verify-before-execute for skill scripts, registered on
-    // EVERY shell-capable tool. TODO_v0.28.1 bypass 2: with a Bash-only
-    // matcher, `PowerShell python <skill>/scripts/x.py` executed tampered
-    // scripts without the check ever firing.
-    { event: "PreToolUse",  matcher: "Bash",                  script: "skill-script-hmac-verify.mjs" },
-    { event: "PreToolUse",  matcher: "PowerShell",            script: "skill-script-hmac-verify.mjs" },
-  ];
+  const hookCmd = (w) => w.runner === "powershell"
+    ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${join(hooksDst, w.script)}"`
+    : `node "${join(hooksDst, w.script)}"`;
+  // Issue #5 — the hook set is defined ONCE in hooks/manifest.json (cliHooks).
+  // The hardcoded list this replaces had drifted to 5 of the 14 battle-tested
+  // registrations: fresh installs silently lacked auto-extract, prewrite impact
+  // advisories, learnings indexing and outcome capture. A CI test now asserts
+  // no hardcoded list ever returns here.
+  const manifest = JSON.parse(readFileSync(join(ROOT, "hooks", "manifest.json"), "utf8"));
+  const wanted = manifest.cliHooks.filter((w) => !w.platform || w.platform === process.platform);
   for (const w of wanted) {
     settings.hooks[w.event] = settings.hooks[w.event] ?? [];
     // Dedup per (matcher, script) pair — not per script alone, or the same
@@ -205,7 +203,7 @@ if (!NO_HOOKS) {
     const already = settings.hooks[w.event].some(
       (e) => e?.matcher === w.matcher && JSON.stringify(e).includes(w.script));
     if (already) { info(`${w.script} (${w.matcher}) already registered — skipped`); continue; }
-    settings.hooks[w.event].push({ matcher: w.matcher, hooks: [{ type: "command", command: hookCmd(w.script) }] });
+    settings.hooks[w.event].push({ matcher: w.matcher, hooks: [{ type: "command", command: hookCmd(w) }] });
     ok(`Registered ${w.script} (${w.event} → ${w.matcher})`);
   }
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2));

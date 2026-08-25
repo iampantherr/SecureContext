@@ -160,7 +160,7 @@ if (MODE_CLI || UNINSTALL) {
     // user's own hooks and other tools' hooks are untouched.
     const ourHookFiles = new Set();
     try {
-      for (const f of readdirSync(join(__dirname, "hooks")).filter((f) => f.endsWith(".mjs"))) ourHookFiles.add(f);
+      for (const f of readdirSync(join(__dirname, "hooks")).filter((f) => f.endsWith(".mjs") || f.endsWith(".ps1"))) ourHookFiles.add(f);
     } catch { /* hooks dir absent in this checkout — fall through with empty set */ }
 
     if (settings.hooks && ourHookFiles.size > 0) {
