@@ -122,6 +122,44 @@ export async function getMutator(envOverride?: string, deps: MutatorFactoryDeps 
  *   - Output schema: JSON array of {candidate_body, rationale}
  */
 export function buildProposerPrompt(ctx: MutationContext): string {
+  // v0.62.0 M6 — description-tune mode replaces the whole mission: candidates
+  // are replacement DESCRIPTIONS. The description is the skill-SELECTION
+  // surface (agents pick skills by it), and the admission gate quarantines
+  // descriptions over 1024 chars — so the goals are trigger-rich, accurate to
+  // the body, and comfortably under the limit.
+  if (ctx.description_tune) {
+    return [
+      `You are rewriting the DESCRIPTION of a skill (a procedure document AI`,
+      `agents load). The description is how agents DECIDE whether to use the`,
+      `skill — it must name the concrete situations, error codes, and task`,
+      `types that should trigger it. The admission gate HARD-REJECTS`,
+      `descriptions over 1024 characters.`,
+      ``,
+      `## Current description (${ctx.parent.frontmatter.description.length} chars${ctx.parent.frontmatter.description.length > 1024 ? " — OVER the 1024 limit" : ""})`,
+      ctx.parent.frontmatter.description,
+      ``,
+      `## Skill body (source of truth — the description must not promise`,
+      `anything the body does not deliver)`,
+      "```markdown",
+      ctx.parent.body.slice(0, 10_000),
+      "```",
+      ``,
+      ctx.failure_traces.length > 0
+        ? `## Recent failure traces (selection misses often hide here)\n${ctx.failure_traces.slice(0, 5).map((t, i) => `${i + 1}. ${t.slice(0, 500)}`).join("\n")}\n`
+        : "",
+      `## Output format (JSON only, no commentary):`,
+      `[{"candidate_body": "<the proposed replacement description text>", "rationale": "why this triggers better"}, ...]`,
+      ``,
+      `Constraints:`,
+      `- candidate_body is the replacement DESCRIPTION TEXT ONLY — plain text,`,
+      `  single paragraph, NO markdown headers, NO frontmatter, NO newlines.`,
+      `- Every candidate MUST be under 1000 characters (hard limit 1024).`,
+      `- Lead with the trigger conditions ("Use when …"), keep every concrete`,
+      `  identifier (error codes, tool names, state names) that aids selection,`,
+      `  cut narrative prose.`,
+      `- Generate exactly 5 candidates with different compression strategies.`,
+    ].filter((s) => s !== "").join("\n");
+  }
   const failures = ctx.failure_traces.slice(0, 10);  // cap to N most-recent
   const fxSnippet = ctx.fixtures.slice(0, 3).map((f, i) =>
     `  Fixture ${i + 1}: ${f.fixture_id} — input=${JSON.stringify(f.input)}, expected=${JSON.stringify(f.expected)}`

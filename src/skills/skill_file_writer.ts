@@ -147,6 +147,164 @@ export function writeSkillBody(
 }
 
 /**
+ * v0.62.0 M6 — replace ONLY the frontmatter description (the DESC-TUNE apply
+ * path). Handles both single-line descriptions and block scalars (`|` / `>`
+ * with chomping indicators) — the block form is what skill-creator emits, and
+ * replacing just the key line would leave the old block orphaned in the file.
+ * Same guarantees as writeSkillBody: backup first, atomic rename, version
+ * bump, body untouched.
+ */
+export function writeSkillDescription(
+  skillDir: string,
+  newDescription: string,
+  opts: { version?: string; stamp?: string; promoted_from?: string } = {},
+): WriteResult {
+  if (!skillDir) throw new Error("writeSkillDescription: skill_dir is empty — nothing to write.");
+  const skillMdPath = join(skillDir, "SKILL.md");
+  if (!existsSync(skillMdPath)) throw new Error(`writeSkillDescription: ${skillMdPath} does not exist.`);
+  if (newDescription.length > 1024) {
+    throw new Error(`writeSkillDescription: replacement is ${newDescription.length} chars — over the 1024 admission limit; refusing to write a description the gate would quarantine.`);
+  }
+
+  const before = readFileSync(skillMdPath, "utf8");
+  const norm = before.replace(/\r\n/g, "\n");
+  if (!norm.startsWith("---\n")) throw new Error(`writeSkillDescription: ${skillMdPath} has no frontmatter delimiter.`);
+  const end = norm.indexOf("\n---\n", 4);
+  if (end === -1) throw new Error(`writeSkillDescription: ${skillMdPath} has no closing frontmatter delimiter.`);
+
+  const fmLines = norm.slice(4, end).split("\n");
+  const keyIdx = fmLines.findIndex((l) => /^description\s*:/.test(l));
+  if (keyIdx === -1) throw new Error(`writeSkillDescription: no description key in ${skillMdPath} frontmatter.`);
+  // Swallow a block scalar's indented continuation lines (and blank lines
+  // inside the block) so the old description doesn't survive as orphan text.
+  let endIdx = keyIdx + 1;
+  if (/^description\s*:\s*[|>][+-]?\s*$/.test(fmLines[keyIdx])) {
+    while (endIdx < fmLines.length && (fmLines[endIdx].startsWith("  ") || fmLines[endIdx].trim() === "")) endIdx++;
+  }
+  const newDescLine = newDescription.includes("\n")
+    ? ["description: |", ...newDescription.split("\n").map((l) => `  ${l}`)]
+    : [`description: ${newDescription}`];
+  const nextFmLines = [...fmLines.slice(0, keyIdx), ...newDescLine, ...fmLines.slice(endIdx)];
+
+  let fmText = nextFmLines.join("\n");
+  if (opts.version) {
+    fmText = /^version\s*:/m.test(fmText)
+      ? fmText.replace(/^version\s*:.*$/m, `version: ${opts.version}`)
+      : `${fmText}\nversion: ${opts.version}`;
+  }
+  if (opts.promoted_from) {
+    fmText = /^promoted_from\s*:/m.test(fmText)
+      ? fmText.replace(/^promoted_from\s*:.*$/m, `promoted_from: ${opts.promoted_from}`)
+      : `${fmText}\npromoted_from: ${opts.promoted_from}`;
+  }
+
+  const body = norm.slice(end + 5);
+  const next = `---\n${fmText}\n---\n${body}`;
+  const stamp = opts.stamp ?? new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = `${skillMdPath}.bak-${stamp}`;
+  copyFileSync(skillMdPath, backupPath);
+  const tmp = `${skillMdPath}.tmp-${stamp}`;
+  writeFileSync(tmp, next, "utf8");
+  renameSync(tmp, skillMdPath);
+  return {
+    skillMdPath, backupPath,
+    bytesBefore: Buffer.byteLength(before, "utf8"),
+    bytesAfter:  Buffer.byteLength(next, "utf8"),
+  };
+}
+
+/**
+ * v0.62.0 M6 — full DESC-TUNE apply: resolve the portable dir marker, rewrite
+ * the description, and — when the skill lives in the QUARANTINE root —
+ * restore it to the active skills root so a passing description actually
+ * un-quarantines the skill.
+ *
+ * Dir markers are HOME-RELATIVE because the headline is written host-side
+ * (nightly sweep) but approvals may run in the container, where absolute
+ * host paths do not exist:
+ *   skills:<basename>       → ~/.claude/skills/<basename>
+ *   quarantine:<basename>   → ~/.claude/skills.quarantine/<basename>
+ *   abs:<path>              → literal path (tests / custom roots; same-machine only)
+ */
+/** Inverse of the marker resolution in applyDescTune — computed where the
+ *  skill_dir is a real local path (cycle side), consumed wherever approval
+ *  runs. Falls back to abs: for custom roots (tests, scratch). */
+export function dirToMarker(dir: string | null | undefined): string | null {
+  if (!dir) return null;
+  const norm = dir.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/+$/, "");
+  const base = norm.slice(norm.lastIndexOf("/") + 1);
+  if (/\/\.claude\/skills\.quarantine\/[^/]+$/.test(norm)) return `quarantine:${base}`;
+  if (/\/\.claude\/skills\/[^/]+$/.test(norm)) return `skills:${base}`;
+  return `abs:${dir}`;
+}
+
+export async function applyDescTune(args: {
+  dirMarker?: string | null;     // from the DESC-TUNE[<marker>] headline
+  fallbackDir?: string | null;   // storage row's skill_dir (legacy results)
+  description: string;
+  resultId: string;
+}): Promise<{ skillMdPath: string; newVersion: string; restoredTo?: string }> {
+  const { homedir } = await import("node:os");
+  const { basename } = await import("node:path");
+  const { cpSync, readFileSync: rf } = await import("node:fs");
+
+  let dir: string | null = null;
+  let quarantined = false;
+  if (args.dirMarker) {
+    const m = /^(skills|quarantine|abs):(.+)$/.exec(args.dirMarker);
+    if (!m) throw new Error(`applyDescTune: unrecognized dir marker "${args.dirMarker}"`);
+    if (m[1] === "abs") dir = m[2];
+    else {
+      const base = basename(m[2]);   // defense: marker must not traverse
+      if (base !== m[2]) throw new Error(`applyDescTune: marker contains path separators ("${m[2]}") — refusing`);
+      dir = join(homedir(), ".claude", m[1] === "quarantine" ? "skills.quarantine" : "skills", base);
+      quarantined = m[1] === "quarantine";
+    }
+  } else if (args.fallbackDir) {
+    dir = args.fallbackDir;
+    quarantined = /skills\.quarantine/.test(dir);
+  }
+  if (!dir || !existsSync(join(dir, "SKILL.md"))) {
+    throw new Error(`applyDescTune: skill dir not resolvable (marker=${args.dirMarker ?? "none"}, fallback=${args.fallbackDir ?? "none"}) — nothing was changed.`);
+  }
+
+  // Version bump comes from the FILE (quarantined skills have placeholder rows).
+  const raw = rf(join(dir, "SKILL.md"), "utf8").replace(/\r\n/g, "\n");
+  const vMatch = /^version\s*:\s*(\S+)\s*$/m.exec(raw.slice(0, raw.indexOf("\n---\n", 4) + 1));
+  const curVersion = vMatch ? vMatch[1] : "1.0.0";
+  const parts = curVersion.split(".").map((n) => parseInt(n, 10) || 0);
+  while (parts.length < 3) parts.push(0);
+  parts[2] += 1;
+  const newVersion = parts.join(".");
+
+  const written = writeSkillDescription(dir, args.description, { version: newVersion, promoted_from: args.resultId });
+
+  if (!quarantined) {
+    const readmit = await reAdmitSkillDir(dir);
+    if (!readmit.readmitted) {
+      throw new Error(`Description written (${written.skillMdPath}) but re-admission failed: ${readmit.reason}. Restore from ${written.backupPath}.`);
+    }
+    return { skillMdPath: written.skillMdPath, newVersion };
+  }
+
+  // Quarantine restore: copy the (now-passing) skill into the active root
+  // under its clean name, then admit THAT copy. The quarantine dir stays as
+  // an archive. Name collisions are refused — the operator resolves those.
+  const nameMatch = /^name\s*:\s*(\S+)\s*$/m.exec(raw);
+  const cleanName = nameMatch ? nameMatch[1] : basename(dir).replace(/__.*$/, "");
+  const target = join(homedir(), ".claude", "skills", cleanName);
+  if (existsSync(target)) {
+    throw new Error(`applyDescTune: restore target ${target} already exists — an active skill with this name is present. Description was written in quarantine (${written.skillMdPath}) but NOT restored; resolve the collision manually.`);
+  }
+  cpSync(dir, target, { recursive: true, filter: (src) => !/\.bak-|\.tmp-/.test(src) });
+  const readmit = await reAdmitSkillDir(target);
+  if (!readmit.readmitted) {
+    throw new Error(`Restored to ${target} but admission failed: ${readmit.reason} — the description fix may be insufficient; skill remains inactive.`);
+  }
+  return { skillMdPath: join(target, "SKILL.md"), newVersion, restoredTo: target };
+}
+
+/**
  * v0.61.0 M3c — create a project-scoped COMPLEMENT skill on disk.
  *
  * The derive-specific apply path: the approved candidate body becomes a NEW

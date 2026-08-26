@@ -3808,6 +3808,49 @@ async function dispatchToolCall(
           }
           const picked = result.bodies[picked_candidate_index];
 
+          // v0.62.0 M6 — DESC-TUNE resolves the target from its HOME-RELATIVE
+          // dir marker, BEFORE parent-row resolution: quarantined skills have
+          // placeholder rows (name@0.0.0@quarantine) whose skill_id never
+          // matches the file-derived id, so the row lookup below would refuse
+          // a result that is perfectly applicable. Quarantine-marker results
+          // are restored to the active root when the new description passes.
+          const dtMatch = /^DESC-TUNE(?:\[([^\]]+)\])? /.exec(result.headline ?? "");
+          if (dtMatch) {
+            try {
+              const { applyDescTune } = await import("./skills/skill_file_writer.js");
+              const { getSkillById: dtGet } = await import("./skills/storage_dual.js");
+              const fallbackDir = dtMatch[1] ? null
+                : ((await dtGet(maDb, result.skill_id).catch(() => null)) as { skill_dir?: string | null } | null)?.skill_dir ?? null;
+              const applied = await applyDescTune({
+                dirMarker:   dtMatch[1] ?? null,
+                fallbackDir,
+                description: picked.candidate_body,
+                resultId:    result_id,
+              });
+              await approveMutation(maDb, result_id, picked_candidate_index, rationale, AGENT_ID || "operator");
+              try {
+                const { recordMutationReview } = await import("./skills/storage_dual.js");
+                const { randomUUID: mrUUID } = await import("node:crypto");
+                await recordMutationReview({
+                  review_id:   `rev-${mrUUID().slice(0, 12)}`,
+                  mutation_id: result.mutation_id ?? result_id,
+                  result_id,
+                  action:      "approve",
+                  operator:    AGENT_ID || "operator",
+                  rationale:   `${rationale} [desc-tune: description rewritten (${picked.candidate_body.length} chars), body untouched${applied.restoredTo ? `; RESTORED from quarantine to ${applied.restoredTo}` : ""}]`,
+                });
+              } catch { /* best-effort audit */ }
+              maDb.close();
+              return { content: [{ type: "text", text:
+                `✓ DESC-TUNE approved: description rewritten (${picked.candidate_body.length} chars) as v${applied.newVersion}\n` +
+                `  File: ${applied.skillMdPath} — body untouched.` +
+                (applied.restoredTo ? `\n  RESTORED from quarantine → ${applied.restoredTo} (skill is active again).` : "") }] };
+            } catch (e) {
+              maDb.close();
+              return { content: [{ type: "text", text: `Cannot apply desc-tune: ${(e as Error).message}\nNothing was changed.` }], isError: true };
+            }
+          }
+
           // Look up the skill we're replacing.
           // v0.22.1 fix: resolve to the CURRENTLY-ACTIVE version by name+scope,
           // NOT to result.skill_id (which may be archived if the L1 hook

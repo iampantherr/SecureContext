@@ -107,6 +107,42 @@ export async function handleApproveFromDashboard(args: ApproveArgs): Promise<App
     }
     const picked = result.bodies[args.picked_candidate_index];
 
+    // v0.62.0 M6 — DESC-TUNE resolves its target from the HOME-RELATIVE dir
+    // marker BEFORE parent-row resolution (quarantined skills have
+    // placeholder rows whose skill_id never matches the file-derived id).
+    // A quarantine-marker result is additionally RESTORED to the active
+    // skills root once the new description passes admission.
+    const dtMatch = /^DESC-TUNE(?:\[([^\]]+)\])? /.exec(result.headline ?? "");
+    if (dtMatch) {
+      const { applyDescTune } = await import("../skills/skill_file_writer.js");
+      const fallbackDir = dtMatch[1] ? null
+        : ((await getSkillById(db, result.skill_id).catch(() => null)) as { skill_dir?: string | null } | null)?.skill_dir ?? null;
+      const applied = await applyDescTune({
+        dirMarker:   dtMatch[1] ?? null,
+        fallbackDir,
+        description: picked.candidate_body,
+        resultId:    args.result_id,
+      });
+      await approveMutation(db, args.result_id, args.picked_candidate_index, args.rationale, args.decided_by ?? "operator-dashboard");
+      try {
+        await recordMutationReview({
+          review_id:   `rev-${randomUUID().slice(0, 12)}`,
+          mutation_id: result.mutation_id ?? args.result_id,
+          result_id:   args.result_id,
+          action:      "approve",
+          operator:    args.decided_by ?? "operator-dashboard",
+          rationale:   `${args.rationale} [desc-tune: description rewritten (${picked.candidate_body.length} chars), body untouched${applied.restoredTo ? `; RESTORED from quarantine to ${applied.restoredTo}` : ""}]`,
+        });
+      } catch { /* best-effort */ }
+      return {
+        prior_skill_id: result.skill_id,
+        new_skill_id:   `${result.skill_id.split("@")[0]}@${applied.newVersion}`,
+        picked_score:   picked.self_rated_score ?? 0,
+        retry_task_id:  null,
+        original_role:  result.original_role,
+      };
+    }
+
     // v0.22.1 — resolve to currently-active version by name+scope so we
     // bump from the active skill, not from result.skill_id (which may be
     // archived if a more recent promotion happened between result creation

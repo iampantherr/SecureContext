@@ -62,6 +62,13 @@ export interface MutationCycleOptions {
    * code path doesn't need it, but PG dual-write does.
    */
   projectPath?: string;
+  /**
+   * v0.62.0 M6 — description-tune cycle: candidates are replacement
+   * DESCRIPTIONS, judged only (nothing to replay), queued with the
+   * DESC-TUNE headline contract. Approval rewrites only the frontmatter
+   * description.
+   */
+  description_tune?: boolean;
 }
 
 /**
@@ -119,13 +126,16 @@ export async function runMutationCycle(
   // replay by memorizing the test (operator's anti-Goodhart rule). The full
   // fixture set — including failure ANCHORS derived from the real traces —
   // exists only on the replay/judge side.
+  const descTune = options.description_tune === true;
+
   // v0.61.0 M3c — broad-vs-specific fork: if a GLOBAL skill's failures
   // concentrate in one project while it is healthy elsewhere, do NOT mutate
   // the broad body — flip the cycle into derive-specific mode (proposer
   // authors a project-scoped complement; approve path creates it alongside
-  // the parent instead of overwriting it).
+  // the parent instead of overwriting it). Not applicable to description
+  // tuning (a description rewrite never warps behavior per-project).
   const { assessFailureSpecificity } = await import("./specificity.js");
-  const specificity = assessFailureSpecificity(parent, recentRuns);
+  const specificity = descTune ? { fork: false as const, reason: "description-tune mode" } : assessFailureSpecificity(parent, recentRuns);
 
   const ctx: MutationContext = {
     parent,
@@ -134,14 +144,15 @@ export async function runMutationCycle(
     fixtures:       [],   // held out — replay-side only (see replaySet below)
     exemplars,
     ...(specificity.fork ? { derive_specific: { project_hash: specificity.project_hash!, reason: specificity.reason } } : {}),
+    ...(descTune ? { description_tune: true } : {}),
   };
 
   // Replay set = authored fixtures + failure anchors derived from the REAL
   // traces (must-pass: a candidate that doesn't clear them didn't fix the
   // underlying thing). Anchor derivation costs a model call, so it runs only
   // under the LLM executor — anchors are meaningless to the deterministic toy.
-  let replaySet = [...(parent.frontmatter.fixtures ?? [])];
-  if (llmReplay && ctx.failure_traces.length > 0) {
+  let replaySet = descTune ? [] : [...(parent.frontmatter.fixtures ?? [])];
+  if (!descTune && llmReplay && ctx.failure_traces.length > 0) {
     const { deriveFailureFixtures } = await import("./fixture_harvest.js");
     const anchors = deriveFailureFixtures(ctx);
     replaySet = [...anchors, ...replaySet];
@@ -176,6 +187,22 @@ export async function runMutationCycle(
   // no real judge is configured. Never throws.
   const { judgeCandidates } = await import("./judge.js");
   const judgeResult = await judgeCandidates(ctx, mutResult.candidates);
+
+  // v0.62.0 M6 — enforce the 1024-char description limit DETERMINISTICALLY:
+  // the judge is prompted with the rule but a forgotten rule must not admit
+  // an un-admittable description (same pattern as the overfit-cap enforcement
+  // in parseJudgeResponse).
+  if (descTune) {
+    mutResult.candidates.forEach((c, i) => {
+      if (c.candidate_body.length > 1024 && judgeResult.verdicts[i]) {
+        judgeResult.verdicts[i] = {
+          score: Math.min(judgeResult.verdicts[i].score, 0.2),
+          overfit: true,
+          rationale: `[OVER-LIMIT] ${c.candidate_body.length} chars > 1024 admission limit — ` + judgeResult.verdicts[i].rationale,
+        };
+      }
+    });
+  }
 
   // Step 2: verify candidate HMACs (RT-S2-09 — defense against bytes-modified
   // between proposal and replay). We compute the HMAC ourselves so the
@@ -335,7 +362,7 @@ export async function runMutationCycle(
   // base-model knowledge. Best-effort and informational — a null uplift
   // never blocks queueing; a LOW-UPLIFT flag never auto-rejects.
   let uplift: import("./uplift.js").UpliftResult | null = null;
-  if (promoteDecision.promote && bestCandidate && process.env["ZC_UPLIFT_CHECK"] !== "0") {
+  if (promoteDecision.promote && bestCandidate && !descTune && process.env["ZC_UPLIFT_CHECK"] !== "0") {
     try {
       const { measureReplayUplift, measureAbUplift, judgeSkillUplift } = await import("./uplift.js");
       if (!judgeOnly && llmReplay && bestCandidateAccuracy !== null) {
@@ -364,6 +391,7 @@ export async function runMutationCycle(
     try {
       const { recordMutationResult } = await import("./mutation_results.js");
       const { projectHash: hashProject } = await import("../store.js");
+      const { dirToMarker } = await import("./skill_file_writer.js");
       // Candidates ordered winner-first, overfit-flagged ones excluded; judge
       // scores ride self_rated_score so the queue's best_score reflects the
       // INDEPENDENT judge, not the proposer grading itself.
@@ -382,6 +410,18 @@ export async function runMutationCycle(
           // The DERIVE-SPECIFIC[<hash>] prefix is the apply-path contract:
           // approval creates a NEW project-scoped skill instead of
           // overwriting the parent (see applyDeriveSpecific).
+          // DESC-TUNE[marker] is the apply-path contract: approval rewrites
+          // only the frontmatter description, resolving the dir from the
+          // HOME-RELATIVE marker (cycle may run host-side, approval in the
+          // container — absolute paths don't survive that boundary). A
+          // quarantine: marker additionally restores the skill to the active
+          // root once its description passes (see applyDescTune).
+          (descTune
+            ? (() => {
+                const mk = dirToMarker((parent as { skill_dir?: string | null }).skill_dir);
+                return mk ? `DESC-TUNE[${mk}] ` : `DESC-TUNE `;
+              })()
+            : "") +
           (ctx.derive_specific ? `DERIVE-SPECIFIC[${ctx.derive_specific.project_hash}] ` : "") +
           `promote-worthy (${promoteDecision.reason}) — judge(${judgeResult.judged_by}) best ` +
           `${(judgeResult.verdicts[bestCandidateIndex]?.score ?? 0).toFixed(2)}, ` +

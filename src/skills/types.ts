@@ -233,6 +233,15 @@ export interface MutationContext {
    * (same name, scope project:<hash> — resolveSkill prefers project scope).
    */
   derive_specific?: { project_hash: string; reason: string };
+  /**
+   * v0.62.0 M6 — description-tune mode: candidates are replacement
+   * DESCRIPTIONS (the skill-selection surface), not bodies. Proposed for
+   * skills whose descriptions are over the 1024-char admission limit or
+   * mis-trigger selection. Judge-only (nothing to replay), operator-queued
+   * with the DESC-TUNE headline contract; approval rewrites only the
+   * frontmatter description.
+   */
+  description_tune?: boolean;
 }
 
 export interface MutationCandidate {

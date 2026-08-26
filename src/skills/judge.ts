@@ -43,6 +43,44 @@ export function resolveJudgeId(envOverride?: string): string {
 }
 
 export function buildJudgePrompt(ctx: MutationContext, candidates: MutationCandidate[]): string {
+  // v0.62.0 M6 — description-tune judging: candidates are replacement
+  // DESCRIPTIONS. Different rubric: selection accuracy, honesty vs the body,
+  // and the 1024-char admission limit (over-limit = automatic overfit-cap,
+  // it can never be admitted).
+  if (ctx.description_tune) {
+    const cands = candidates.map((c, i) =>
+      `### Candidate ${i} (${c.candidate_body.length} chars)\n${c.candidate_body.slice(0, 2_000)}`).join("\n\n");
+    return [
+      `You are an independent judge for skill DESCRIPTION rewrites. The`,
+      `description is the skill-selection surface: agents read it to decide`,
+      `whether to load the skill. Score each candidate 0.0-1.0 on:`,
+      `- TRIGGER ACCURACY: names the concrete situations/error codes/tasks the`,
+      `  body actually handles — an agent facing those must match, an agent`,
+      `  facing anything else must not.`,
+      `- HONESTY: promises nothing the body does not deliver.`,
+      `- ECONOMY: information-dense, no narrative filler.`,
+      ``,
+      `HARD RULES (violations set "overfit": true, capping the score at 0.2):`,
+      `- Over 1024 characters — the admission gate rejects it outright.`,
+      `- Drops a concrete trigger (error code, tool name, state name) present`,
+      `  in the current description that the body still handles.`,
+      ``,
+      `## Skill body (ground truth)`,
+      "```markdown",
+      ctx.parent.body.slice(0, 10_000),
+      "```",
+      ``,
+      `## Current description (${ctx.parent.frontmatter.description.length} chars)`,
+      ctx.parent.frontmatter.description,
+      ``,
+      `## Candidates`,
+      cands,
+      ``,
+      `Reply with ONLY a JSON array, one object per candidate, same order:`,
+      `[{"index": 0, "score": 0.0, "overfit": false, "rationale": "<=200 chars"}, ...]`,
+    ].join("\n");
+  }
+
   const failures = ctx.failure_traces.slice(0, 5).map((t, i) => `### Failure ${i + 1}\n${t.slice(0, 1500)}`).join("\n\n");
   const cands = candidates.map((c, i) =>
     `### Candidate ${i}\n\`\`\`markdown\n${c.candidate_body.slice(0, 12_000)}\n\`\`\``).join("\n\n");

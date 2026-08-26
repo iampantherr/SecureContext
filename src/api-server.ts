@@ -5234,6 +5234,34 @@ if (process.argv[1]?.endsWith("api-server.js")) {
             console.log(`Enrichment cron: ENABLED (every ${intervalMin} min)`);
           }
         } catch (e) { console.error("Enrichment cron bootstrap failed:", (e as Error).message); }
+        // v0.62.0 M5 — queue-hygiene cron (kills forensic cause #5): the
+        // stale-claim reclaim existed but was LAZY — it only ran on new claim
+        // attempts, so when a worker pool died its claimed tasks were stuck
+        // forever (2 found in the audit). This sweeps them back to 'queued'
+        // every interval, unconditionally. Pure Postgres, $0, and it lives in
+        // the container so it survives host reboots with the container's
+        // restart policy. ZC_QUEUE_HYGIENE_CRON=0 disables.
+        try {
+          if (process.env.ZC_QUEUE_HYGIENE_CRON !== "0") {
+            const { Scheduler } = await import("./cron/scheduler.js");
+            const hygieneMin = Math.max(1, parseInt(process.env.ZC_QUEUE_HYGIENE_INTERVAL_MIN ?? "15", 10) || 15);
+            const staleSec = Math.max(60, parseInt(process.env.ZC_QUEUE_STALE_SECONDS ?? "300", 10) || 300);
+            const hygieneSched = new Scheduler();
+            hygieneSched.register({
+              id: "queue-hygiene",
+              description: "M5: sweep stale claimed tasks (dead workers) back to 'queued'",
+              interval_ms: hygieneMin * 60_000,
+              next_run_ms: Date.now() + 60_000, // first sweep 1 min after boot — stuck tasks shouldn't wait a full interval
+              work: async () => {
+                const { reclaimStaleTasks } = await import("./task_queue.js");
+                const n = await reclaimStaleTasks(staleSec);
+                if (n > 0) console.log(`Queue hygiene: reclaimed ${n} stale claimed task(s) (heartbeat > ${staleSec}s)`);
+              },
+            });
+            hygieneSched.start(30_000);
+            console.log(`Queue-hygiene cron: ENABLED (every ${hygieneMin} min, stale after ${staleSec}s)`);
+          }
+        } catch (e) { console.error("Queue-hygiene cron bootstrap failed:", (e as Error).message); }
         // D4 (v0.46.1) — embed-lane watchdog (self-health for the delivery tool).
         // With a Postgres store it also registers the self-heal pass: budgeted
         // embedding of KB entries whose index-time embed died (orphans that were
