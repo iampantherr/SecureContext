@@ -37,6 +37,9 @@ function rowToSkill(row: Record<string, unknown>): Skill {
     body:           row.body as string,
     body_hmac:      row.body_hmac as string,
     source_path:    (row.source_path as string) ?? null,
+    // v0.60.0 — parity with the PG mapper: dropping this made both approve
+    // paths refuse every stored skill as an "orphan".
+    skill_dir:      (row.skill_dir as string) ?? null,
     promoted_from:  (row.promoted_from as string) ?? null,
     created_at:     row.created_at as string,
     archived_at:    (row.archived_at as string) ?? null,

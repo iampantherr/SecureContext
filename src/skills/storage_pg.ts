@@ -38,6 +38,7 @@ function rowToSkill(row: Record<string, unknown>): Skill {
     body:           row.body as string,
     body_hmac:      row.body_hmac as string,
     source_path:    (row.source_path as string) ?? null,
+    skill_dir:      (row.skill_dir as string) ?? null,
     promoted_from:  (row.promoted_from as string) ?? null,
     created_at:     row.created_at instanceof Date ? row.created_at.toISOString() : (row.created_at as string),
     archived_at:    row.archived_at instanceof Date ? row.archived_at.toISOString() : ((row.archived_at as string) ?? null),

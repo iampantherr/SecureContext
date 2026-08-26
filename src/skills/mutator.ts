@@ -43,6 +43,7 @@ export interface Mutator {
 
 /** Allowlist of known mutator ids — see RT-S2-05 for the security rationale. */
 export const KNOWN_MUTATORS = new Set([
+  "cli-headless",           // v0.60.0 — direct `claude -p` (subscription-billed, no agents/queue needed)
   "cli-claude",             // v0.18.1 — uses Pro-plan Claude CLI agent (no API key)
   "realtime-sonnet",
   "batch-sonnet",
@@ -79,6 +80,10 @@ export interface MutatorFactoryDeps {
 export async function getMutator(envOverride?: string, deps: MutatorFactoryDeps = {}): Promise<Mutator> {
   const id = resolveMutatorId(envOverride);
   switch (id) {
+    case "cli-headless": {
+      const { CliHeadlessMutator } = await import("./mutators/cli_headless.js");
+      return new CliHeadlessMutator();
+    }
     case "cli-claude": {
       const { CliClaudeMutator } = await import("./mutators/cli_claude.js");
       if (!deps.projectPath) {

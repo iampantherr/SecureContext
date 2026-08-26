@@ -94,15 +94,19 @@ describe("v0.18.0 orchestrator — runMutationCycle", () => {
 
     expect(result.candidates_count).toBe(5);  // LocalMock generates 5
     expect(result.baseline_score).toBeLessThan(result.best_candidate_score);
-    // The retry-block candidate is +1 point on retried_count over parent → should promote
-    expect(result.promoted).toBe(true);
-    expect(result.new_skill_id).toMatch(/audit@1\.0\.1@global/);
-    expect(result.archived_skill_id).toBe(parent.skill_id);
-    // Reason includes delta info
+    // v0.60.0 (operator decision): promote-worthy results are QUEUED for the
+    // operator, never auto-applied — promoted stays false, pending_result_id
+    // points at the mres- row for zc_mutation_pending/approve.
+    expect(result.promoted).toBe(false);
+    expect(result.pending_result_id).toMatch(/^mres-/);
+    expect(result.new_skill_id).toBeUndefined();
+    expect(result.archived_skill_id).toBeUndefined();
+    // Reason names both the promote-worthiness and the queueing
     expect(result.reason).toMatch(/delta/);
+    expect(result.reason).toMatch(/QUEUED FOR OPERATOR APPROVAL/);
   });
 
-  it("after promotion: parent is archived, new version is active", async () => {
+  it("promote-worthy cycle: parent stays ACTIVE and untouched (operator applies later)", async () => {
     const parent = await makeParentSkill();
     await upsertSkill(db, parent);
 
@@ -111,9 +115,11 @@ describe("v0.18.0 orchestrator — runMutationCycle", () => {
       executor: new LocalDeterministicExecutor(),
     });
 
+    // v0.60.0: the cycle must not archive or replace anything — the original
+    // auto-apply tore across backends on its first real run.
     const active = await getActiveSkill(db, "audit", "global");
-    expect(active?.skill_id).toMatch(/audit@1\.0\.1@global/);
-    expect(active?.frontmatter.version).toBe("1.0.1");
+    expect(active?.skill_id).toBe(parent.skill_id);
+    expect(active?.frontmatter.version).toBe("1.0.0");
   });
 
   it("all candidates persisted to skill_mutations regardless of promotion", async () => {
@@ -126,10 +132,9 @@ describe("v0.18.0 orchestrator — runMutationCycle", () => {
     });
     const muts = getRecentMutations(db, parent.skill_id, 10);
     expect(muts.length).toBe(5);
-    // Exactly one promoted
-    expect(muts.filter((m) => m.promoted).length).toBe(1);
-    // All others non-promoted
-    expect(muts.filter((m) => !m.promoted).length).toBe(4);
+    // v0.60.0: NONE are marked promoted by the cycle — promotion is the
+    // operator's act (zc_mutation_approve), not the cycle's.
+    expect(muts.filter((m) => m.promoted).length).toBe(0);
   });
 
   it("non-improving fixture set → no promotion, archived skills stays archived (parent stays active)", async () => {
@@ -279,10 +284,13 @@ describe("v0.18.0 orchestrator — atomicity", () => {
       mutator:  new LocalMockMutator(),
       executor: new LocalDeterministicExecutor(),
     });
-    expect(result.promoted).toBe(true);
+    expect(result.promoted).toBe(false);
+    expect(result.pending_result_id).toMatch(/^mres-/);
     const all = await listActiveSkills(db);
     const auditActive = all.filter((s) => s.frontmatter.name === "audit");
     expect(auditActive.length).toBe(1);
-    expect(auditActive[0].frontmatter.version).toBe("1.0.1");
+    // v0.60.0: the parent remains the one active version until the OPERATOR
+    // approves the queued result — the cycle applies nothing.
+    expect(auditActive[0].frontmatter.version).toBe("1.0.0");
   });
 });

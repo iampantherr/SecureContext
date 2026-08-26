@@ -140,6 +140,14 @@ export async function runMutationCycle(
     };
   }
 
+  // Step 1.5 (v0.60.0 M2): INDEPENDENT judge. Historically judge_score was
+  // the proposer's self-rating — a self-graded gate. judgeCandidates() makes a
+  // separate model call (never sees self-ratings, instructed to reject
+  // overfit/special-casing) and falls back to labeled self-ratings only when
+  // no real judge is configured. Never throws.
+  const { judgeCandidates } = await import("./judge.js");
+  const judgeResult = await judgeCandidates(ctx, mutResult.candidates);
+
   // Step 2: verify candidate HMACs (RT-S2-09 — defense against bytes-modified
   // between proposal and replay). We compute the HMAC ourselves so the
   // candidate provenance is traceable.
@@ -151,6 +159,7 @@ export async function runMutationCycle(
   let bestCandidateAgg:     ReturnType<typeof aggregateScore> | null = null;
   let bestCandidateHmac:    string | null = null;
   let bestCandidateMutationId: string | null = null;
+  let bestCandidateIndex:   number = -1;
 
   for (let i = 0; i < mutResult.candidates.length; i++) {
     const c = mutResult.candidates[i];
@@ -164,9 +173,9 @@ export async function runMutationCycle(
       candidate_body:  c.candidate_body,
       candidate_hmac:  candidateHmac,
       proposed_by:     mutResult.proposer_model,
-      judged_by:       mutResult.judge_model,
-      judge_score:     c.self_rated_score ?? null,
-      judge_rationale: c.rationale,
+      judged_by:       judgeResult.judged_by,
+      judge_score:     judgeResult.verdicts[i]?.score ?? null,
+      judge_rationale: (judgeResult.verdicts[i]?.overfit ? "[OVERFIT] " : "") + (judgeResult.verdicts[i]?.rationale ?? c.rationale),
       replay_score:    null,
       promoted:        false,
       promoted_to_skill_id: null,
@@ -191,11 +200,17 @@ export async function runMutationCycle(
     };
     await resolveMutation(db, mutationId, { replay_score: candAgg.avg_score });
 
+    // v0.60.0 M2 — an overfit verdict makes a candidate PERMANENTLY
+    // non-promotable, whatever its replay score: memorizing the failing case
+    // can ace a fixture set while fixing nothing (the operator's anti-Goodhart
+    // rule). The row is still recorded above, tagged [OVERFIT], for audit.
+    if (judgeResult.verdicts[i]?.overfit) continue;
     if (bestCandidateAgg === null || candAgg.avg_score > bestCandidateAgg.avg_score) {
       bestCandidate            = candidateSkill;
       bestCandidateAgg         = candAgg;
       bestCandidateHmac        = candidateHmac;
       bestCandidateMutationId  = mutationId;
+      bestCandidateIndex       = i;
     }
   }
 
@@ -215,30 +230,44 @@ export async function runMutationCycle(
   // Step 4: promotion decision
   const promoteDecision = shouldPromote(bestCandidateAgg, parentBaselineAgg, acceptance);
 
-  let promoted = false;
-  let new_skill_id: string | undefined;
-  let archived_skill_id: string | undefined;
+  const promoted = false;   // v0.60.0 — the cycle NEVER applies; the operator does.
+  let promotionError: string | null = null;
+  let pending_result_id: string | undefined;
+  const new_skill_id: string | undefined = undefined;
+  const archived_skill_id: string | undefined = undefined;
 
-  if (promoteDecision.promote && bestCandidateMutationId) {
-    // Atomic: archive parent + insert new version. SQLite doesn't have a
-    // multi-statement-tx wrapper at our layer's API; we use BEGIN/COMMIT manually.
-    db.exec("BEGIN");
+  if (promoteDecision.promote && bestCandidateMutationId && bestCandidateIndex >= 0) {
+    // v0.60.0 (operator decision 2026-08-25) — promote-worthy results are
+    // ROUTED THROUGH THE OPERATOR APPROVAL QUEUE, never auto-applied. The
+    // previous archive+upsert here (a) violated inform-don't-destroy and
+    // (b) tore across backends on failure: on the engine's FIRST real cycle
+    // the PG archive survived the SQLite ROLLBACK and un-listed a live skill.
+    // zc_mutation_pending lists this result; zc_mutation_approve writes the
+    // FILE and re-admits (the only apply path that keeps HMACs honest).
     try {
-      await archiveSkill(db, parent.skill_id, `promoted candidate ${bestCandidateMutationId}`);
-      // v0.23.0 — mutator-source so the security-scan audit log attributes
-      // the row correctly. The candidate was already HMAC-verified above.
-      await upsertSkill(db, bestCandidate, "mutator");
-      await resolveMutation(db, bestCandidateMutationId, {
-        promoted: true,
-        promoted_to_skill_id: bestCandidate.skill_id,
+      const { recordMutationResult } = await import("./mutation_results.js");
+      const { projectHash: hashProject } = await import("../store.js");
+      // Candidates ordered winner-first, overfit-flagged ones excluded; judge
+      // scores ride self_rated_score so the queue's best_score reflects the
+      // INDEPENDENT judge, not the proposer grading itself.
+      const eligible = mutResult.candidates
+        .map((c, i) => ({ c, i }))
+        .filter(({ i }) => !judgeResult.verdicts[i]?.overfit)
+        .sort((a, b) => (a.i === bestCandidateIndex ? -1 : b.i === bestCandidateIndex ? 1 : 0))
+        .map(({ c, i }) => ({ ...c, self_rated_score: judgeResult.verdicts[i]?.score ?? c.self_rated_score }));
+      const ptr = await recordMutationResult(db, {
+        mutation_id:    bestCandidateMutationId,
+        skill_id:       parent.skill_id,
+        project_hash:   hashProject(options.projectPath ?? "default"),
+        proposer_model: mutResult.proposer_model,
+        bodies:         eligible,
+        headline:
+          `promote-worthy (${promoteDecision.reason}) — judge(${judgeResult.judged_by}) best ` +
+          `${(judgeResult.verdicts[bestCandidateIndex]?.score ?? 0).toFixed(2)}, replay ${bestCandidateAgg?.avg_score.toFixed(2)} vs baseline ${baseline_score.toFixed(2)}`,
       });
-      db.exec("COMMIT");
-      promoted = true;
-      new_skill_id = bestCandidate.skill_id;
-      archived_skill_id = parent.skill_id;
+      pending_result_id = ptr.result_id;
     } catch (e) {
-      db.exec("ROLLBACK");
-      void e;
+      promotionError = (e as Error).message;
     }
   }
 
@@ -254,9 +283,14 @@ export async function runMutationCycle(
     promoted,
     new_skill_id,
     archived_skill_id,
+    pending_result_id,
     total_cost_usd:     mutResult.total_cost_usd,
     duration_ms:        Date.now() - startedAt,
-    reason:             promoteDecision.reason,
+    reason:             promotionError
+      ? `promote-worthy ('${promoteDecision.reason}') but QUEUEING FAILED: ${promotionError}`
+      : pending_result_id
+        ? `promote-worthy (${promoteDecision.reason}) — QUEUED FOR OPERATOR APPROVAL: ${pending_result_id}`
+        : promoteDecision.reason,
   };
 }
 

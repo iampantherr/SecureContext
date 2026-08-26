@@ -136,6 +136,10 @@ export interface Skill {
   body:          string;
   body_hmac:     string;          // hex sha256 HMAC over body using machine secret
   source_path:   string | null;   // disk path (null if synthetic)
+  /** Directory owning SKILL.md — the approval flows write THERE. v0.60.0: the
+   *  PG/SQLite row mappers dropped this field, so both approve paths saw
+   *  undefined and the orphan-refusal guard fired for EVERY stored skill. */
+  skill_dir?:    string | null;
   promoted_from: string | null;
   created_at:    string;          // ISO timestamp
   archived_at:   string | null;
@@ -250,6 +254,9 @@ export interface MutationCycleResult {
   promoted:           boolean;
   new_skill_id?:      string;
   archived_skill_id?: string;
+  /** v0.60.0 — promote-worthy results are QUEUED for the operator, never
+   *  auto-applied. This is the mres-<uuid> for zc_mutation_pending/approve. */
+  pending_result_id?: string;
   total_cost_usd:     number;
   duration_ms:        number;
   reason?:            string;       // for audit (why promoted / why archived)
