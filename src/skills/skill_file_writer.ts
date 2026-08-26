@@ -51,7 +51,13 @@ export function serializeSkillMd(fm: Record<string, unknown>, body: string): str
   for (const [k, v] of Object.entries(fm)) {
     if (v === undefined || v === null) continue;
     if (Array.isArray(v)) {
-      lines.push(`${k}: [${v.map((x) => JSON.stringify(String(x))).join(", ")}]`);
+      // Object arrays (fixtures, etc.) must round-trip as JSON — String()
+      // would collapse each element to "[object Object]".
+      if (v.some((x) => x !== null && typeof x === "object")) {
+        lines.push(`${k}: ${JSON.stringify(v)}`);
+      } else {
+        lines.push(`${k}: [${v.map((x) => JSON.stringify(String(x))).join(", ")}]`);
+      }
     } else if (typeof v === "object") {
       lines.push(`${k}: ${JSON.stringify(v)}`);
     } else {
@@ -80,7 +86,7 @@ export function serializeSkillMd(fm: Record<string, unknown>, body: string): str
 export function writeSkillBody(
   skillDir: string,
   newBody: string,
-  opts: { version?: string; stamp?: string } = {},
+  opts: { version?: string; stamp?: string; promoted_from?: string } = {},
 ): WriteResult {
   if (!skillDir) {
     throw new Error("writeSkillBody: skill_dir is empty — this skill has no file to write. " +
@@ -109,6 +115,15 @@ export function writeSkillBody(
       ? fmText.replace(/^version\s*:.*$/m, `version: ${opts.version}`)
       : `${fmText}\nversion: ${opts.version}`;
   }
+  // v0.61.0 M3d — promotion lineage must survive the file-authoritative flow:
+  // the row is rebuilt FROM this file at re-admission, so lineage that lives
+  // only in an in-memory buildSkill result is lost (which made the demotion
+  // backstop blind to the one real promotion).
+  if (opts.promoted_from) {
+    fmText = /^promoted_from\s*:/m.test(fmText)
+      ? fmText.replace(/^promoted_from\s*:.*$/m, `promoted_from: ${opts.promoted_from}`)
+      : `${fmText}\npromoted_from: ${opts.promoted_from}`;
+  }
 
   const next = `---\n${fmText}\n---\n${newBody.replace(/^\n+/, "")}`;
 
@@ -129,6 +144,51 @@ export function writeSkillBody(
     bytesBefore: Buffer.byteLength(before, "utf8"),
     bytesAfter:  Buffer.byteLength(next, "utf8"),
   };
+}
+
+/**
+ * v0.61.0 M3c — create a project-scoped COMPLEMENT skill on disk.
+ *
+ * The derive-specific apply path: the approved candidate body becomes a NEW
+ * skill directory next to the parent's, carrying the SAME name at scope
+ * project:<hash>. resolveSkill prefers project scope over global for the same
+ * name, so inside that project the complement supersedes the broad skill; the
+ * broad skill itself is never touched. Shared by both approve paths
+ * (dashboard + MCP tool) so the branch logic exists once.
+ */
+export async function applyDeriveSpecific(args: {
+  parentSkillDir: string;
+  parentFrontmatter: Record<string, unknown>;
+  projectHash: string;
+  body: string;
+  resultId: string;
+}): Promise<{ skillDir: string; skillMdPath: string; name: string; scope: string }> {
+  const { mkdirSync } = await import("node:fs");
+  const { dirname, basename } = await import("node:path");
+  const name = String(args.parentFrontmatter["name"] ?? basename(args.parentSkillDir));
+  const scope = `project:${args.projectHash}`;
+  const dirName = `${basename(args.parentSkillDir)}--proj-${args.projectHash.slice(0, 8)}`;
+  const skillDir = join(dirname(args.parentSkillDir), dirName);
+  const skillMdPath = join(skillDir, "SKILL.md");
+  if (existsSync(skillMdPath)) {
+    throw new Error(`applyDeriveSpecific: ${skillMdPath} already exists — a complement for this project was already created. Approve refused; review that skill instead.`);
+  }
+  mkdirSync(skillDir, { recursive: true });
+  const fm: Record<string, unknown> = {
+    name,
+    description: `${String(args.parentFrontmatter["description"] ?? "")} [project-scoped complement — supersedes the global skill inside this project]`,
+    version: "1.0.0",
+    scope,
+    intended_roles: args.parentFrontmatter["intended_roles"],
+    tags: args.parentFrontmatter["tags"],
+    promoted_from: args.resultId,
+  };
+  writeFileSync(skillMdPath, serializeSkillMd(fm, args.body), "utf8");
+  const readmit = await reAdmitSkillDir(skillDir);
+  if (!readmit.readmitted) {
+    throw new Error(`applyDeriveSpecific: wrote ${skillMdPath} but admission failed: ${readmit.reason}`);
+  }
+  return { skillDir, skillMdPath, name, scope };
 }
 
 /**
@@ -167,6 +227,18 @@ export async function reAdmitSkillDir(skillDir: string): Promise<{ readmitted: b
     const summary = await importFilesystemSkills({ globalRoot: root });
     if (summary.scanned === 0) {
       return { readmitted: false, reason: `admission scan found no skills under ${root}` };
+    }
+    // v0.61.0 — verify THIS skill's own result, not just that the scan ran.
+    // The cr-lifecycle-gate v1.0.1 promotion produced scanned=50/errors=1:
+    // this skill's upsert failed, the other 49 skipped clean, and the old
+    // scanned>0 check reported success — leaving an approved promotion with a
+    // changed file and NO storage row until the next manual re-import.
+    const mine = summary.details.find((d) => d.skill_dir === skillDir);
+    if (!mine) {
+      return { readmitted: false, reason: `scan of ${root} did not visit ${skillDir}` };
+    }
+    if (mine.result !== "inserted" && mine.result !== "updated" && mine.result !== "skipped_same") {
+      return { readmitted: false, reason: `admission result for this skill: ${mine.result}${"reason" in mine && mine.reason ? ` — ${mine.reason}` : ""}` };
     }
     return { readmitted: true };
   } catch (e) {

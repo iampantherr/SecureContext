@@ -196,6 +196,41 @@ describe("v0.18.0 orchestrator — runMutationCycle", () => {
     // to clear MIN_PROMOTION_DELTA of 0.10. LocalMock candidates may not.
     // Either way: baseline_score is from runs, not replay.
   });
+
+  // v0.61.0 M3 — a fixtureless skill takes the JUDGE-ONLY path: gated on the
+  // judge's score against ZC_JUDGE_ONLY_MIN, reason says so, and the old hard
+  // bail ("no fixtures — replay would be vacuous") is gone.
+  it("judge-only: no fixtures → gate is judge score vs floor (default 0.75 rejects mock's 0.7 best)", async () => {
+    const parent = await makeParentSkill([]);
+    await upsertSkill(db, parent);
+    const result = await runMutationCycle(db, parent, {
+      mutator:  new LocalMockMutator(),
+      executor: new LocalDeterministicExecutor(),
+    });
+    expect(result.promoted).toBe(false);
+    expect(result.pending_result_id).toBeUndefined();
+    expect(result.reason).toMatch(/JUDGE-ONLY/);
+    expect(result.reason).toMatch(/< min/);
+    expect(result.best_candidate_score).toBeCloseTo(0.7, 5);
+  });
+
+  it("judge-only: floor lowered via ZC_JUDGE_ONLY_MIN → promote-worthy, queued for operator", async () => {
+    process.env.ZC_JUDGE_ONLY_MIN = "0.6";
+    try {
+      const parent = await makeParentSkill([]);
+      await upsertSkill(db, parent);
+      const result = await runMutationCycle(db, parent, {
+        mutator:  new LocalMockMutator(),
+        executor: new LocalDeterministicExecutor(),
+      });
+      expect(result.promoted).toBe(false);           // still operator-queue only
+      expect(result.pending_result_id).toMatch(/^mres-/);
+      expect(result.reason).toMatch(/JUDGE-ONLY/);
+      expect(result.reason).toMatch(/QUEUED FOR OPERATOR APPROVAL/);
+    } finally {
+      delete process.env.ZC_JUDGE_ONLY_MIN;
+    }
+  });
 });
 
 describe("v0.18.0 orchestrator — selectUnderperformingSkills", () => {

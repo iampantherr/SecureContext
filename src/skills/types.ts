@@ -224,6 +224,15 @@ export interface MutationContext {
     note?:     string;
     tagged_at?: string;
   }>;
+  /**
+   * v0.61.0 M3c — broad-vs-specific fork. Set when a GLOBAL skill's failures
+   * concentrate in one project while it stays healthy elsewhere: mutating the
+   * broad body to fit that project would warp it for everyone (operator's
+   * rule). Instead the proposer is instructed to author a NEW project-scoped
+   * complement skill; the approve path creates it alongside the parent
+   * (same name, scope project:<hash> — resolveSkill prefers project scope).
+   */
+  derive_specific?: { project_hash: string; reason: string };
 }
 
 export interface MutationCandidate {
@@ -257,6 +266,14 @@ export interface MutationCycleResult {
   /** v0.60.0 — promote-worthy results are QUEUED for the operator, never
    *  auto-applied. This is the mres-<uuid> for zc_mutation_pending/approve. */
   pending_result_id?: string;
+  /**
+   * v0.61.0 M3e — skill-vs-bare-model uplift for the queued best candidate.
+   * kind "replay": same scenarios simulated with no skill document (bare/delta
+   * populated). kind "judge": marginal-value-over-base-knowledge score for the
+   * judge-only path. Informational — the operator decides if the skill earns
+   * its keep; a LOW-UPLIFT flag in the headline never auto-rejects.
+   */
+  uplift?: { kind: "replay" | "ab" | "judge"; skill: number; bare?: number; delta?: number; basis?: string; rationale: string };
   total_cost_usd:     number;
   duration_ms:        number;
   reason?:            string;       // for audit (why promoted / why archived)

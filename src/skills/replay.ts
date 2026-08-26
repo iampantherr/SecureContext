@@ -37,7 +37,14 @@ import { randomUUID } from "node:crypto";
 /** Pluggable executor — produces an actual_outcome from a skill+input. */
 export interface SkillExecutor {
   readonly id: string;
-  execute(skill: Skill, input: Record<string, unknown>): Promise<{
+  /**
+   * `meta.expected_keys` (v0.61.0 M3) names the rubric DIMENSIONS the scorer
+   * will grade — key names only, never target values. The executor is the
+   * examiner, not the test-taker: without the rubric it reports outcomes in
+   * its own vocabulary and every graded key scores 0 on a candidate that
+   * actually fixed the scenario (live-caught on the first M3c cycle).
+   */
+  execute(skill: Skill, input: Record<string, unknown>, meta?: { expected_keys?: string[] }): Promise<{
     actual_outcome: Record<string, unknown>;
     duration_ms:    number;
     cost_usd:       number;
@@ -138,7 +145,7 @@ export async function replayFixture(
     };
   }
 
-  const exec = await executor.execute(skill, fixture.input);
+  const exec = await executor.execute(skill, fixture.input, { expected_keys: Object.keys(fixture.expected) });
   const match = scoreFixtureMatch(exec.actual_outcome, fixture.expected);
 
   // Build a synthetic SkillRun so we can use scoreSkillRun's composite formula

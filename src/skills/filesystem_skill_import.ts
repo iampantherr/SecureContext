@@ -64,6 +64,9 @@ export interface AnthropicSkillFrontmatter {
   scope?:         string;
   intended_roles?: string[];
   tags?:          string[];
+  // v0.61.0 M3 — file-authoritative promotion lineage + replay fixtures.
+  promoted_from?: string;
+  fixtures?:      import("./types.js").SkillFixture[];
 }
 
 export interface ParsedFsSkill {
@@ -264,6 +267,13 @@ function parseFrontmatter(raw: string): { fm: AnthropicSkillFrontmatter; body: s
       continue;
     }
     if (rest.startsWith("[") && rest.endsWith("]")) {
+      // v0.61.0 — structured values (fixtures, etc.) are emitted by
+      // serializeSkillMd as inline JSON; parse those faithfully. The naive
+      // comma-split remains the fallback for plain string lists like
+      // `tags: [a, b]`, which are not valid JSON.
+      if (rest.startsWith("[{")) {
+        try { fm[key] = JSON.parse(rest); i++; continue; } catch { /* fall through */ }
+      }
       const inner = rest.slice(1, -1).trim();
       fm[key] = inner ? inner.split(",").map(s => s.trim().replace(/^["']|["']$/g, "")) : [];
     } else if (rest === "true" || rest === "false") {
@@ -290,6 +300,11 @@ function parseFrontmatter(raw: string): { fm: AnthropicSkillFrontmatter; body: s
     scope: fm.scope ? String(fm.scope) : undefined,
     intended_roles: Array.isArray(fm.intended_roles) ? fm.intended_roles as string[] : undefined,
     tags: Array.isArray(fm.tags) ? fm.tags as string[] : undefined,
+    // v0.61.0 M3d — promotion lineage is file-authoritative (writeSkillBody
+    // stamps it); dropping it here made every re-imported promotion look like
+    // an ordinary skill and blinded the live-outcome demotion backstop.
+    promoted_from: fm.promoted_from ? String(fm.promoted_from) : undefined,
+    fixtures: Array.isArray(fm.fixtures) ? fm.fixtures as never : undefined,
   };
   return { fm: finalFm, body, error: null, rawFm: fm };
 }

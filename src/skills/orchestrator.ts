@@ -76,21 +76,19 @@ export async function runMutationCycle(
 ): Promise<MutationCycleResult> {
   const startedAt = Date.now();
 
-  // Candidates are scored ONLY by fixture replay (they have no run history).
-  // Without fixtures every candidate scores 0.000, which reads as "all the
-  // candidates were terrible" — a fabricated zero (live E2E 2026-08-04).
-  // Say the true thing and skip the mutator's LLM cost entirely.
-  if ((parent.frontmatter.fixtures ?? []).length === 0) {
-    return {
-      skill_id: parent.skill_id, baseline_score: 0, candidates_count: 0,
-      best_candidate_score: 0, promoted: false, total_cost_usd: 0,
-      duration_ms: Date.now() - startedAt,
-      reason: "no fixtures defined in frontmatter — candidates cannot be evaluated; add `fixtures:` to the skill before proposing mutations",
-    };
-  }
-
   const mutator   = options.mutator  ?? await getMutator();
-  const executor  = options.executor ?? new LocalDeterministicExecutor();
+  // v0.61.0 M3 — env-selected replay executor: cli-headless SIMULATES an
+  // agent following the skill against each fixture scenario (the only honest
+  // replay for procedure documents); the deterministic executor remains for
+  // tests. options.executor always wins (test injection).
+  const { resolveReplayExecutorId } = await import("./replay_llm.js");
+  const replayExecId = resolveReplayExecutorId();
+  let executor = options.executor ?? new LocalDeterministicExecutor();
+  if (!options.executor && replayExecId === "cli-headless") {
+    const { CliHeadlessExecutor } = await import("./replay_llm.js");
+    executor = new CliHeadlessExecutor();
+  }
+  const llmReplay = !options.executor && replayExecId === "cli-headless";
 
   // Compute parent baseline — agg of recent runs OR replay-against-fixtures
   // if no recent runs exist.
@@ -115,13 +113,44 @@ export async function runMutationCycle(
   const exemplars = await getExemplarRuns(parent.skill_id, 5);
 
   // Step 1: invoke mutator
+  //
+  // v0.61.0 M3 — HELD-OUT fixtures: the proposer sees failure SYMPTOMS
+  // (traces) but never fixture expected-outputs, so a candidate cannot pass
+  // replay by memorizing the test (operator's anti-Goodhart rule). The full
+  // fixture set — including failure ANCHORS derived from the real traces —
+  // exists only on the replay/judge side.
+  // v0.61.0 M3c — broad-vs-specific fork: if a GLOBAL skill's failures
+  // concentrate in one project while it is healthy elsewhere, do NOT mutate
+  // the broad body — flip the cycle into derive-specific mode (proposer
+  // authors a project-scoped complement; approve path creates it alongside
+  // the parent instead of overwriting it).
+  const { assessFailureSpecificity } = await import("./specificity.js");
+  const specificity = assessFailureSpecificity(parent, recentRuns);
+
   const ctx: MutationContext = {
     parent,
     recent_runs:    recentRuns,
     failure_traces: recentRuns.filter((r) => r.failure_trace).map((r) => r.failure_trace as string),
-    fixtures:       parent.frontmatter.fixtures ?? [],
+    fixtures:       [],   // held out — replay-side only (see replaySet below)
     exemplars,
+    ...(specificity.fork ? { derive_specific: { project_hash: specificity.project_hash!, reason: specificity.reason } } : {}),
   };
+
+  // Replay set = authored fixtures + failure anchors derived from the REAL
+  // traces (must-pass: a candidate that doesn't clear them didn't fix the
+  // underlying thing). Anchor derivation costs a model call, so it runs only
+  // under the LLM executor — anchors are meaningless to the deterministic toy.
+  let replaySet = [...(parent.frontmatter.fixtures ?? [])];
+  if (llmReplay && ctx.failure_traces.length > 0) {
+    const { deriveFailureFixtures } = await import("./fixture_harvest.js");
+    const anchors = deriveFailureFixtures(ctx);
+    replaySet = [...anchors, ...replaySet];
+  }
+  // No fixtures at all (and none derivable): JUDGE-ONLY path — the gate is
+  // the independent judge + mandatory operator approval, stated honestly,
+  // instead of the old hard bail (which made 0-fixture skills unmutatable —
+  // 0 of 109 skills carried fixtures, so the whole engine was frozen).
+  const judgeOnly = replaySet.length === 0;
 
   let mutResult;
   try {
@@ -161,11 +190,30 @@ export async function runMutationCycle(
   let bestCandidateMutationId: string | null = null;
   let bestCandidateIndex:   number = -1;
 
+  // v0.61.0 M3 — LLM replay costs one model call per fixture per candidate;
+  // only the judge's top-K non-overfit candidates get replayed (the rest keep
+  // replay_score null — an honest "not evaluated", never a fabricated zero).
+  const replayTopK = parseInt(process.env["ZC_REPLAY_TOP_K"] ?? "", 10) || 2;
+  const replayEligible = new Set<number>(
+    !llmReplay
+      ? mutResult.candidates.map((_, i) => i)
+      : mutResult.candidates.map((_, i) => i)
+          .filter((i) => !judgeResult.verdicts[i]?.overfit)
+          .sort((a, b) => (judgeResult.verdicts[b]?.score ?? 0) - (judgeResult.verdicts[a]?.score ?? 0))
+          .slice(0, replayTopK));
+
+  let bestJudgeOnlyIndex = -1;   // judge-only path ranks by judge score
+  let bestCandidateAccuracy: number | null = null;  // mean fixture accuracy of best (uplift A/B)
+  const anchorFailed = new Set<number>();
+
   for (let i = 0; i < mutResult.candidates.length; i++) {
     const c = mutResult.candidates[i];
     const candidateHmac = await computeSkillBodyHmac(c.candidate_body);
     const mutationId = `mut-${randomUUID().slice(0, 12)}`;
     const candidateSkill = await candidateToSkill(parent, c);
+    // Replay against the FULL set (authored + derived anchors) — the proposer
+    // never saw these (held-out), so passing them cannot be memorization.
+    candidateSkill.frontmatter.fixtures = replaySet;
 
     const mutationRow: SkillMutation = {
       mutation_id:     mutationId,
@@ -190,6 +238,28 @@ export async function runMutationCycle(
       continue;
     }
 
+    // v0.60.0 M2 — an overfit verdict makes a candidate PERMANENTLY
+    // non-promotable, whatever its replay score: memorizing the failing case
+    // can ace a fixture set while fixing nothing (the operator's anti-Goodhart
+    // rule). The row is still recorded above, tagged [OVERFIT], for audit.
+    const isOverfit = judgeResult.verdicts[i]?.overfit === true;
+
+    // Judge-only path (no fixtures, none derivable): rank by INDEPENDENT
+    // judge score; replay is skipped honestly (score stays null).
+    if (judgeOnly) {
+      if (!isOverfit && (bestJudgeOnlyIndex === -1 ||
+          (judgeResult.verdicts[i]?.score ?? 0) > (judgeResult.verdicts[bestJudgeOnlyIndex]?.score ?? 0))) {
+        bestJudgeOnlyIndex       = i;
+        bestCandidate            = candidateSkill;
+        bestCandidateHmac        = candidateHmac;
+        bestCandidateMutationId  = mutationId;
+        bestCandidateIndex       = i;
+      }
+      continue;
+    }
+
+    if (!replayEligible.has(i)) continue;   // not replayed — honest null, not a zero
+
     const replay = await replaySkill(candidateSkill, executor);
     const candAgg = {
       avg_score:       replay.agg_score,
@@ -198,23 +268,35 @@ export async function runMutationCycle(
       avg_duration_ms: replay.avg_duration_ms,
       n:               replay.per_fixture.length,
     };
-    await resolveMutation(db, mutationId, { replay_score: candAgg.avg_score });
 
-    // v0.60.0 M2 — an overfit verdict makes a candidate PERMANENTLY
-    // non-promotable, whatever its replay score: memorizing the failing case
-    // can ace a fixture set while fixing nothing (the operator's anti-Goodhart
-    // rule). The row is still recorded above, tagged [OVERFIT], for audit.
-    if (judgeResult.verdicts[i]?.overfit) continue;
+    // v0.61.0 M3 — failure ANCHORS are must-pass: they encode the exact
+    // scenario that triggered this cycle. A candidate that aces everything
+    // else but not the anchors has not fixed the underlying thing.
+    const anchors = replay.per_fixture.filter((f) => String(f.fixture_id).startsWith("failure-anchor"));
+    const anchorsPass = anchors.length === 0 || anchors.every((f) => (f.accuracy ?? 0) >= 0.75);
+    if (!anchorsPass) anchorFailed.add(i);
+    await resolveMutation(db, mutationId, {
+      replay_score: candAgg.avg_score,
+      ...(anchorsPass ? {} : { judge_rationale: "[ANCHOR-FAIL] failing scenario not fixed — " + (judgeResult.verdicts[i]?.rationale ?? "") }),
+    });
+
+    if (isOverfit || !anchorsPass) continue;
     if (bestCandidateAgg === null || candAgg.avg_score > bestCandidateAgg.avg_score) {
       bestCandidate            = candidateSkill;
       bestCandidateAgg         = candAgg;
       bestCandidateHmac        = candidateHmac;
       bestCandidateMutationId  = mutationId;
       bestCandidateIndex       = i;
+      bestCandidateAccuracy    = replay.per_fixture.length > 0
+        ? replay.per_fixture.reduce((s, f) => s + (f.accuracy ?? 0), 0) / replay.per_fixture.length
+        : null;
     }
   }
 
-  if (bestCandidate === null || bestCandidateAgg === null) {
+  if (bestCandidate === null || (!judgeOnly && bestCandidateAgg === null)) {
+    const why = anchorFailed.size > 0
+      ? `no promotable candidate: ${anchorFailed.size} failed the failure-anchor gate (didn't fix the triggering scenario), rest overfit/not-replayed`
+      : judgeOnly ? "no non-overfit candidate to judge" : "no candidate replayed successfully";
     return {
       skill_id:           parent.skill_id,
       baseline_score,
@@ -223,18 +305,53 @@ export async function runMutationCycle(
       promoted:           false,
       total_cost_usd:     mutResult.total_cost_usd,
       duration_ms:        Date.now() - startedAt,
-      reason:             "no candidate replayed successfully",
+      reason:             why,
     };
   }
 
-  // Step 4: promotion decision
-  const promoteDecision = shouldPromote(bestCandidateAgg, parentBaselineAgg, acceptance);
+  // Step 4: promotion decision.
+  // v0.61.0 M3 — judge-only path (no fixtures existed and none were
+  // derivable): the gate is the independent judge's score against an explicit
+  // floor; the reason SAYS it is judge-only so the operator weighs it
+  // accordingly. Every path still ends at the operator queue, never auto-apply.
+  const judgeOnlyMin = parseFloat(process.env["ZC_JUDGE_ONLY_MIN"] ?? "") || 0.75;
+  const bestJudgeScore = judgeResult.verdicts[bestCandidateIndex]?.score ?? 0;
+  const promoteDecision = judgeOnly
+    ? (bestJudgeScore >= judgeOnlyMin
+        ? { promote: true,  reason: `JUDGE-ONLY (no fixtures): judge best ${bestJudgeScore.toFixed(2)} ≥ min ${judgeOnlyMin}`, delta: 0 }
+        : { promote: false, reason: `JUDGE-ONLY (no fixtures): judge best ${bestJudgeScore.toFixed(2)} < min ${judgeOnlyMin}`, delta: 0 })
+    : shouldPromote(bestCandidateAgg!, parentBaselineAgg, acceptance);
 
   const promoted = false;   // v0.60.0 — the cycle NEVER applies; the operator does.
   let promotionError: string | null = null;
   let pending_result_id: string | undefined;
   const new_skill_id: string | undefined = undefined;
   const archived_skill_id: string | undefined = undefined;
+
+  // v0.61.0 M3e — skill-vs-bare-model uplift, computed only for results the
+  // operator will actually see (promote-worthy). Replay path: the SAME
+  // scenarios simulated with NO skill document (direct A/B on the rubric).
+  // Judge-only path: a dedicated judge call scoring marginal value over
+  // base-model knowledge. Best-effort and informational — a null uplift
+  // never blocks queueing; a LOW-UPLIFT flag never auto-rejects.
+  let uplift: import("./uplift.js").UpliftResult | null = null;
+  if (promoteDecision.promote && bestCandidate && process.env["ZC_UPLIFT_CHECK"] !== "0") {
+    try {
+      const { measureReplayUplift, measureAbUplift, judgeSkillUplift } = await import("./uplift.js");
+      if (!judgeOnly && llmReplay && bestCandidateAccuracy !== null) {
+        uplift = measureReplayUplift(replaySet, bestCandidateAccuracy);
+      } else if (judgeOnly) {
+        const { resolveJudgeId } = await import("./judge.js");
+        if (resolveJudgeId() === "cli-headless") {
+          // Real A/B numbers even with no fixtures: synthesized held-out
+          // scenarios, simulated with and without the document. The rating-
+          // only judge call is the fallback when synthesis fails.
+          uplift = measureAbUplift(bestCandidate.body, parent.frontmatter.description ?? "")
+                ?? judgeSkillUplift(bestCandidate.body, parent.frontmatter.description ?? "");
+        }
+      }
+    } catch { uplift = null; }
+  }
 
   if (promoteDecision.promote && bestCandidateMutationId && bestCandidateIndex >= 0) {
     // v0.60.0 (operator decision 2026-08-25) — promote-worthy results are
@@ -262,8 +379,14 @@ export async function runMutationCycle(
         proposer_model: mutResult.proposer_model,
         bodies:         eligible,
         headline:
+          // The DERIVE-SPECIFIC[<hash>] prefix is the apply-path contract:
+          // approval creates a NEW project-scoped skill instead of
+          // overwriting the parent (see applyDeriveSpecific).
+          (ctx.derive_specific ? `DERIVE-SPECIFIC[${ctx.derive_specific.project_hash}] ` : "") +
           `promote-worthy (${promoteDecision.reason}) — judge(${judgeResult.judged_by}) best ` +
-          `${(judgeResult.verdicts[bestCandidateIndex]?.score ?? 0).toFixed(2)}, replay ${bestCandidateAgg?.avg_score.toFixed(2)} vs baseline ${baseline_score.toFixed(2)}`,
+          `${(judgeResult.verdicts[bestCandidateIndex]?.score ?? 0).toFixed(2)}, ` +
+          (bestCandidateAgg ? `replay ${bestCandidateAgg.avg_score.toFixed(2)} vs baseline ${baseline_score.toFixed(2)}` : `replay skipped (judge-only)`) +
+          (uplift ? (await import("./uplift.js")).upliftHeadline(uplift) : ""),
       });
       pending_result_id = ptr.result_id;
     } catch (e) {
@@ -279,17 +402,19 @@ export async function runMutationCycle(
     skill_id:           parent.skill_id,
     baseline_score,
     candidates_count:   mutResult.candidates.length,
-    best_candidate_score: bestCandidateAgg.avg_score,
+    best_candidate_score: bestCandidateAgg ? bestCandidateAgg.avg_score : bestJudgeScore,
     promoted,
     new_skill_id,
     archived_skill_id,
     pending_result_id,
+    uplift:             uplift ?? undefined,
     total_cost_usd:     mutResult.total_cost_usd,
     duration_ms:        Date.now() - startedAt,
     reason:             promotionError
       ? `promote-worthy ('${promoteDecision.reason}') but QUEUEING FAILED: ${promotionError}`
       : pending_result_id
-        ? `promote-worthy (${promoteDecision.reason}) — QUEUED FOR OPERATOR APPROVAL: ${pending_result_id}`
+        ? `promote-worthy (${promoteDecision.reason}) — QUEUED FOR OPERATOR APPROVAL: ${pending_result_id}` +
+          (uplift ? (await import("./uplift.js")).upliftHeadline(uplift) : "")
         : promoteDecision.reason,
   };
 }

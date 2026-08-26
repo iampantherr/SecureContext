@@ -3521,6 +3521,19 @@ async function dispatchToolCall(
             }
           }
 
+          // v0.61.0 M3d — live-outcome demotion backstop: every recorded
+          // outcome on a PROMOTED skill re-checks its rolling average against
+          // the parent baseline; a real-world regression rolls back to the
+          // parent body (the previously operator-approved state). Cheap no-op
+          // for non-promotions.
+          let demotion: { checked: boolean; regressed?: boolean; action?: string; detail?: string } | null = null;
+          try {
+            const { checkPromotionRegression } = await import("./skills/demotion.js");
+            demotion = await checkPromotionRegression(rsoDb, skill_id);
+          } catch (e) {
+            demotion = { checked: false, detail: `demotion hook error: ${(e as Error).message.slice(0, 150)}` };
+          }
+
           rsoDb.close();
           const summary = {
             run_id: runId,
@@ -3545,6 +3558,9 @@ async function dispatchToolCall(
             }
           } else {
             lines.push(`(no outcome row written — run was successful and no mutation needed)`);
+          }
+          if (demotion?.regressed) {
+            lines.push(`⚠ DEMOTION: ${demotion.action} — ${demotion.detail}`);
           }
           lines.push(``);
           lines.push("```json");
@@ -3851,9 +3867,48 @@ async function dispatchToolCall(
               `Nothing was changed — refusing to create a Postgres-only copy.` }], isError: true };
           }
 
+          // v0.61.0 M3c — derive-specific results create a NEW project-scoped
+          // complement skill next to the parent; the broad parent is never
+          // written or archived. Shared logic with the dashboard path.
+          const dsMatch = /^DERIVE-SPECIFIC\[([^\]]+)\]/.exec(result.headline ?? "");
+          if (dsMatch) {
+            try {
+              const { applyDeriveSpecific } = await import("./skills/skill_file_writer.js");
+              const created = await applyDeriveSpecific({
+                parentSkillDir:    skillDir,
+                parentFrontmatter: current.frontmatter as unknown as Record<string, unknown>,
+                projectHash:       dsMatch[1],
+                body:              picked.candidate_body,
+                resultId:          result_id,
+              });
+              await approveMutation(maDb, result_id, picked_candidate_index, rationale, AGENT_ID || "operator");
+              try {
+                const { recordMutationReview } = await import("./skills/storage_dual.js");
+                const { randomUUID: mrUUID } = await import("node:crypto");
+                await recordMutationReview({
+                  review_id:   `rev-${mrUUID().slice(0, 12)}`,
+                  mutation_id: result.mutation_id ?? result_id,
+                  result_id,
+                  action:      "approve",
+                  operator:    AGENT_ID || "operator",
+                  rationale:   `${rationale} [derive-specific: created ${created.name}@1.0.0@${created.scope}; parent untouched]`,
+                });
+              } catch { /* best-effort audit */ }
+              maDb.close();
+              return { content: [{ type: "text", text:
+                `✓ DERIVE-SPECIFIC approved: created project-scoped complement ${created.name}@1.0.0@${created.scope}\n` +
+                `  File: ${created.skillMdPath}\n` +
+                `  The broad skill ${current.skill_id} is UNTOUCHED — inside project ${dsMatch[1].slice(0, 12)}… ` +
+                `resolveSkill now prefers the complement.` }] };
+            } catch (e) {
+              maDb.close();
+              return { content: [{ type: "text", text: `Cannot apply derive-specific: ${(e as Error).message}\nNothing was changed.` }], isError: true };
+            }
+          }
+
           let written;
           try {
-            written = writeSkillBody(skillDir, picked.candidate_body, { version: newVersion });
+            written = writeSkillBody(skillDir, picked.candidate_body, { version: newVersion, promoted_from: result_id });
           } catch (e) {
             maDb.close();
             return { content: [{ type: "text", text:

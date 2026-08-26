@@ -159,7 +159,7 @@ export async function handleApproveFromDashboard(args: ApproveArgs): Promise<App
     // approved a change and SKILL.md never moved. Two approval paths, one bug;
     // fixing only the MCP one would have left the dashboard quietly minting
     // orphans — which is how the 28 archived rows accumulated.
-    const { writeSkillBody, reAdmitSkillDir } = await import("../skills/skill_file_writer.js");
+    const { writeSkillBody, reAdmitSkillDir, applyDeriveSpecific } = await import("../skills/skill_file_writer.js");
     const skillDir = (current as unknown as { skill_dir?: string | null }).skill_dir ?? null;
     if (!skillDir) {
       throw new Error(
@@ -167,7 +167,38 @@ export async function handleApproveFromDashboard(args: ApproveArgs): Promise<App
         `Skills are owned by ~/.claude/skills/<name>/SKILL.md. Nothing was changed.`,
       );
     }
-    const written = writeSkillBody(skillDir, picked.candidate_body, { version: newVersion });
+
+    // v0.61.0 M3c — derive-specific results create a NEW project-scoped
+    // complement skill; the broad parent is never written or archived.
+    const dsMatch = /^DERIVE-SPECIFIC\[([^\]]+)\]/.exec(result.headline ?? "");
+    if (dsMatch) {
+      const created = await applyDeriveSpecific({
+        parentSkillDir:    skillDir,
+        parentFrontmatter: current.frontmatter as unknown as Record<string, unknown>,
+        projectHash:       dsMatch[1],
+        body:              picked.candidate_body,
+        resultId:          args.result_id,
+      });
+      await approveMutation(db, args.result_id, args.picked_candidate_index, args.rationale, args.decided_by ?? "operator-dashboard");
+      try {
+        await recordMutationReview({
+          review_id:   `rev-${randomUUID().slice(0, 12)}`,
+          mutation_id: result.mutation_id ?? args.result_id,
+          result_id:   args.result_id,
+          action:      "approve",
+          operator:    args.decided_by ?? "operator-dashboard",
+          rationale:   `${args.rationale} [derive-specific: created ${created.name}@1.0.0@${created.scope} at ${created.skillDir}; parent untouched]`,
+        });
+      } catch { /* best-effort */ }
+      return {
+        prior_skill_id: current.skill_id,
+        new_skill_id:   `${created.name}@1.0.0@${created.scope}`,
+        picked_score:   picked.self_rated_score ?? 0,
+        retry_task_id:  null,
+        original_role:  result.original_role,
+      };
+    }
+    const written = writeSkillBody(skillDir, picked.candidate_body, { version: newVersion, promoted_from: args.result_id });
     const readmit = await reAdmitSkillDir(skillDir);
     if (!readmit.readmitted) {
       throw new Error(

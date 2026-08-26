@@ -157,8 +157,10 @@ export function buildProposerPrompt(ctx: MutationContext): string {
     "",
     "Apply this standard to every candidate you propose:",
     "- Each candidate must respect the four invariants",
-    "- Each candidate's body must NOT introduce hardcoded project specifics",
-    "  unless the parent skill is already project-scoped",
+    ...(ctx.derive_specific
+      ? ["- This candidate IS project-scoped: project specifics are expected and correct here"]
+      : ["- Each candidate's body must NOT introduce hardcoded project specifics",
+         "  unless the parent skill is already project-scoped"]),
     "- If the failure traces point at a missing bundled-script, your candidate",
     "  should describe the script (you can't modify scripts in this proposal —",
     "  body only — but a candidate that says 'run scripts/foo.py for X' is",
@@ -168,10 +170,27 @@ export function buildProposerPrompt(ctx: MutationContext): string {
     "  split into N smaller skills'; explain which in the rationale)",
   ].join("\n");
 
+  // v0.61.0 M3c — derive-specific mode: the mission flips from "edit the
+  // broad skill" to "author a project-scoped complement". The broad body
+  // becomes read-only reference material.
+  const ds = ctx.derive_specific;
+  const missionLines = ds
+    ? [
+        "SPECIFICITY FORK — read carefully, this overrides the usual mission.",
+        `A BROAD skill works fine in most projects but keeps failing in one specific project (${ds.project_hash.slice(0, 12)}…). ${ds.reason}`,
+        "Do NOT propose edits that narrow the broad skill to fit that project — that warps it for everyone.",
+        "Instead, propose 5 candidate bodies for a NEW PROJECT-SCOPED COMPLEMENT skill: it will carry the same name at scope project:<hash> and supersede the broad skill only inside that project.",
+        "Each candidate body should: (a) keep the broad procedure where it works, (b) add the project-specific handling the failure traces demand, (c) be fully self-contained (agents in that project will see ONLY this body, not the broad one).",
+        "",
+      ]
+    : [
+        "You are improving a skill that has been showing recent failures.",
+        "Propose 5 alternate skill bodies that would address the failure traces while still passing the fixtures.",
+        "",
+      ];
+
   return [
-    "You are improving a skill that has been showing recent failures.",
-    "Propose 5 alternate skill bodies that would address the failure traces while still passing the fixtures.",
-    "",
+    ...missionLines,
     "## Parent skill body (current version):",
     "```",
     ctx.parent.body,

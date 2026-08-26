@@ -10,6 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
+import { parseUpliftSegment } from "../skills/uplift.js";
 
 export function escapeHtml(s: string): string {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -1810,15 +1811,37 @@ function renderResultSection(row: Record<string, unknown>, projectNameMap: Map<s
     ? `<span class="project-name" title="project_hash: ${escapeHtml(project_hash)}">${escapeHtml(project_name)}</span>`
     : `<span class="project-name unresolved" title="No registry entry for hash ${escapeHtml(project_hash)} — set ZC_A2A_REGISTRY_PATH if your dispatcher data dir is non-standard">project:${escapeHtml(project_hash.slice(0, 8))}…</span>`;
 
+  // v0.61.0 M3e — base-model-vs-skill uplift as a FIRST-CLASS element, not
+  // buried prose (operator ask 2026-08-26). Parsed from the machine-written
+  // headline segment; the prose headline below shows the rest.
+  let upliftBadge = "";
+  let headlineProse = headline;
+  try {
+    const u = parseUpliftSegment(headline);
+    if (u) {
+      headlineProse = headline.replace(/ ?· uplift[^·]*$/, "").trimEnd();
+      const border = u.low ? "#b45309" : "#15803d";
+      const deltaTxt = u.delta !== null ? ` <strong style="color:${u.low ? "#f59e0b" : "#22c55e"}">Δ ${u.delta >= 0 ? "+" : ""}${u.delta.toFixed(2)}</strong>` : "";
+      const bareTxt = u.bare !== null
+        ? `base model <strong>${u.bare.toFixed(2)}</strong> → with skill <strong>${u.skill.toFixed(2)}</strong>${deltaTxt}`
+        : `marginal value over base model: <strong>${u.skill.toFixed(2)}</strong>`;
+      upliftBadge = `
+  <div class="uplift-badge" style="margin:6px 0;padding:6px 10px;border:1px solid ${border};border-radius:6px;display:inline-block;font-size:0.92em;">
+    🧪 <strong>Earns its keep?</strong> ${bareTxt}
+    <span style="opacity:0.7">(${escapeHtml(u.basis)})</span>${u.low ? ` <strong style="color:#f59e0b">⚠ LOW-UPLIFT — base model is nearly as good without it</strong>` : ""}
+  </div>`;
+    }
+  } catch { /* badge is decoration — never block the fragment */ }
+
   return `
 <div class="result" data-result-id="${escapeHtml(result_id)}">
   <div class="result-header">
     <span class="result-id">${escapeHtml(result_id)}</span>
     <span class="skill-id">${escapeHtml(skill_id)}</span>
-  </div>
+  </div>${upliftBadge}
   <div class="meta">
     project: ${projectLabel}<br>
-    ${escapeHtml(headline)}<br>
+    ${escapeHtml(headlineProse)}<br>
     proposer: <code>${escapeHtml(proposer_model)}</code> (${escapeHtml(proposer_role)}) ·
     candidates: <strong>${candidate_count}</strong> ·
     best score: <strong>${best_score === null ? "?" : best_score.toFixed(2)}</strong> ·

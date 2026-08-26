@@ -85,25 +85,44 @@ export async function upsertSkillPg(skill: Skill): Promise<void> {
   if (!ok) throw new SkillTamperedError(skill.skill_id, skill.body_hmac);
 
   await withClient(async (c: PoolClient) => {
-    await c.query(`
-      INSERT INTO skills_pg (
-        skill_id, name, version, scope, description, frontmatter, body, body_hmac,
-        source_path, promoted_from, created_at, archived_at, archive_reason
-      )
-      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, COALESCE($11::timestamptz, NOW()), $12::timestamptz, $13)
-      ON CONFLICT (skill_id) DO UPDATE SET
-        body          = EXCLUDED.body,
-        body_hmac     = EXCLUDED.body_hmac,
-        frontmatter   = EXCLUDED.frontmatter,
-        description   = EXCLUDED.description,
-        source_path   = EXCLUDED.source_path,
-        archived_at   = EXCLUDED.archived_at,
-        archive_reason= EXCLUDED.archive_reason
-    `, [
-      skill.skill_id, skill.frontmatter.name, skill.frontmatter.version, skill.frontmatter.scope,
-      skill.frontmatter.description, JSON.stringify(skill.frontmatter), skill.body, skill.body_hmac,
-      skill.source_path, skill.promoted_from, skill.created_at, skill.archived_at, skill.archive_reason,
-    ]);
+    await c.query("BEGIN");
+    try {
+      // v0.61.0 — supersession lives HERE, atomically. Inserting a new active
+      // version while the previous one is still active violated
+      // idx_skills_pg_active; every writer (fs import, approvals, demotion)
+      // hit it in the same order (write file → re-admit → archive old) and the
+      // import swallowed the error — which is how the cr-lifecycle-gate
+      // promotion approved cleanly yet left NO storage row for v1.0.1.
+      if (!skill.archived_at) {
+        await c.query(`
+          UPDATE skills_pg SET archived_at = NOW(), archive_reason = 'superseded_by_' || $3
+           WHERE name = $1 AND scope = $2 AND archived_at IS NULL AND skill_id <> $3
+        `, [skill.frontmatter.name, skill.frontmatter.scope, skill.skill_id]);
+      }
+      await c.query(`
+        INSERT INTO skills_pg (
+          skill_id, name, version, scope, description, frontmatter, body, body_hmac,
+          source_path, promoted_from, created_at, archived_at, archive_reason
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, COALESCE($11::timestamptz, NOW()), $12::timestamptz, $13)
+        ON CONFLICT (skill_id) DO UPDATE SET
+          body          = EXCLUDED.body,
+          body_hmac     = EXCLUDED.body_hmac,
+          frontmatter   = EXCLUDED.frontmatter,
+          description   = EXCLUDED.description,
+          source_path   = EXCLUDED.source_path,
+          archived_at   = EXCLUDED.archived_at,
+          archive_reason= EXCLUDED.archive_reason
+      `, [
+        skill.skill_id, skill.frontmatter.name, skill.frontmatter.version, skill.frontmatter.scope,
+        skill.frontmatter.description, JSON.stringify(skill.frontmatter), skill.body, skill.body_hmac,
+        skill.source_path, skill.promoted_from, skill.created_at, skill.archived_at, skill.archive_reason,
+      ]);
+      await c.query("COMMIT");
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    }
   });
 }
 
@@ -232,6 +251,7 @@ export async function getRecentSkillRunsPg(skill_id: string, limit = 20): Promis
       inputs: unknown; outcome_score: string | null; total_cost: string | null;
       total_tokens: number | null; duration_ms: number | null;
       status: SkillRun["status"]; failure_trace: string | null; ts: Date;
+      project_hash: string | null; agent_id: string | null; evidence: unknown;
     }>(`SELECT * FROM skill_runs_pg WHERE skill_id = $1 ORDER BY ts DESC LIMIT $2`, [skill_id, limit]);
     return r.rows.map((row) => ({
       run_id:        row.run_id,
@@ -246,6 +266,12 @@ export async function getRecentSkillRunsPg(skill_id: string, limit = 20): Promis
       status:        row.status,
       failure_trace: row.failure_trace,
       ts:            row.ts.toISOString(),
+      // v0.61.0 M3c — the mapper silently dropped project_hash (same defect
+      // class as skill_dir in v0.60): SELECT * returned it, the object elided
+      // it, and the specificity fork saw zero attributed runs.
+      project_hash:  row.project_hash ?? null,
+      agent_id:      row.agent_id ?? null,
+      evidence:      (row.evidence ?? null) as Record<string, unknown> | null,
     }));
   });
 }

@@ -59,6 +59,15 @@ export async function upsertSkill(db: DatabaseSync, skill: Skill): Promise<void>
   const ok = await verifySkillHmac(skill.body, skill.body_hmac);
   if (!ok) throw new SkillTamperedError(skill.skill_id, skill.body_hmac);
 
+  // v0.61.0 — supersede the previously-active version atomically (mirrors
+  // upsertSkillPg; without this, inserting a new active version while the old
+  // one is live violates idx_skills_active).
+  if (!skill.archived_at) {
+    db.prepare(`
+      UPDATE skills SET archived_at = datetime('now'), archive_reason = 'superseded_by_' || ?
+       WHERE name = ? AND scope = ? AND archived_at IS NULL AND skill_id <> ?
+    `).run(skill.skill_id, skill.frontmatter.name, skill.frontmatter.scope, skill.skill_id);
+  }
   db.prepare(`
     INSERT INTO skills (
       skill_id, name, version, scope, description, frontmatter, body, body_hmac,
@@ -214,6 +223,9 @@ export function getRecentSkillRuns(db: DatabaseSync, skill_id: string, limit = 2
     status:        r.status as SkillRun["status"],
     failure_trace: (r.failure_trace as string) ?? null,
     ts:            r.ts as string,
+    // v0.61.0 M3c — project attribution feeds the specificity fork.
+    project_hash:  (r.project_hash as string) ?? null,
+    agent_id:      (r.agent_id as string) ?? null,
     // v0.39.0 — evidence must flow through: the learned-helplessness guard reads
     // evidence.transient to exclude infra-blip failures from the mutation trigger.
     evidence:      typeof r.evidence === "string"
