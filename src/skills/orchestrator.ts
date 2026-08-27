@@ -163,6 +163,31 @@ export async function runMutationCycle(
   // 0 of 109 skills carried fixtures, so the whole engine was frozen).
   const judgeOnly = replaySet.length === 0;
 
+  // v0.63.0 V1 (detection-pipeline pattern: missing telemetry is a DEFECT,
+  // not a fact of life) — a skill that HAS real runs but still lands on the
+  // judge-only path means outcomes are being recorded without failure traces
+  // or evidence: the recording side is dropping the WHY. Left alone this
+  // skill is weakly gated forever. Surface an instrumentation nudge to the
+  // operator inbox (deduped, 7 days) instead of silently accepting it.
+  // Best-effort; never blocks the cycle. ZC_INSTRUMENTATION_NUDGE=0 disables.
+  if (judgeOnly && !descTune && recentRuns.length >= 3 && process.env["ZC_INSTRUMENTATION_NUDGE"] !== "0") {
+    try {
+      const { withClient } = await import("../pg_pool.js");
+      const marker = `INSTRUMENTATION GAP: ${parent.skill_id}`;
+      const dup = await withClient(async (c) => (await c.query(
+        `SELECT 1 FROM operator_inbox_pg WHERE question LIKE $1 AND created_at > now() - interval '7 days' LIMIT 1`,
+        [marker + "%"])).rows.length > 0);
+      if (!dup) {
+        const { createInboxEntry } = await import("../operator_inbox.js");
+        await createInboxEntry({
+          projectPath: options.projectPath ?? "global",
+          question: `${marker} — ${recentRuns.length} recorded runs but ZERO failure traces/evidence, so mutation cycles fall back to judge-only gating (no anchors, weak replay). The recording side is dropping the WHY: agents (or the harness) should pass failure_trace + evidence{what_didnt, recommendation_for_skill} to zc_record_skill_outcome for this skill. Until then, its improvements can't be verified against real failures.`,
+          fromAgent: "mutation-engine",
+        });
+      }
+    } catch { /* nudge is advisory — cycle continues */ }
+  }
+
   let mutResult;
   try {
     mutResult = await mutator.mutate(ctx);
@@ -380,6 +405,28 @@ export async function runMutationCycle(
     } catch { uplift = null; }
   }
 
+  // v0.63.0 V2 (detection-pipeline pattern: every change gets threat-modeled)
+  // — an ABUSE review of the winning body before it reaches the operator.
+  // HMAC/AST gate integrity and scripts; this gates what an obedient agent
+  // would be DIRECTED TO DO by the prose. Informational: high risk flags the
+  // headline (⚠ ABUSE-RISK), it never auto-rejects — same philosophy as
+  // uplift. Skipped for desc-tune (descriptions aren't procedures) and when
+  // no CLI judge is available. ZC_THREAT_REVIEW=0 disables.
+  let threat: import("./threat_review.js").ThreatReviewVerdict | null = null;
+  if (promoteDecision.promote && bestCandidate && !descTune && process.env["ZC_THREAT_REVIEW"] !== "0") {
+    try {
+      const { resolveJudgeId } = await import("./judge.js");
+      if (resolveJudgeId() === "cli-headless") {
+        const { threatReviewSkillBody } = await import("./threat_review.js");
+        threat = threatReviewSkillBody(
+          parent.frontmatter.name,
+          parent.frontmatter.description ?? "",
+          bestCandidate.body,
+        );
+      }
+    } catch { threat = null; }
+  }
+
   if (promoteDecision.promote && bestCandidateMutationId && bestCandidateIndex >= 0) {
     // v0.60.0 (operator decision 2026-08-25) — promote-worthy results are
     // ROUTED THROUGH THE OPERATOR APPROVAL QUEUE, never auto-applied. The
@@ -400,35 +447,49 @@ export async function runMutationCycle(
         .filter(({ i }) => !judgeResult.verdicts[i]?.overfit)
         .sort((a, b) => (a.i === bestCandidateIndex ? -1 : b.i === bestCandidateIndex ? 1 : 0))
         .map(({ c, i }) => ({ ...c, self_rated_score: judgeResult.verdicts[i]?.score ?? c.self_rated_score }));
+      // The DERIVE-SPECIFIC[<hash>] prefix is the apply-path contract:
+      // approval creates a NEW project-scoped skill instead of overwriting
+      // the parent (see applyDeriveSpecific). DESC-TUNE[marker] rewrites only
+      // the frontmatter description, resolving the dir from the HOME-RELATIVE
+      // marker (cycle may run host-side, approval in the container); a
+      // quarantine: marker additionally restores the skill to the active root
+      // once its description passes (see applyDescTune).
+      const queueHeadline =
+        (descTune
+          ? (() => {
+              const mk = dirToMarker((parent as { skill_dir?: string | null }).skill_dir);
+              return mk ? `DESC-TUNE[${mk}] ` : `DESC-TUNE `;
+            })()
+          : "") +
+        (ctx.derive_specific ? `DERIVE-SPECIFIC[${ctx.derive_specific.project_hash}] ` : "") +
+        `promote-worthy (${promoteDecision.reason}) — judge(${judgeResult.judged_by}) best ` +
+        `${(judgeResult.verdicts[bestCandidateIndex]?.score ?? 0).toFixed(2)}, ` +
+        (bestCandidateAgg ? `replay ${bestCandidateAgg.avg_score.toFixed(2)} vs baseline ${baseline_score.toFixed(2)}` : `replay skipped (judge-only)`) +
+        (uplift ? (await import("./uplift.js")).upliftHeadline(uplift) : "") +
+        (await import("./threat_review.js")).threatHeadline(threat);
       const ptr = await recordMutationResult(db, {
         mutation_id:    bestCandidateMutationId,
         skill_id:       parent.skill_id,
         project_hash:   hashProject(options.projectPath ?? "default"),
         proposer_model: mutResult.proposer_model,
         bodies:         eligible,
-        headline:
-          // The DERIVE-SPECIFIC[<hash>] prefix is the apply-path contract:
-          // approval creates a NEW project-scoped skill instead of
-          // overwriting the parent (see applyDeriveSpecific).
-          // DESC-TUNE[marker] is the apply-path contract: approval rewrites
-          // only the frontmatter description, resolving the dir from the
-          // HOME-RELATIVE marker (cycle may run host-side, approval in the
-          // container — absolute paths don't survive that boundary). A
-          // quarantine: marker additionally restores the skill to the active
-          // root once its description passes (see applyDescTune).
-          (descTune
-            ? (() => {
-                const mk = dirToMarker((parent as { skill_dir?: string | null }).skill_dir);
-                return mk ? `DESC-TUNE[${mk}] ` : `DESC-TUNE `;
-              })()
-            : "") +
-          (ctx.derive_specific ? `DERIVE-SPECIFIC[${ctx.derive_specific.project_hash}] ` : "") +
-          `promote-worthy (${promoteDecision.reason}) — judge(${judgeResult.judged_by}) best ` +
-          `${(judgeResult.verdicts[bestCandidateIndex]?.score ?? 0).toFixed(2)}, ` +
-          (bestCandidateAgg ? `replay ${bestCandidateAgg.avg_score.toFixed(2)} vs baseline ${baseline_score.toFixed(2)}` : `replay skipped (judge-only)`) +
-          (uplift ? (await import("./uplift.js")).upliftHeadline(uplift) : ""),
+        headline:       queueHeadline,
       });
       pending_result_id = ptr.result_id;
+
+      // v0.63.0 V3 — surface every queued result as an operator-inbox entry
+      // (the dashboard's notification feed), so an L1- or nightly-queued
+      // review is un-missable rather than a passive counter badge. The
+      // nightly sweep's own aggregate summary was retired in favor of this
+      // per-result notice. Best-effort.
+      try {
+        const { createInboxEntry } = await import("../operator_inbox.js");
+        await createInboxEntry({
+          projectPath: options.projectPath ?? "global",
+          question: `PENDING REVIEW ${ptr.result_id}: ${parent.skill_id} — ${queueHeadline.slice(0, 300)} → review in the dashboard Skills tab (:3099/dashboard).`,
+          fromAgent: "mutation-engine",
+        });
+      } catch { /* notification is best-effort — the queue row is the truth */ }
     } catch (e) {
       promotionError = (e as Error).message;
     }
@@ -448,6 +509,7 @@ export async function runMutationCycle(
     archived_skill_id,
     pending_result_id,
     uplift:             uplift ?? undefined,
+    threat_review:      threat ?? undefined,
     total_cost_usd:     mutResult.total_cost_usd,
     duration_ms:        Date.now() - startedAt,
     reason:             promotionError

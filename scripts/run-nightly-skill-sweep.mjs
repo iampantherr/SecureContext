@@ -38,7 +38,7 @@ const SC = dirname(dirname(fileURLToPath(import.meta.url)));   // repo root
 const summary = {
   started_at: new Date().toISOString(),
   hygiene: null, orphan_roles: null, l2: null, body_cycles: [], desc_cycles: [],
-  skipped: [], errors: [], ended_at: null,
+  threat_reviews: null, skipped: [], errors: [], ended_at: null,
 };
 const LOG_DIR = join(homedir(), ".claude", "zc-ctx", "logs");
 mkdirSync(LOG_DIR, { recursive: true });
@@ -265,11 +265,38 @@ try {
     }
   } catch (e) { summary.errors.push(`desc cycles: ${e.message}`); }
 
-  // ── summary → operator inbox (only when there is something to review) ─────
-  const queuedResults = [...summary.body_cycles, ...summary.desc_cycles].filter((c) => c.pending);
-  if (queuedResults.length > 0 || (summary.l2?.queued ?? 0) > 0) {
-    await inbox(`NIGHTLY SWEEP: ${queuedResults.length} mutation result(s) + ${summary.l2?.queued ?? 0} cross-project promotion(s) queued for your review at :3099/dashboard (Skills tab). ` +
-      queuedResults.map((c) => `${c.skill_id} → ${c.pending}`).join("; "));
+  // ── 5. V2: threat-review of skills admitted/updated in the last 24h ───────
+  // "Every change gets threat-modeled" — human-authored skills enter through
+  // the filesystem import, which checks integrity and scripts but never asks
+  // what an obedient agent would be DIRECTED to do. Mutation candidates get
+  // this review inside the cycle; this pass covers everything else. The 24h
+  // window doubles as the dedup (nightly cadence → each admission reviewed
+  // once). Advisory only: medium/high → operator inbox.
+  try {
+    if (process.env.ZC_THREAT_REVIEW !== "0") {
+      const recent = await withClient(async (c) => (await c.query(
+        `SELECT DISTINCT skill_name FROM skill_admission_log_pg
+          WHERE event IN ('admitted','updated') AND ts > now() - interval '24 hours'`)).rows.map((r) => r.skill_name));
+      const { threatReviewSkillBody } = await import(`file:///${SC}/dist/skills/threat_review.js`.replace(/\\/g, "/"));
+      summary.threat_reviews = [];
+      for (const name of recent.slice(0, 3)) {
+        const s = skills.find((x) => x.frontmatter.name === name);
+        if (!s) continue;
+        const t = threatReviewSkillBody(name, s.frontmatter.description ?? "", s.body);
+        summary.threat_reviews.push({ name, risk: t?.risk ?? "review-failed", rationale: (t?.rationale ?? "").slice(0, 120) });
+        if (t && t.risk !== "low") {
+          await inbox(`THREAT-REVIEW: ${name} (admitted/updated <24h ago) — risk ${t.risk.toUpperCase()}: ${t.rationale}. Review the skill body; deterministic gates (HMAC/AST) still hold, this is about what the prose directs agents to do.`);
+        }
+      }
+      if (recent.length > 3) summary.threat_reviews.push({ name: `(+${recent.length - 3} more deferred to next sweep)`, risk: "-", rationale: "" });
+    }
+  } catch (e) { summary.errors.push(`threat reviews: ${e.message}`); }
+
+  // Per-result PENDING REVIEW inbox notices are emitted by the cycle itself
+  // (v0.63.0 V3) — no aggregate summary needed here anymore. L2 promotions
+  // still get one line since they queue outside the cycle.
+  if ((summary.l2?.queued ?? 0) > 0) {
+    await inbox(`NIGHTLY SWEEP: ${summary.l2.queued} cross-project promotion candidate(s) queued for review (zc_skill_pending_promotions).`);
   }
   db.close();
   finish(summary.errors.length > 0 ? 1 : 0);

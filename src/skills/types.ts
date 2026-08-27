@@ -283,6 +283,9 @@ export interface MutationCycleResult {
    * its keep; a LOW-UPLIFT flag in the headline never auto-rejects.
    */
   uplift?: { kind: "replay" | "ab" | "judge"; skill: number; bare?: number; delta?: number; basis?: string; rationale: string };
+  /** v0.63.0 V2 — abuse review of the queued best candidate (low risks are
+   *  silent in the headline; this field records that the review RAN). */
+  threat_review?: { risk: "low" | "medium" | "high"; rationale: string };
   total_cost_usd:     number;
   duration_ms:        number;
   reason?:            string;       // for audit (why promoted / why archived)
