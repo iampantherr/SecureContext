@@ -189,7 +189,12 @@ const summaryRedirectEnabled = process.env.ZC_SUMMARY_REDIRECT === "1";
 const dedupEnabled = process.env.ZC_READ_DEDUP_ENABLED !== "0";
 
 const sessionId = input.session_id ?? input.sessionId ?? "default";
-const projectPath = projectPath0;
+// v0.64 — WSL agents: the store is keyed by the WINDOWS project path (agents
+// export ZC_PROJECT_PATH to pin it), but this hook sees WSL /mnt/c paths.
+// Keying by the local form found no summaries → silent pass-through — the
+// redirect was a no-op for the whole fleet (same bug as prewrite-impact,
+// found 2026-08-30). File operations keep projectPath0 (the LOCAL root).
+const projectPath = process.env.ZC_PROJECT_PATH || projectPath0;
 
 /**
  * v0.22.9 — fire-and-forget telemetry for every hook invocation outcome.

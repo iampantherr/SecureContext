@@ -53,7 +53,9 @@ if (process.env.ZC_IMPACT_ON_WRITE === "0") allow();
 const args = input.tool_input ?? input.arguments ?? {};
 const rawPath = args.file_path ?? args.path ?? "";
 if (!rawPath) allow();
-if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(rawPath)) allow();
+// v0.64 — .py included: the A2A hub is Python and the call graph indexes it;
+// a JS-only filter made the hook a no-op on the exact fleet it was installed for.
+if (!/\.(ts|tsx|js|jsx|mjs|cjs|py)$/i.test(rawPath)) allow();
 
 const MIN_CALLERS = Number(process.env.ZC_IMPACT_MIN_CALLERS ?? "3");
 const sessionId = input.session_id ?? input.sessionId ?? "default";
@@ -61,9 +63,16 @@ const sessionId = input.session_id ?? input.sessionId ?? "default";
 /** Repo root for the FILE, not the session cwd (same lesson as the read hook). */
 
 const sessionCwd = input.cwd ?? process.cwd();
-const projectPath = resolveProjectRoot(rawPath, sessionCwd);
-const rel = rawPath.toLowerCase().startsWith(projectPath.toLowerCase())
-  ? rawPath.slice(projectPath.length).replace(/^[\\/]+/, "").replace(/\\/g, "/")
+const localRoot = resolveProjectRoot(rawPath, sessionCwd);
+// v0.64 — WSL agents: the store is keyed by the WINDOWS project path (agents
+// export ZC_PROJECT_PATH to pin it), but this hook runs with WSL /mnt/c paths.
+// Hashing the WSL form finds no graph → "unbuilt" → silent allow — the hook
+// becomes a no-op exactly where it was installed to enforce (caught 2026-08-30
+// while wiring the hook into the A2A fleet). Store key: ZC_PROJECT_PATH when
+// set; file operations keep the LOCAL path.
+const projectPath = process.env.ZC_PROJECT_PATH || localRoot;
+const rel = rawPath.toLowerCase().startsWith(localRoot.toLowerCase())
+  ? rawPath.slice(localRoot.length).replace(/^[\\/]+/, "").replace(/\\/g, "/")
   : rawPath.replace(/\\/g, "/");
 
 try {

@@ -44,7 +44,8 @@ const threshold = parseInt(process.env.ZC_BASH_CAPTURE_LINES ?? "50", 10);
 const lineCount = (stdout.match(/\n/g) ?? []).length + 1;
 if (lineCount < threshold) process.exit(0);
 
-const projectPath = input.cwd ?? process.cwd();
+// v0.64 — WSL agents: store keys use the WINDOWS project path when pinned.
+const projectPath = process.env.ZC_PROJECT_PATH || input.cwd || process.cwd();
 
 try {
   const scPath = process.env.ZC_CTX_DIST ??
@@ -62,6 +63,9 @@ try {
   // of agent reliability — the archive still happens, agent retrieves
   // via zc_search when needed.
   captureToolOutput(projectPath, command, stdout, exit);
+  // v0.64 — the PG mirror inside captureToolOutput is fire-and-forget; exiting
+  // immediately killed it before the write flushed (same bug as postedit-reindex).
+  await new Promise((r) => setTimeout(r, 2000));
   process.exit(0);
 } catch {
   process.exit(0);

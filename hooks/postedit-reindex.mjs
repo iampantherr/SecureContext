@@ -37,7 +37,10 @@ const path = toolArgs.file_path ?? toolArgs.path ?? "";
 if (!path) process.exit(0);
 
 const sessionId   = input.session_id ?? input.sessionId ?? "default";
-const projectPath = input.cwd ?? process.cwd();
+// v0.64 — WSL agents: store keys use the WINDOWS project path (ZC_PROJECT_PATH),
+// file operations keep the LOCAL root (same split as prewrite-impact/preread-dedup).
+const localRoot   = input.cwd ?? process.cwd();
+const projectPath = process.env.ZC_PROJECT_PATH || localRoot;
 
 try {
   const st = statSync(path);
@@ -53,7 +56,7 @@ try {
 
   const content = readFileSync(path, "utf8");
   // Relative path key (same scheme as indexProject)
-  const relPath = path.replace(projectPath, "").replace(/^[\/\\]+/, "").replace(/\\/g, "/");
+  const relPath = path.replace(localRoot, "").replace(/^[\/\\]+/, "").replace(/\\/g, "/");
   const source  = `file:${relPath}`;
 
   // Summarize (semantic if Ollama, truncation fallback otherwise)
@@ -66,4 +69,8 @@ try {
   // Silent — never break the agent on hook failure
 }
 
+// v0.64 — indexContent's PG mirror is fire-and-forget; an immediate exit(0)
+// killed it before the write flushed, so PG never saw hook reindexes (SQLite,
+// being sync, always did — a silent parity violation). Bounded drain, then exit.
+await new Promise((r) => setTimeout(r, 2000));
 process.exit(0);
