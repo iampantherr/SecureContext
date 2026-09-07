@@ -223,10 +223,20 @@ function verifySecretFilePermissions(path: string): void {
   // check the bit pattern but treat Windows specially — if the bits look
   // wide-open we still warn but don't refuse, because Windows handles ACLs
   // separately (and outside our control via Node's fs API).
+  //
+  // WSL2 + DrvFs (NTFS) note: when ~/.claude is a symlink into a Windows
+  // NTFS mount (9p), Node's statSync always reports mode 0777 regardless of
+  // what chmod is called with — chmod is a no-op on DrvFs. In that
+  // environment Windows ACLs protect the file, not POSIX bits, so we skip
+  // the strict mode check just as we do on win32.
   try {
     const st = statSync(path);
     const isWindows = process.platform === "win32";
-    if (!isWindows) {
+    // Detect WSL running against a DrvFs/9p mount: st.mode is always 0777
+    // on NTFS and chmod is a no-op, so treat it like Windows.
+    const isWSLDrvFs = !isWindows && (st.mode & 0o777) === 0o777 &&
+      (process.env["WSL_DISTRO_NAME"] !== undefined || process.env["WSL_INTEROP"] !== undefined);
+    if (!isWindows && !isWSLDrvFs) {
       // Mode check on POSIX: must be 0600 (no group/other read or write)
       const mode = st.mode & 0o777;
       if (mode !== 0o600) {
@@ -236,8 +246,7 @@ function verifySecretFilePermissions(path: string): void {
         );
       }
     }
-    // On Windows we skip strict mode check; users should rely on default
-    // home-directory ACLs which restrict access to the user.
+    // On Windows (and WSL+DrvFs) we skip strict mode check; file is protected by OS ACLs.
   } catch (e) {
     if ((e as Error).message.startsWith("Machine secret file")) throw e;
     throw new Error(`Failed to stat machine secret file: ${(e as Error).message}`);
