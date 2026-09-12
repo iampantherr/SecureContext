@@ -319,7 +319,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         key:        { type: "string", description: "Short identifier (max 100 chars)" },
-        value:      { type: "string", description: "The fact to remember. LIMITS, and note that oversize values are TRUNCATED, never rejected — the overflow is lost: 500 chars for ordinary facts; 2000 for the pinned kinds (kind:'constraint', kind:'antipattern'), so a standing rule can carry its 'how to apply' clause instead of being cut mid-sentence. Writing a long fact WITHOUT a pinned kind silently costs you everything past 500. If the fact genuinely needs more room, either use a pinned kind or split it across linked keys (foo, foo_pt2) and reference them with [[foo_pt2]]." },
+        value:      { type: "string", description: "The fact to remember. LIMITS (2026-09-12: oversize values are REFUSED with the limit stated — nothing is written, never a fragment): 500 chars for ordinary facts; 2000 for the pinned kinds (kind:'constraint', kind:'antipattern'), so a standing rule can carry its 'how to apply' clause. A long record belongs in a FILE: store its path plus at most three lines. If a fact genuinely needs more room, use a pinned kind or split it across linked keys (foo, foo_pt2) and reference them with [[foo_pt2]]." },
         scope:      { type: "string", enum: ["project", "global"], description: "'global' shares a constraint/antipattern with EVERY project. Use for lessons about how code fails ('a stub returning a benign default hides a missing implementation'), not for anything repo-specific. Ignored for non-pinned kinds." },
         importance: { type: "integer", minimum: 1, maximum: 5, description: "1=ephemeral, 3=normal, 5=critical" },
         agent_id:   { type: "string", description: "Agent namespace for parallel use (default: 'default')" },
@@ -1395,6 +1395,20 @@ async function _handleRemoteTool(
         // when ZC_AGENT_ID isn't set (ad-hoc / non-A2A use).
         // Agent can still explicitly pass agent_id="default" to write to the
         // shared pool intentionally (cross-agent coordination notes).
+        // 2026-09-12 — REFUSE oversize values instead of storing a fragment. The
+        // orchestrator's pause/resume record was cut by 3,953 chars at write time
+        // and the fragment read as complete; effect-verify reported it, but a
+        // truncated record is worse than none. Nothing is written on refusal.
+        {
+          const v = String(body["value"] ?? "");
+          const pinned = body["kind"] === "constraint" || body["kind"] === "antipattern";
+          const cap = pinned ? 2000 : 500;
+          if (v.length > cap) {
+            return { content: [{ type: "text", text:
+              `REFUSED — nothing written. value is ${v.length} chars; the limit is ${cap} for ${pinned ? "pinned kinds (constraint/antipattern)" : "ordinary facts"}. ` +
+              `A fragment is worse than a refusal. Store a POINTER (file path + three lines) or split across linked keys ([[key_pt2]]).` }] };
+          }
+        }
         result = await apiCall("POST", "/api/v1/remember", {
           projectPath: PROJECT_PATH,
           key:         body["key"],
@@ -2068,6 +2082,14 @@ async function dispatchToolCall(
           confidence?: number;
           resolution?: "open" | "resolved_correct" | "resolved_incorrect" | "resolved_partial";
         };
+        {
+          // 2026-09-12 — same refusal as the API path: a fragment is worse than none.
+          const cap = kind === "constraint" || kind === "antipattern" ? 2000 : 500;
+          if (String(value ?? "").length > cap) {
+            return { content: [{ type: "text", text:
+              `REFUSED — nothing written. value is ${String(value).length} chars; the limit is ${cap}. Store a POINTER (file path + three lines) or split across linked keys ([[key_pt2]]).` }] };
+          }
+        }
         rememberFact(PROJECT_PATH, key, value, importance, agent_id, undefined, { kind, confidence, resolution });
         // v0.31.0 — re-arm the in-process contradiction scan so the next recall re-scans
         // a newly-recorded fact (in-process parity with the daemon's write-time re-arm).

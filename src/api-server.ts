@@ -204,6 +204,31 @@ function createFastifyInstance() {
   });
 }
 
+// 2026-09-12 — per-agent concurrency slots (see the preHandler hook). In-memory,
+// per process; waiters resolve FIFO on release, and give up waiting after 30s so
+// a wedged reply can never starve an agent (it proceeds, slightly over the cap).
+const AGENT_MAX_CONCURRENCY = Math.max(1, parseInt(process.env["ZC_AGENT_MAX_CONCURRENCY"] ?? "2", 10) || 2);
+const agentSlots = new Map<string, { active: number; waiters: Array<() => void> }>();
+function acquireAgentSlot(key: string): Promise<void> {
+  const s = agentSlots.get(key) ?? { active: 0, waiters: [] };
+  agentSlots.set(key, s);
+  if (s.active < AGENT_MAX_CONCURRENCY) { s.active++; return Promise.resolve(); }
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const go = () => { if (done) return; done = true; s.active++; resolve(); };
+    s.waiters.push(go);
+    setTimeout(() => { if (!done) { const i = s.waiters.indexOf(go); if (i >= 0) s.waiters.splice(i, 1); go(); } }, 30_000).unref?.();
+  });
+}
+function releaseAgentSlot(key: string): void {
+  const s = agentSlots.get(key);
+  if (!s) return;
+  s.active = Math.max(0, s.active - 1);
+  const next = s.waiters.shift();
+  if (next) next();
+  else if (s.active === 0) agentSlots.delete(key);
+}
+
 export async function createApiServer(storeOverride?: Store) {
   const store = storeOverride ?? await createStore();
   const app   = createFastifyInstance();
@@ -297,6 +322,22 @@ export async function createApiServer(storeOverride?: Store) {
     // silently dropped on the floor for everyone running with API mode +
     // ZC_API_KEY since v0.12.1.
     if (request.url.startsWith("/api/v1/telemetry/")) return;
+
+    // 2026-09-12 — PER-AGENT CONCURRENCY CAP. One agent fired 24 zc calls in
+    // parallel and blew the heap three times in three minutes (sc-api OOM ×3,
+    // 2026-09-10 00:08Z); at 1G it pins a core instead. Requests from the same
+    // agent beyond ZC_AGENT_MAX_CONCURRENCY (default 2) WAIT for a slot (never
+    // rejected; a 30s cap so a stuck reply can't wedge an agent). Keyed on the
+    // body's agentId/agent_id, else the client IP.
+    if (request.method === "POST" && request.url.startsWith("/api/v1/")) {
+      const b = request.body as Record<string, unknown> | undefined;
+      const agentKey = String(b?.["agentId"] ?? b?.["agent_id"] ?? request.ip ?? "anon");
+      await acquireAgentSlot(agentKey);
+      let released = false;
+      const release = () => { if (!released) { released = true; releaseAgentSlot(agentKey); } };
+      reply.raw.once("finish", release);
+      reply.raw.once("close", release);
+    }
 
     // API key check — S3 (v0.46.0): the master ZC_API_KEY (operator) OR a per-user
     // key from api_keys_pg ("zck_…", sha256-looked-up, revocable). The resolved

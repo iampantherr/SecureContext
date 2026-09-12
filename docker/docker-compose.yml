@@ -74,6 +74,13 @@ services:
       ZC_PG_URL:    postgresql://${POSTGRES_USER:-scuser}:${POSTGRES_PASSWORD}@sc-postgres:5432/${POSTGRES_DB:-securecontext}
       ZC_API_PORT:  3099
       ZC_API_HOST:  "0.0.0.0"
+      # 2026-09-10 — 24 parallel zc calls from one agent blew the ~256 MB default heap (3 OOM crashes in 3 min); explicit ceiling under the 1G limit.
+      NODE_OPTIONS: "--max-old-space-size=768"
+      # 2026-09-12 — pinned-rule budget (12 facts / 15000 chars left 65 standing rules never loading
+      # for the A2A fleet) and the per-agent zc call concurrency cap (see api-server preHandler).
+      ZC_PINNED_MAX_FACTS: "${ZC_PINNED_MAX_FACTS:-80}"
+      ZC_PINNED_MAX_CHARS: "${ZC_PINNED_MAX_CHARS:-40000}"
+      ZC_AGENT_MAX_CONCURRENCY: "${ZC_AGENT_MAX_CONCURRENCY:-2}"
       ZC_API_KEY:   ${ZC_API_KEY:?ZC_API_KEY is required}
       # Optional: token for the dashboard's skills git-sync push (from docker/.env).
       # Redacted from all dashboard output; blank = commit-only (no push).
@@ -170,7 +177,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1G
         reservations:
           memory: 128M
 
