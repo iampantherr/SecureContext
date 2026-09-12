@@ -42,6 +42,33 @@ let raw = "";
 for await (const chunk of process.stdin) raw += chunk;
 
 const allow = () => process.exit(0);
+// ZC_HOOK_DEBUG=1 traces every decision to stderr (2026-09-12: a silent allow is the
+// failure mode this hook keeps falling into; make each exit nameable).
+const dbg = (m) => { if (process.env.ZC_HOOK_DEBUG) process.stderr.write("[prewrite-impact] " + m + "\n"); };
+
+// 2026-09-12 — MANDATE. Measured over the A2A management-plane phase (Sep 7-10):
+// the developer edited 1,556 times and called zc_impact 4 times; this hook
+// denied nothing because the project's graph was never built and "unbuilt" was
+// a silent allow. Now: the caller map is SHOWN before a file's first edit in a
+// session whether or not anything calls it (deny-once, the deny text IS the
+// map), and an unbuilt graph is a deny-once-per-session that names the fix.
+// Proportionate still: once per file, never on the second attempt.
+async function denyWith(outcome, detail, reason, telemetry) {
+  try {
+    const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
+    if (apiUrl) {
+      const resp = await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(process.env.ZC_API_KEY ? { Authorization: `Bearer ${process.env.ZC_API_KEY}` } : {}) },
+        body: JSON.stringify({ ...telemetry, outcome, detail }),
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!resp.ok) process.stderr.write(`[zc-ctx telemetry] ${outcome} REJECTED ${resp.status}\n`);
+    }
+  } catch (e) { process.stderr.write(`[zc-ctx telemetry] ${outcome} failed: ${String(e).slice(0, 160)}\n`); }
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }));
+  process.exit(0);
+}
 
 let input;
 try { input = JSON.parse(raw); } catch { allow(); }
@@ -57,7 +84,7 @@ if (!rawPath) allow();
 // a JS-only filter made the hook a no-op on the exact fleet it was installed for.
 if (!/\.(ts|tsx|js|jsx|mjs|cjs|py)$/i.test(rawPath)) allow();
 
-const MIN_CALLERS = Number(process.env.ZC_IMPACT_MIN_CALLERS ?? "3");
+const MIN_CALLERS = Number(process.env.ZC_IMPACT_MIN_CALLERS ?? "1");   // 2026-09-12: was 3; one caller is one thing you can break
 const sessionId = input.session_id ?? input.sessionId ?? "default";
 
 /** Repo root for the FILE, not the session cwd (same lesson as the read hook). */
@@ -71,9 +98,19 @@ const localRoot = resolveProjectRoot(rawPath, sessionCwd);
 // while wiring the hook into the A2A fleet). Store key: ZC_PROJECT_PATH when
 // set; file operations keep the LOCAL path.
 const projectPath = process.env.ZC_PROJECT_PATH || localRoot;
-const rel = rawPath.toLowerCase().startsWith(localRoot.toLowerCase())
-  ? rawPath.slice(localRoot.length).replace(/^[\\/]+/, "").replace(/\\/g, "/")
-  : rawPath.replace(/\\/g, "/");
+// 2026-09-12 — compare with one slash style: resolveProjectRoot returns backslashes on
+// Windows while the tool may pass forward slashes; a failed prefix match sent the
+// ABSOLUTE path to the graph (keyed by repo-relative paths) → "0 targets" on a built graph.
+const _fwd = (s) => String(s).split("\\").join("/");
+const _mnt = (q) => { const m = /^([A-Za-z]):\/(.*)$/.exec(_fwd(q)); return m ? "/mnt/" + m[1].toLowerCase() + "/" + m[2] : _fwd(q); };
+// 2026-09-12 — rel is measured from the LONGEST matching root: the file's git root, ZC_PROJECT_PATH
+// as given, or ZC_PROJECT_PATH in /mnt form (WSL agents). A project nested inside a parent git
+// repo otherwise yields "Project/index.js" against a graph keyed by "index.js" → 0 targets.
+const _raw = _fwd(rawPath);
+const _roots = [localRoot, process.env.ZC_PROJECT_PATH, process.env.ZC_PROJECT_PATH && _mnt(process.env.ZC_PROJECT_PATH)]
+  .filter(Boolean).map(_fwd).filter((r) => _raw.toLowerCase().startsWith(r.toLowerCase().replace(/\/+$/, "") + "/"))
+  .sort((x, y) => y.length - x.length);
+const rel = _roots.length ? _raw.slice(_roots[0].replace(/\/+$/, "").length + 1) : _raw;
 
 try {
   const scPath = process.env.ZC_REPO_DIR
@@ -85,16 +122,29 @@ try {
   const seenKey = `impact-write:${rel}`;
   // Once per file per session: the point is to make the cascade visible before
   // the first change, not to tax every subsequent one.
-  if (harness.wasReadThisSession?.(projectPath, sessionId, seenKey)) allow();
+  dbg(`project=${projectPath} rel=${rel} session=${sessionId}`);
+  if (harness.wasReadThisSession?.(projectPath, sessionId, seenKey)) { dbg("seen this session → allow"); allow(); }
 
   const { createStore } = await import(url("store.js"));
   const { renderImpact } = await import(url("indexing/call_edges.js"));
   const store = await createStore();
   const impact = await store.callImpactFor(projectPath, { file: rel });
+  dbg(`impact built=${impact.built} targets=${impact.targets.length} dynamic=${impact.dynamicSites}`);
 
-  // Unbuilt layer: say nothing. A banner on every edit would train agents to
-  // skip the block, and "not built" is not "nothing depends on this".
-  if (!impact.built || impact.targets.length === 0) allow();
+  const telemetry = { projectPath, agentId: process.env.ZC_AGENT_ID || "default", toolName, filePath: rawPath };
+  // 2026-09-12 — UNBUILT is not "nothing depends on this". Deny ONCE per session
+  // with the remedy; after that, allow (a hook that blocks forever gets disabled,
+  // and postedit-reindex builds the graph as files are touched anyway).
+  if (!impact.built) {
+    const unbuiltKey = "impact-unbuilt-notified";
+    if (harness.wasReadThisSession?.(projectPath, sessionId, unbuiltKey)) allow();
+    try { harness.recordSessionRead?.(projectPath, sessionId, unbuiltKey); } catch { /* best effort */ }
+    await denyWith("impact_unbuilt_deny", `graph not built for ${projectPath}`,
+      `[zc-ctx] The call graph for this project is NOT BUILT, so nobody can say what depends on ${rel}. ` +
+      `Build it once: zc_index_project() (or ask the operator to index the project), then re-issue this edit. ` +
+      `Until it is built, every zc_impact answer is "unknown" — and unknown is not "safe to change". ` +
+      `This notice appears once per session.`, telemetry);
+  }
 
   let targets = impact.targets;
 
@@ -123,55 +173,35 @@ try {
   const crossFile = targets.filter(
     (t) => t.callers >= MIN_CALLERS && t.files.some((f) => f !== rel),
   );
-  if (crossFile.length === 0) allow();
-
-  const body = renderImpact(
-    { targets: crossFile, dynamicSites: impact.dynamicSites, built: true },
-    { file: rel },
-    { crossFileOnly: true, limit: 10 },
-  );
+  // 2026-09-12 — no early allow: the map is shown once per file even when it is
+  // empty. "0 callers, graph built" is a fact the agent must have seen; before
+  // this change it was indistinguishable from "hook never ran".
+  const body = targets.length
+    ? renderImpact({ targets, dynamicSites: impact.dynamicSites, built: true }, { file: rel }, { crossFileOnly: false, limit: 10 })
+    : `The call graph is BUILT and lists no static callers for the functions in ${rel}` +
+      (impact.dynamicSites ? ` (${impact.dynamicSites} dynamic call site(s) could not be resolved — check them by hand).` : ".");
+  const outcome = crossFile.length ? "impact_write_deny" : "impact_write_shown";
 
   try { harness.recordSessionRead?.(projectPath, sessionId, seenKey); } catch { /* best effort */ }
+  await denyWith(outcome,
+    crossFile.length ? `${crossFile.length} cross-file target(s): ${crossFile.map((t) => t.symbol).slice(0, 5).join(", ")}` : `0 cross-file targets; ${targets.length} target(s) in-file`,
+    `[zc-ctx] Before changing ${rel} — the caller map (mandatory before any edit):\n\n` + body +
+    `\n\nRe-issue the same edit to proceed; this shows once per file per session. ` +
+    `State the caller count in your MERGE note. Set ZC_IMPACT_ON_WRITE=0 to disable.`, telemetry);
 
-  // Telemetry: without this the write hook was invisible — an operator watching
-  // pretool_events_pg could not tell "never fires" from "fires and helps"
-  // (found 2026-08-04 observing a live run). Mirrors preread-dedup's emitter:
-  // awaited with a short timeout, failures loud on stderr, never blocks the deny.
+} catch (e) {
+  // A hook bug must never block an edit — but it must never be SILENT either:
+  // a swallowed error here is indistinguishable from "nothing depends on this"
+  // (2026-09-12: both test runs allowed with no output). stderr + telemetry.
+  process.stderr.write(`[zc-ctx prewrite-impact] error (allowing): ${String(e && e.stack || e).slice(0, 400)}\n`);
   try {
     const apiUrl = (process.env.ZC_API_URL ?? "").replace(/\/$/, "");
-    if (apiUrl) {
-      const resp = await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(process.env.ZC_API_KEY ? { Authorization: `Bearer ${process.env.ZC_API_KEY}` } : {}),
-        },
-        body: JSON.stringify({
-          projectPath, agentId: process.env.ZC_AGENT_ID || "default",
-          toolName: toolName, filePath: rawPath,
-          outcome: "impact_write_deny",
-          detail: `${crossFile.length} cross-file target(s): ${crossFile.map((t) => t.symbol).slice(0, 5).join(", ")}`,
-        }),
-        signal: AbortSignal.timeout(1500),
-      });
-      if (!resp.ok) process.stderr.write(`[zc-ctx telemetry] impact_write_deny REJECTED ${resp.status}\n`);
-    }
-  } catch (e) {
-    process.stderr.write(`[zc-ctx telemetry] impact_write_deny failed: ${String(e).slice(0, 160)}\n`);
-  }
-
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason:
-        `[zc-ctx] Before changing ${rel} — other files call this.\n\n` +
-        body +
-        `\n\nRe-issue the same edit to proceed; this fires once per file per session. ` +
-        `Check the callers above still hold. Set ZC_IMPACT_ON_WRITE=0 to disable.`,
-    },
-  }));
-  process.exit(0);
-} catch {
-  allow();   // a hook bug must never block an edit
+    if (apiUrl) await fetch(`${apiUrl}/api/v1/telemetry/pretool-event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(process.env.ZC_API_KEY ? { Authorization: `Bearer ${process.env.ZC_API_KEY}` } : {}) },
+      body: JSON.stringify({ projectPath, agentId: process.env.ZC_AGENT_ID || "default", toolName, filePath: rawPath, outcome: "error", detail: String(e).slice(0, 200) }),
+      signal: AbortSignal.timeout(1500),
+    });
+  } catch { /* telemetry is best effort */ }
+  allow();
 }

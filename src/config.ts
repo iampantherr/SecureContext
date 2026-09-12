@@ -230,6 +230,10 @@ export const Config = {
   PRETOOL_OUTCOMES: [
     "redirect", "block_unindexed", "block_dedup", "bypass_force_read",
     "bypass_partial_read", "pass_through", "pass_brief_exempt", "error",
+    // 2026-09-12 — prewrite-impact.mjs mandate outcomes: the caller map was SHOWN
+    // before a file's first edit (deny-once), or the graph was UNBUILT and the
+    // agent was told to index (deny-once per session).
+    "impact_write_shown", "impact_unbuilt_deny",
     // v0.55.x adaptive-suppression outcomes — emitted by preread-dedup.mjs since
     // v0.55.1 but never added here, so the API 400-rejected them and the events
     // silently vanished (found 2026-08-04 observing a live run). The emitter in

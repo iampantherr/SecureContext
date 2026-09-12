@@ -48,7 +48,7 @@ export function projectHash(projectPath) {
  */
 export function resolveProjectRoot(absPath, fallback) {
   try {
-    if (!/^([a-zA-Z]:[\/]|\/)/.test(absPath)) return fallback;
+    if (!/^([a-zA-Z]:[\/]|\/)/.test(absPath)) return fallback;   // 2026-09-12: accept C:\ paths (a Windows-native session fell back to cwd and asked the wrong project)
     let dir = resolve(absPath, "..");
     for (let i = 0; i < 40; i++) {
       if (existsSync(join(dir, ".git"))) return dir;

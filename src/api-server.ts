@@ -64,7 +64,13 @@ const ALLOWED_ORIGINS = (process.env["ZC_API_CORS_ORIGINS"] ?? "*").split(",").m
 // each make multiple API calls per minute (zc_broadcast, zc_recall_context, polling).
 // 100 req/min was too low: agents hitting 429 would silently skip zc_broadcast.
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX       = 500;
+// 2026-09-12 — configurable, and 10x for loopback: on the operator's machine every
+// agent, every hook invocation, the dispatcher's polls and the operator's own tools
+// share ONE address, and a background index run pushed the fleet over 500/min —
+// the orchestrator was "rate-limited out of the loop for ~3 minutes" mid-test.
+// Fairness between agents is the per-agent concurrency cap's job, not the IP's.
+const RATE_LIMIT_MAX       = Math.max(1, parseInt(process.env["ZC_RATE_LIMIT_MAX"] ?? "500", 10) || 500);
+const LOOPBACK_RE          = /^(::1|::ffff:127\.|127\.)/;
 const ipRateMap            = new Map<string, { count: number; resetAt: number }>();
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,7 +179,7 @@ function checkIpRate(ip: string): void {
     ipRateMap.set(ip, slot);
   }
   slot.count++;
-  if (slot.count > RATE_LIMIT_MAX) {
+  if (slot.count > (LOOPBACK_RE.test(ip) ? RATE_LIMIT_MAX * 10 : RATE_LIMIT_MAX)) {
     throw new ApiError(429, "Rate limit exceeded -- max 500 requests per minute per IP");
   }
   // Prune stale IPs periodically (every 1000 requests)
