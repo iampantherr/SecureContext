@@ -48,10 +48,14 @@ export function projectHash(projectPath) {
  */
 export function resolveProjectRoot(absPath, fallback) {
   try {
-    if (!/^([a-zA-Z]:[\/]|\/)/.test(absPath)) return fallback;   // 2026-09-12: accept C:\ paths (a Windows-native session fell back to cwd and asked the wrong project)
+    if (!/^([a-zA-Z]:[\\/]|\/)/.test(absPath)) return fallback;   // 2026-09-12: accept C:\ paths (a Windows-native session fell back to cwd and asked the wrong project)
     let dir = resolve(absPath, "..");
     for (let i = 0; i < 40; i++) {
-      if (existsSync(join(dir, ".git"))) return dir;
+      // 2026-09-12 — a project ROOT is the nearest ancestor with .git OR a project marker the
+      // launchers plant (CLAUDE.md, .a2a-acceptance.json). A project nested in a parent git
+      // repo with no .git of its own (Test_Agent_Coordination inside AI_projects) otherwise
+      // keys to the parent, and no hook finds its summaries or graph.
+      if ([".git", "CLAUDE.md", ".a2a-acceptance.json"].some((m) => existsSync(join(dir, m)))) return dir;
       const parent = resolve(dir, "..");
       if (parent === dir) break;
       dir = parent;

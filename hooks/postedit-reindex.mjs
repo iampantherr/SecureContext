@@ -21,6 +21,7 @@
  */
 
 import { readFileSync, statSync } from "node:fs";
+import { resolveProjectRoot } from "./_project-hash.mjs";
 import { resolve } from "node:path";
 
 let raw = "";
@@ -39,7 +40,9 @@ if (!path) process.exit(0);
 const sessionId   = input.session_id ?? input.sessionId ?? "default";
 // v0.64 — WSL agents: store keys use the WINDOWS project path (ZC_PROJECT_PATH),
 // file operations keep the LOCAL root (same split as prewrite-impact/preread-dedup).
-const localRoot   = input.cwd ?? process.cwd();
+// 2026-09-12 — the FILE's project root, not the session cwd: an operator session in
+// another directory editing this project indexed summaries under the wrong key.
+const localRoot   = resolveProjectRoot(path, input.cwd ?? process.cwd());
 const projectPath = process.env.ZC_PROJECT_PATH || localRoot;
 
 try {
@@ -52,7 +55,7 @@ try {
   const scBase = `file://${scPath.replace(/\\/g, "/")}`;
   const { summarizeFile } = await import(`${scBase}/summarizer.js`);
   const { indexContent }  = await import(`${scBase}/knowledge.js`);
-  const { clearSessionReadLog } = await import(`${scBase}/harness.js`);
+  const { clearSessionReadEntry, clearSessionReadLog } = await import(`${scBase}/harness.js`);
 
   const content = readFileSync(path, "utf8");
   // Relative path key (same scheme as indexProject)
@@ -64,7 +67,9 @@ try {
   indexContent(projectPath, content, source, "internal", "internal", sum.l0, sum.l1);
 
   // Edit clears the dedup entry — agent can Read the fresh version if needed
-  clearSessionReadLog(projectPath, sessionId);
+  // 2026-09-12 — only THIS file's dedup entry; the whole-session clear also wiped the
+  // write hook's once-per-file marks and it re-denied every next edit.
+  if (clearSessionReadEntry) clearSessionReadEntry(projectPath, sessionId, path); else clearSessionReadLog(projectPath, sessionId);
 } catch {
   // Silent — never break the agent on hook failure
 }

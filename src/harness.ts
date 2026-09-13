@@ -910,6 +910,21 @@ export function wasReadThisSession(
  * Wipe the session_read_log for a given session (called on SessionEnd /
  * next SessionStart). Prevents cross-session false positives.
  */
+/**
+ * 2026-09-12 — clear ONE path's dedup entry after an edit (the agent may Read the
+ * fresh file). postedit-reindex used clearSessionReadLog (the whole session), which
+ * also erased prewrite-impact's "caller map already shown" marks, so the write
+ * mandate re-denied every next edit in a session — observed as alternating denies.
+ */
+export function clearSessionReadEntry(projectPath: string, sessionId: string, path: string): void {
+  const db = openDb(projectPath);
+  try {
+    db.prepare(`DELETE FROM session_read_log WHERE session_id = ? AND path = ?`).run(sessionId, path);
+  } finally {
+    db.close();
+  }
+}
+
 export function clearSessionReadLog(projectPath: string, sessionId: string): void {
   const db = openDb(projectPath);
   try {
