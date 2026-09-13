@@ -22,7 +22,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { openDb } from "../knowledge.js";
 import { Config } from "../config.js";
@@ -70,6 +70,24 @@ const CALL_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py"];
  * ponytail: indexProject's walker is private to that function; duplicating ~12
  * lines here beats refactoring a working indexing path to export it.
  */
+/**
+ * 2026-09-12 — the directory to WALK for a project KEY. The store is keyed by the
+ * Windows path (ZC_PROJECT_PATH), but the process rebuilding the graph may be a
+ * WSL hook (sees /mnt/c/...) or the API container (sees neither). Walking a path
+ * that does not exist here silently yielded 0 files → 0 edges → "not built": the
+ * A2A fleet ran a whole phase with no call graph because every rebuild it
+ * triggered came from WSL. Try the /mnt form before giving up.
+ */
+export function fsRootFor(projectPath: string): string {
+  if (existsSync(projectPath)) return projectPath;
+  const m = /^([A-Za-z]):[\\/](.*)$/.exec(projectPath);
+  if (m) {
+    const mnt = `/mnt/${m[1].toLowerCase()}/${m[2].split("\\").join("/")}`;
+    if (existsSync(mnt)) return mnt;
+  }
+  return projectPath;
+}
+
 function listSourceFiles(root: string): string[] {
   const excludes = new Set<string>(Config.INDEX_PROJECT_EXCLUDES as string[]);
   const out: string[] = [];
@@ -109,11 +127,12 @@ export async function buildProjectCallGraph(
 
   const files: FileCalls[] = [];
   const pyPaths: string[] = [];
-  for (const abs of listSourceFiles(projectPath)) {
+  const fsRoot = fsRootFor(projectPath);   // 2026-09-12 — walk where the files ARE; key by projectPath
+  for (const abs of listSourceFiles(fsRoot)) {
     if (abs.endsWith(".py")) { pyPaths.push(abs); continue; }
     let content: string;
     try { content = readFileSync(abs, "utf8"); } catch { continue; }
-    const rel = relative(projectPath, abs).split("\\").join("/");
+    const rel = relative(fsRoot, abs).split("\\").join("/");
     const parsed = await extractFileCalls(content, rel);
     if (parsed) files.push(parsed);
   }
@@ -123,7 +142,7 @@ export async function buildProjectCallGraph(
   // edges; the TS side of the graph is unaffected either way.
   if (pyPaths.length > 0) {
     const { extractPythonBatch } = await import("./py_call_graph.js");
-    const rel = (abs: string) => relative(projectPath, abs).split("\\").join("/");
+    const rel = (abs: string) => relative(fsRoot, abs).split("\\").join("/");
     const py = extractPythonBatch(pyPaths, rel);
     files.push(...py.files);
   }
