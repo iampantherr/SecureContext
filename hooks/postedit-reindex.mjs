@@ -65,6 +65,15 @@ try {
   // Summarize (semantic if Ollama, truncation fallback otherwise)
   const sum = await summarizeFile(relPath, content);
   indexContent(projectPath, content, source, "internal", "internal", sum.l0, sum.l1);
+  // 2026-09-13 — the call-graph refresh indexContent schedules is a 5s UNREF'D debounce; this
+  // hook process exits long before it fires, so no per-edit rebuild ever ran (live probe: a new
+  // file was summarized, its edges never appeared). Await the flush here — same trap the
+  // bulk indexer already avoids.
+  try {
+    const { flushCallGraphRebuild } = await import(`${scBase}/indexing/call_edges.js`);
+    await flushCallGraphRebuild(projectPath);
+  } catch (e) { process.stderr.write(`[postedit-reindex] call-graph flush failed: ${String(e).slice(0, 200)}
+`); }
 
   // Edit clears the dedup entry — agent can Read the fresh version if needed
   // 2026-09-12 — only THIS file's dedup entry; the whole-session clear also wiped the
