@@ -1586,7 +1586,13 @@ export class PostgresStore implements Store {
     if (existing) clearTimeout(existing);
     const t = setTimeout(() => {
       PostgresStore._blTimers.delete(projectPath);
-      this.rebuildBacklinks(projectPath).catch(() => undefined);
+      // Live 2026-09-14 — this called rebuildBacklinks(), the EXPLICIT variant with
+      // force:true, so the ZC_GRAPH_MAX_NODES cap below never applied to the index
+      // path: every zc_index / summarize / tool_output capture on the A2A project
+      // (5,596 entries + 635 facts, 29 MB) ran the O(N²) co-reference scan 5s later
+      // and pinned one core for 3–4 min (five episodes in one day; embeds timed out
+      // under the contention). The auto path is the capped one; the tool stays forced.
+      this._rebuildBacklinksByHash(ph(projectPath)).catch(() => undefined);
     }, 5_000);
     if (typeof (t as { unref?: () => void }).unref === "function") (t as { unref: () => void }).unref();
     PostgresStore._blTimers.set(projectPath, t);
@@ -1640,6 +1646,7 @@ export class PostgresStore implements Store {
       }
       return { edges: 0, nodes: rows.length, topHub: null };
     }
+    const _t0 = Date.now();
     const typed = (await extractCoReferencesAsync(rows)).map((e) => ({
       from: e.from, to: e.to, relation: classifyRelation(e.from, e.to, e.matchKind), matchKind: e.matchKind, weight: e.weight,
     }));
@@ -1673,6 +1680,7 @@ export class PostgresStore implements Store {
          ON CONFLICT (project_hash, source) DO UPDATE SET
            in_degree = EXCLUDED.in_degree, weighted_in = EXCLUDED.weighted_in, computed_at = NOW()`, [projectHash]);
       await client.query("COMMIT");
+      console.log(`[backlinks] rebuilt ${projectHash}: rows=${rows.length} edges=${typed.length} in ${Date.now() - _t0}ms${opts.force ? " (forced)" : ""}`);
     } catch (e) {
       await client.query("ROLLBACK"); throw e;
     } finally {
